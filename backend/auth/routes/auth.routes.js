@@ -103,8 +103,11 @@ router.post("/login", (req, res, next) => {
     return;
   }
 
-  // Check the users collection if a user with the same email exists
+  // Check the users collection if a user with the same email exists.
+  // The password hash is hidden by default (select: false in the User model),
+  // so ask for it here, the only place that needs it.
   User.findOne({ email })
+    .select("+password")
     .then((foundUser) => {
       if (!foundUser) {
         // Same work and same answer as a wrong password
