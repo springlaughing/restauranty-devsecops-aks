@@ -33,6 +33,12 @@
   - [14. MongoDB password made URL-safe](#14-mongodb-password-made-url-safe)
   - [15. Kubernetes manifests, Gateway and HTTPS](#15-kubernetes-manifests-gateway-and-https)
   - [What was created in Part 4](#what-was-created-in-part-4)
+- [Part 5 — secrets from Key Vault, one identity per service](#part-5--secrets-from-key-vault-one-identity-per-service)
+  - [16. Before #8: one person copies every secret](#16-before-8-one-person-copies-every-secret)
+  - [17. What #8 introduces](#17-what-8-introduces)
+  - [18. Azure: one identity per workload](#18-azure-one-identity-per-workload)
+  - [19. Kubernetes: External Secrets and Reloader](#19-kubernetes-external-secrets-and-reloader)
+  - [What #8 creates](#what-8-creates)
 - [What is next](#what-is-next)
 
 ---
@@ -550,12 +556,174 @@ Done the same evening: a free Cloudinary account with its own API key named `res
 
 ---
 
+## Part 5 — secrets from Key Vault, one identity per service
+
+Goal: every secret reaches the cluster through External Secrets, and each service signs in to Key Vault as its **own** Azure identity that can read only its own secrets. Issue #8, branch `8-external-secrets`.
+
+### 16. Before #8: one person copies every secret
+
+**In one line:** after #7, the secrets were copied into the cluster by the setup script, running as me.
+
+**How it worked.** `scripts/setup-aks.sh` ran on my laptop, signed in to Azure as me. I have "Key Vault Secrets Officer" on the whole vault, so the script could read **every** secret. It read them all and wrote four Kubernetes Secrets, one per workload (`auth-secrets`, `discounts-secrets`, `items-secrets`, `mongodb-secrets`). Then it restarted all app pods, so they picked up the values.
+
+```
+Me (laptop, az login) ──reads ALL secrets──> Key Vault
+        │
+        └──kubectl create secret──> auth-secrets, discounts-secrets, items-secrets, mongodb-secrets
+```
+
+The split per workload was already right: `auth` was the only one with the private key, `items` the only one with the Cloudinary keys. But the split was only as good as the script.
+
+**What was wrong with that:**
+
+| Problem | Why it matters |
+| --- | --- |
+| One identity reads everything | The cluster had no Azure identity of its own. The separation between services existed only in my script, not in Azure. Nothing in Azure would stop a mistake in the script from giving `items` the private key. |
+| Everything depends on my login | Every deployment needs a person with full read rights on the vault. A pipeline (#12) would need the same broad rights. |
+| Changes do not arrive by themselves | A new value in Key Vault (for example a rotated password, #16) reaches the cluster only when someone runs the script again. |
+| Restarts every time | The script restarted all app pods on every run, even when no value had changed. |
+
+### 17. What #8 introduces
+
+**In one line:** each workload gets its own Azure identity, and a controller in the cluster (External Secrets) fetches each workload's secrets **as that workload**.
+
+```
+                                   Entra ID
+ ServiceAccount "items" ──token──>  "trust the cluster's token        ──Azure token──> Key Vault
+   (in the cluster)                  for restauranty:items only"                       "items may read these
+                                     (federated credential)                             5 secrets, nothing else"
+        ▲                                                                                     │
+        │ External Secrets does the sign-in on items' behalf                                 │
+        └──────────────── writes Secret items-secrets <───────────────────────────────────────┘
+                                   │
+                                   └── Reloader restarts items, only if a value changed
+```
+
+| | Before #8 | After #8 |
+| --- | --- | --- |
+| Who reads Key Vault | Me, with rights on the whole vault | Each workload, as its own identity |
+| What each one can read | Everything (only the script held back) | Only its own secrets: a role per single secret, enforced by Azure |
+| Passwords to get in | My `az login` | None: the cluster's own signed token is exchanged for an Azure token (Workload Identity) |
+| A changed value in Key Vault | Arrives when I run the script again | Arrives by itself within the hour (`refreshInterval: 1h`), or at once on request |
+| Pod restarts | Every script run | Only when a value really changed (Reloader) |
+| If Key Vault is down | Nothing changes until the next run | The last synced Secret stays; the app keeps running |
+
+**The proof the issue asks for:** `items` asks Key Vault for `auth`'s private key and is refused. Before #8 that test was impossible, because there was only one identity (mine).
+
+### 18. Azure: one identity per workload
+
+**Result:** applied (`Apply complete! Resources: 19 added, 0 changed, 0 destroyed`). Lives in `terraform/cluster-access/workload-identity.tf`. The role assignments took up to 30 seconds each: Azure checks every new role before it confirms it.
+
+Three kinds of Azure resources, per workload (`auth`, `discounts`, `items`, `mongodb`):
+
+| Resource | What it is | Count |
+| --- | --- | --- |
+| Managed identity `id-evgenia-restauranty-<name>` | The workload's Azure account. No password exists for it. | 4 |
+| Federated credential | The rule "accept the cluster's token for `system:serviceaccount:restauranty:<name>`". Any other ServiceAccount, namespace or cluster is refused. | 4 |
+| Role "Key Vault Secrets User" on **one secret** | Read that one secret's value. Not list, not change, not delete, and not any other secret. | 11 |
+
+**Who may read what** (`variable "workload_secrets"`):
+
+| Workload | Secrets |
+| --- | --- |
+| `auth` | `jwt-private-key`, `mongo-password` |
+| `discounts` | `jwt-public-key`, `mongo-password` |
+| `items` | `jwt-public-key`, `mongo-password`, `cloud-name`, `cloud-api-key`, `cloud-api-secret` |
+| `mongodb` | `mongo-root-password`, `mongo-password` |
+
+**Why the identities live in the persistent resource group.** Their client ids are written into the ServiceAccounts, so they should not change. A rebuilt cluster gets a new OIDC issuer (the address that signs its tokens), so on the next `terraform apply` only the 4 federated credentials are replaced. The identities and their roles stay.
+
+**Why no secret ever lands in Terraform state.** The role scope is written as a plain string, `<vault id>/secrets/<name>`. Terraform's `azurerm_key_vault_secret` data source would have been easier, but it copies the secret's **value** into the state file.
+
+```bash
+cd terraform/cluster-access
+terraform plan -out access.tfplan   # review: 19 to add
+terraform apply access.tfplan
+terraform output workload_client_ids   # 4 client ids, for the ServiceAccounts
+```
+
+### 19. Kubernetes: External Secrets and Reloader
+
+**Result:** deployed. All four ExternalSecrets synced on the first try, each signed in as its own identity. The hand-over from the old Secrets restarted no pod.
+
+**Two new tools**, installed by the setup script with Helm:
+
+| Tool | Job | Locked down how |
+| --- | --- | --- |
+| External Secrets Operator 2.14.0 | Fetches secrets from Key Vault and writes them as Kubernetes Secrets | Cluster-wide stores switched off: a `ClusterSecretStore` would let any namespace read through one shared identity. Writing back to Key Vault (`PushSecret`) switched off. |
+| Reloader 2.2.18 | Restarts a Deployment when its Secret changes | Only Deployments that ask for it; only the `restauranty` namespace (a Role there, no cluster-wide rights) |
+
+**Per workload, three objects** (in each workload's own file, e.g. `k8s/app/auth.yaml`):
+
+1. **ServiceAccount** with the annotation `azure.workload.identity/client-id`: "I stand for this Azure identity". The client id is not a secret: without the federated credential it opens nothing.
+2. **SecretStore**: "Key Vault, signed in as this ServiceAccount". One per workload, so no workload can use another one's sign-in.
+3. **ExternalSecret**: "fill the Secret `auth-secrets` with these keys". Same Secret names as before, so the Deployments' environment variables do not change.
+
+The three backends get the annotation `secret.reloader.stakater.com/reload: "<name>-secrets"`. MongoDB does not: it reads its passwords only on its very first start, so a restart would only cause downtime. Changing a MongoDB password is done inside MongoDB (#16).
+
+**What changes in `scripts/setup-aks.sh`:**
+
+| Before | After |
+| --- | --- |
+| Reads every secret and creates the four Secrets | Installs External Secrets and Reloader, then only checks that the secrets exist in Key Vault |
+| `kubectl rollout restart` on every run | No restart: Reloader handles it |
+| — | Waits until every ExternalSecret reports `Ready` |
+| — | One-time hand-over: deletes the four Secrets made by the old script, so External Secrets can create its own. Running pods keep their values; nothing restarts. |
+
+**Two things to know:**
+
+- **External Secrets is now a very trusted component.** Its controller may read and write every Secret in the cluster, including the HTTPS key in `gateway`. That is how it works, and cert-manager is the same. Both go into the threat model (#3).
+- **Not everything moves to External Secrets.** The HTTPS certificate backup (entry 15) still goes through the script, because it writes **to** Key Vault, and no workload identity is allowed to write.
+
+**Proof 1: the hand-over.** After `./scripts/setup-aks.sh`:
+
+| Check | Result |
+| --- | --- |
+| `kubectl get externalsecret -n restauranty` | `auth-secrets`, `discounts-secrets`, `items-secrets`, `mongodb-secrets`: all `SecretSynced`, `READY True` |
+| Who owns each Secret | `ExternalSecret/<name>`; each holds exactly its own keys (e.g. `auth-secrets`: `jwt-private-key`, `mongo-password`) |
+| Did a pod restart? | No: the ReplicaSets were still the ones from before #8 (54-64 minutes old) |
+| App | Sign-up `201`; items and coupons with a token `200` |
+
+**Proof 2: `items` cannot read `auth`'s secret.** The test is a file, so it can be replayed in the demo: `k8s/proof/items-asks-for-auth-secret.yaml`. It is an ExternalSecret that uses **items'** SecretStore and asks for `jwt-private-key`.
+
+```bash
+kubectl apply -f k8s/proof/items-asks-for-auth-secret.yaml
+kubectl get externalsecret proof-items-asks-for-private-key -n restauranty   # SecretSyncedError, READY False
+kubectl logs -n external-secrets deploy/external-secrets | grep proof-items   # Key Vault's answer
+kubectl delete -f k8s/proof/items-asks-for-auth-secret.yaml
+```
+
+Key Vault's answer, shortened:
+
+```
+Status=403 Code="Forbidden"  InnerError={"code":"ForbiddenByRbac"}
+Caller: appid=c4cca0e5-8a35-4900-b62a-c0f6ff45bcbe        <- items' identity
+Action: 'Microsoft.KeyVault/vaults/secrets/getSecret/action'
+Resource: .../vaults/kv-evgenia-restauranty/secrets/jwt-private-key
+Assignment: (not found)
+```
+
+Azure itself refuses, not a script: the caller is `items`' identity, and it has no role on that secret. No Secret was created in the cluster. Before #8 this test was not possible, because only one identity (mine) read Key Vault.
+
+### What #8 creates
+
+| Thing | Where | State |
+| --- | --- | --- |
+| 4 managed identities, 4 federated credentials, 11 single-secret roles | Azure, `terraform/cluster-access/workload-identity.tf` | Applied |
+| External Secrets and Reloader settings | `k8s/platform/external-secrets-values.yaml`, `reloader-values.yaml` | Deployed |
+| ServiceAccount annotation, SecretStore, ExternalSecret per workload | `k8s/app/auth.yaml`, `discounts.yaml`, `items.yaml`, `mongodb.yaml` | Deployed |
+| Reloader annotation on auth, discounts, items | the same files | Deployed |
+| Setup script: install both tools, no more copying or restarting | `scripts/setup-aks.sh` | Used |
+| Proof: `items` refused when it asks for `auth`'s secret | `k8s/proof/items-asks-for-auth-secret.yaml` | Done: `403 ForbiddenByRbac` |
+
+---
+
 ## What is next
 
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
-| Per-service identities, External Secrets, NetworkPolicies | #8, #11 |
+| NetworkPolicies + attacker-pod test | #11 |
 | Gateway block on the user list, login rate limit | #10 |
 | Pipeline with security gates | #12, #13 |
 | Monitoring, alerts, the attack demo | #14, #15 |
