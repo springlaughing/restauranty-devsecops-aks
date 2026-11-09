@@ -397,7 +397,7 @@ az keyvault secret set --vault-name kv-evgenia-restauranty -n mongo-password \
 
 ### 15. Kubernetes manifests, Gateway and HTTPS
 
-**Result:** the app runs on AKS at https://restauranty.aks.springlaughing.dev, behind the static IP, with a trusted Let's Encrypt certificate (staging first, production the same evening). Sign-up, login and token checks work end to end. Creating an item waits for the Cloudinary keys.
+**Result:** the app runs on AKS at https://restauranty.aks.springlaughing.dev, behind the static IP, with a trusted Let's Encrypt certificate (staging first, production the same evening). Sign-up, login, token checks and creating an item with an image all work end to end.
 
 **What runs where.**
 
@@ -488,6 +488,7 @@ curl -kI https://restauranty.aks.springlaughing.dev   # -k while the certificate
 | Sign up and log in | `POST /api/auth/signup`, `POST /api/auth/login` | `201`, then a token signed with `RS256` |
 | Token accepted | items, coupons, `/api/auth/verify` with the token | `200` each |
 | MongoDB users | MongoDB log on first start | `Created user 'restauranty' with readWrite on 'restauranty'` |
+| Create an item with an image | `POST /api/items/items` as a form with a PNG, with the token | `200`; the item's image URL is on `res.cloudinary.com` and loads (`200 image/png`); without a token `401` |
 
 **One stop on the way.** The first run stopped with `line 119: f: command not found`. The script file had been edited while it was running. Bash reads a script from disk bit by bit, so it resumed in the middle of a changed line. Everything before that point was already applied. The second run finished, and showed that the script is safe to repeat: unchanged things stay `unchanged`. Lesson: never edit a script while it runs.
 
@@ -524,6 +525,8 @@ done; unset V
 ./scripts/setup-aks.sh             # picks them up and restarts the pods
 ```
 
+Done the same evening: a free Cloudinary account with its own API key named `restauranty`, so it can be deleted after the course without touching anything else. The cloud name is not a secret (it is part of every image URL); the API secret is.
+
 ### What was created in Part 4
 
 | Thing | Where | State |
@@ -537,7 +540,8 @@ done; unset V
 | Storage class `managed-csi-zrs` | `k8s/platform/storageclass.yaml` | Deployed |
 | Gateway + HTTP→HTTPS redirect | `k8s/platform/gateway.yaml` | Deployed |
 | Let's Encrypt issuers (staging, production) + certificate (production since 9 Nov) | `k8s/platform/cluster-issuers.yaml`, `certificate.yaml` | Deployed |
-| `restauranty-tls-backup` (copy of the certificate Secret) | Key Vault, written by `scripts/setup-aks.sh` | After the next script run |
+| `cloud-name`, `cloud-api-key`, `cloud-api-secret` (own Cloudinary account and key) | Key Vault, set by hand with `read -s` | Done |
+| `restauranty-tls-backup` (copy of the certificate Secret) | Key Vault, written by `scripts/setup-aks.sh` | Done |
 | Helm values for NGINX Gateway Fabric and cert-manager | `k8s/platform/*-values.yaml` | Deployed |
 | MongoDB StatefulSet with two users | `k8s/app/mongodb.yaml` | Deployed |
 | auth, discounts, items, client + their ServiceAccounts and Services | `k8s/app/*.yaml` | Deployed |
@@ -551,7 +555,6 @@ done; unset V
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
-| Cloudinary keys, then create an item | #7 |
 | Per-service identities, External Secrets, NetworkPolicies | #8, #11 |
 | Gateway block on the user list, login rate limit | #10 |
 | Pipeline with security gates | #12, #13 |
