@@ -13,6 +13,9 @@ const User = require("../models/User.model.js");
 // Require necessary (isAuthenticated) middleware in order to control access to specific routes
 const { isAuthenticated } = require("../middleware/jwt.middleware.js");
 
+// RS256 private key and signing options (algorithm, expiry, issuer, audience)
+const { privateKey, signOptions } = require("../config/jwt");
+
 // How many rounds should bcrypt run the salt (default - 10 rounds)
 const saltRounds = 10;
 
@@ -110,11 +113,8 @@ router.post("/login", (req, res, next) => {
         // Create an object that will be set as the token payload
         const payload = { _id, email, name, surname, address, phoneNumber, role };
 
-        // Create a JSON Web Token and sign it
-        const authToken = jwt.sign(payload, process.env.SECRET, {
-          algorithm: "HS256",
-          expiresIn: "6h",
-        });
+        // Create a JSON Web Token and sign it with auth's private key (RS256)
+        const authToken = jwt.sign(payload, privateKey, signOptions);
 
         // Send the token as the response
         res.status(200).json({ authToken: authToken });
