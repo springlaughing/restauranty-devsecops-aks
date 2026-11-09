@@ -397,7 +397,7 @@ az keyvault secret set --vault-name kv-evgenia-restauranty -n mongo-password \
 
 ### 15. Kubernetes manifests, Gateway and HTTPS
 
-**Result:** the app runs on AKS at https://restauranty.aks.springlaughing.dev, behind the static IP, with a Let's Encrypt **staging** certificate. Sign-up, login and token checks work end to end. Creating an item waits for the Cloudinary keys.
+**Result:** the app runs on AKS at https://restauranty.aks.springlaughing.dev, behind the static IP, with a trusted Let's Encrypt certificate (staging first, production the same evening). Sign-up, login and token checks work end to end. Creating an item waits for the Cloudinary keys.
 
 **What runs where.**
 
@@ -491,6 +491,29 @@ curl -kI https://restauranty.aks.springlaughing.dev   # -k while the certificate
 
 **One stop on the way.** The first run stopped with `line 119: f: command not found`. The script file had been edited while it was running. Bash reads a script from disk bit by bit, so it resumed in the middle of a changed line. Everything before that point was already applied. The second run finished, and showed that the script is safe to repeat: unchanged things stay `unchanged`. Lesson: never edit a script while it runs.
 
+**Switched to the production certificate the same evening.** The staging certificate cannot be used in a browser here: `.dev` is on the browsers' **HSTS preload list**, so every browser forces HTTPS for it and refuses an untrusted certificate with no "accept the risk" button. The browser said "Verbindung nicht sicher" and offered no way through. So `certificate.yaml` now uses `letsencrypt-prod`. The new certificate was ready in under a minute: issuer `Let's Encrypt YE1`, valid until 7 February 2027, and `curl` works without `-k`.
+
+This is the same path as the vote app on AKS (staging first, then production). The difference is the plan to rebuild the cluster daily until the demo.
+
+**Backup of the certificate, so rebuilds do not use up the limit.** Let's Encrypt allows 5 production certificates per week for the same names. A rebuilt cluster has no certificate, so cert-manager would request a new one every time. The setup script now:
+
+1. saves the certificate Secret in Key Vault as `restauranty-tls-backup`, after it is ready, and again only when it changes (step 6);
+2. after a rebuild, puts it back **before** the Certificate is applied (step 3). cert-manager finds a valid certificate with the right names and issuer, and requests nothing.
+
+The backup keeps only what cert-manager checks: the certificate, the private key, and cert-manager's labels and annotations. An expired copy does no harm: cert-manager just renews it.
+
+**Trade-off:** the private key now has a second home, in Key Vault. Only the operator can read it there (Secrets Officer role), it is encrypted, and every read is logged. If it ever leaks, the answer is the same as before: revoke the certificate and issue a new one.
+
+**This backup is a workaround.** It solves a problem that exists only because the cluster is destroyed and rebuilt every day to save money. In a normal setup the cluster stays up, the certificate stays in it, and cert-manager renews it in place about every 60 days. Nothing needs a backup. Better options, and why they are not used this week:
+
+| Option | How it works | Why not now |
+| --- | --- | --- |
+| Stop the cluster instead of destroying it (`az aks stop`, `az aks start`) | The nodes are switched off, so no compute cost, but everything stays: the certificate, MongoDB's data, the Secrets | A good fit, and it would also keep MongoDB's data. It is a change of habit from the vote app's destroy and rebuild, so it is left as a next step. |
+| Key Vault as the home of the certificate | The certificate lives in Key Vault, and the cluster only gets a copy (Key Vault CSI driver or External Secrets, see #8) | The proper version of this backup. More setup than one script step. |
+| HTTPS ends outside the cluster | Azure Application Gateway or Front Door holds the certificate; the cluster gets the traffic after it | Costs more, and replaces the Gateway built here |
+
+**If the limit is hit anyway**, the site is down but the app keeps running: cert-manager's request is refused, the Certificate stays `READY False`, and the Gateway has no certificate to serve. Staging is no fallback, since browsers refuse it for `.dev`. The fastest way out is to change the set of names: the limit counts per exact set, so removing `grafana` from `certificate.yaml` (or adding a new name with its own DNS record) gives 5 fresh certificates within minutes. Otherwise, one slot comes back every 34 hours, or another free certificate authority (ZeroSSL, Google Trust Services) can be added as a second ClusterIssuer.
+
 **Cloudinary is needed to create items.** Item images are uploaded to Cloudinary, and the create route always expects an image (`backend/items/routes/items.routes.js` reads `req.file.path` with no check). Without Cloudinary keys, `items` starts and can list items, but creating one fails. Cloudinary is a separate company, so it is its own trust boundary: only `items` gets its keys. They go into Key Vault without passing through the shell history:
 
 ```bash
@@ -513,7 +536,8 @@ done; unset V
 | Namespaces `gateway`, `restauranty` (Pod Security enforced) | `k8s/platform/namespaces.yaml` | Deployed |
 | Storage class `managed-csi-zrs` | `k8s/platform/storageclass.yaml` | Deployed |
 | Gateway + HTTP→HTTPS redirect | `k8s/platform/gateway.yaml` | Deployed |
-| Let's Encrypt issuers (staging, production) + certificate | `k8s/platform/cluster-issuers.yaml`, `certificate.yaml` | Deployed |
+| Let's Encrypt issuers (staging, production) + certificate (production since 9 Nov) | `k8s/platform/cluster-issuers.yaml`, `certificate.yaml` | Deployed |
+| `restauranty-tls-backup` (copy of the certificate Secret) | Key Vault, written by `scripts/setup-aks.sh` | After the next script run |
 | Helm values for NGINX Gateway Fabric and cert-manager | `k8s/platform/*-values.yaml` | Deployed |
 | MongoDB StatefulSet with two users | `k8s/app/mongodb.yaml` | Deployed |
 | auth, discounts, items, client + their ServiceAccounts and Services | `k8s/app/*.yaml` | Deployed |
@@ -527,7 +551,7 @@ done; unset V
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
-| Cloudinary keys, then create an item; production certificate | #7 |
+| Cloudinary keys, then create an item | #7 |
 | Per-service identities, External Secrets, NetworkPolicies | #8, #11 |
 | Gateway block on the user list, login rate limit | #10 |
 | Pipeline with security gates | #12, #13 |
