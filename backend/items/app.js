@@ -31,14 +31,17 @@ app.get("/api/items", (req, res, next) => {
     res.json("Items Server UP!");
 });
 
+// Every data route below requires a valid login token (RS256, checked locally)
+const { isAuthenticated } = require("./middleware/jwt.middleware");
+
 const itemsRoutes = require("./routes/items.routes");
-app.use("/api/items/items", itemsRoutes);
+app.use("/api/items/items", isAuthenticated, itemsRoutes);
 
 const DietaryRoutes = require("./routes/dietary.routes");
-app.use("/api/items/dietary", DietaryRoutes);
+app.use("/api/items/dietary", isAuthenticated, DietaryRoutes);
 
 const OrdersRoutes = require("./routes/orders.routes");
-app.use("/api/items/orders", OrdersRoutes);
+app.use("/api/items/orders", isAuthenticated, OrdersRoutes);
 
 // Expose /metrics endpoint for Prometheus to scrape metrics
 app.get('/metrics', async (req, res) => {
