@@ -23,13 +23,13 @@ output "acr_name" {
   value       = azurerm_container_registry.main.name
 }
 
-output "ingress_public_ip" {
-  description = "The static IP the DNS A records point at."
-  value       = azurerm_public_ip.ingress.ip_address
+output "gateway_public_ip" {
+  description = "The static IP the DNS A records point at; the Gateway's load balancer claims it."
+  value       = azurerm_public_ip.gateway.ip_address
 }
 
-output "ingress_public_ip_resource_group" {
-  description = "Resource group of the IP, for the load balancer annotation on the cluster."
+output "gateway_public_ip_resource_group" {
+  description = "Resource group of the IP, for the Gateway load balancer annotation on the cluster."
   value       = azurerm_resource_group.persistent.name
 }
 

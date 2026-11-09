@@ -76,9 +76,9 @@ resource "azurerm_container_registry" "main" {
 # ---------------------------------------------------------------------------
 # Static public IP: the single address the domain points at. It stays the same
 # across cluster rebuilds, so the DNS records and the HTTPS certificate never
-# chase a new IP. The cluster's load balancer is told to use it (cluster layer).
+# chase a new IP. The Gateway's load balancer is told to use it (cluster layer).
 # ---------------------------------------------------------------------------
-resource "azurerm_public_ip" "ingress" {
+resource "azurerm_public_ip" "gateway" {
   name                = "pip-${local.name_suffix}"
   resource_group_name = azurerm_resource_group.persistent.name
   location            = azurerm_resource_group.persistent.location
