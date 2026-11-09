@@ -5,38 +5,35 @@ const Dietary = require('../models/dietary.model')
 
 const fileUploader = require('../config/cloudinary.config')
 
-router.get("/", (req, res) => {
+router.get("/", (req, res, next) => {
 
     Dietary.find().then(dietary => {
         res.json(dietary)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.get("/:id", (req, res) => {
+router.get("/:id", (req, res, next) => {
 
     const id = req.params.id
 
     Dietary.findById(id).then(dietary => {
         res.json(dietary)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.post("/", fileUploader.single("imagem"), (req, res) => {
+router.post("/", fileUploader.single("imagem"), (req, res, next) => {
 
     const dietary = req.body
 
-    console.log(dietary)
-    console.log(5)
 
     Dietary.create(dietary)
         .then(newDietary => {
-            console.log(newDietary)
             let id = newDietary._id;
             return Dietary.findByIdAndUpdate(
                 id,
@@ -46,23 +43,23 @@ router.post("/", fileUploader.single("imagem"), (req, res) => {
             res.json(updatedItem);
         })
         .catch(err => {
-            res.status(400).json(err);
+            next(err);
         });
 
 })
 
-router.put("/:id", (req, res) => {
+router.put("/:id", (req, res, next) => {
 
     const dietary = req.body
 
     Dietary.findByIdAndUpdate(dietary._id, dietary, { new: true }).then(newDietary => {
         res.json(newDietary)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 })
 
-router.delete("/:id", (req, res) => {
+router.delete("/:id", (req, res, next) => {
 
     const id = req.params.id
 
@@ -72,7 +69,7 @@ router.delete("/:id", (req, res) => {
             dietaryDeleted
         })
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })

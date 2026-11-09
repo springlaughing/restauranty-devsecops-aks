@@ -9,9 +9,12 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true
   },  
+  // Never loaded unless a query asks for it with .select('+password')
+  // (only login does), so no route can return the hash by accident.
   password: {
     type: String,
-    required: true
+    required: true,
+    select: false
   },
   orderHistory: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -35,6 +38,15 @@ const userSchema = new mongoose.Schema({
   phoneNumber: {
     type: String,
     required: true
+  }
+}, {
+  // Second layer: even a document that was loaded with the password
+  // (or a future query that forgets) never serializes it into a response.
+  toJSON: {
+    transform: (doc, ret) => {
+      delete ret.password;
+      return ret;
+    }
   }
 });
 

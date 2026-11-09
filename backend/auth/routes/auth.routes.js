@@ -13,8 +13,20 @@ const User = require("../models/User.model.js");
 // Require necessary (isAuthenticated) middleware in order to control access to specific routes
 const { isAuthenticated } = require("../middleware/jwt.middleware.js");
 
+// RS256 private key and signing options (algorithm, expiry, issuer, audience)
+const { privateKey, signOptions } = require("../config/jwt");
+
 // How many rounds should bcrypt run the salt (default - 10 rounds)
 const saltRounds = 10;
+
+// One answer for every failed login, so it never tells whether an email
+// has an account.
+const LOGIN_FAILED = "Email or Password Incorrect";
+
+// A bcrypt hash that matches no real password. When the email is unknown,
+// login still compares against it, so that answer takes as long as a wrong
+// password: the response time does not reveal which emails exist either.
+const DUMMY_HASH = bcrypt.hashSync("no-account-has-this-password", saltRounds);
 
 // POST /auth/signup  - Creates a new user in the database
 router.post("/signup", (req, res, next) => {
@@ -85,18 +97,22 @@ router.post("/signup", (req, res, next) => {
 router.post("/login", (req, res, next) => {
   const { email, password } = req.body;
 
-  // Check if email or password are provided as empty string
-  if (email === "" || password === "") {
+  // Check that email and password are given and not empty
+  if (!email || !password) {
     res.status(400).json({ message: "Provide email and password." });
     return;
   }
 
-  // Check the users collection if a user with the same email exists
+  // Check the users collection if a user with the same email exists.
+  // The password hash is hidden by default (select: false in the User model),
+  // so ask for it here, the only place that needs it.
   User.findOne({ email })
+    .select("+password")
     .then((foundUser) => {
       if (!foundUser) {
-        // If the user is not found, send an error response
-        res.status(401).json({ message: "User not found." });
+        // Same work and same answer as a wrong password
+        bcrypt.compareSync(password, DUMMY_HASH);
+        res.status(401).json({ message: LOGIN_FAILED });
         return;
       }
 
@@ -110,16 +126,13 @@ router.post("/login", (req, res, next) => {
         // Create an object that will be set as the token payload
         const payload = { _id, email, name, surname, address, phoneNumber, role };
 
-        // Create a JSON Web Token and sign it
-        const authToken = jwt.sign(payload, process.env.SECRET, {
-          algorithm: "HS256",
-          expiresIn: "6h",
-        });
+        // Create a JSON Web Token and sign it with auth's private key (RS256)
+        const authToken = jwt.sign(payload, privateKey, signOptions);
 
         // Send the token as the response
         res.status(200).json({ authToken: authToken });
       } else {
-        res.status(401).json({ message: "Email or Password Incorrect" });
+        res.status(401).json({ message: LOGIN_FAILED });
       }
     })
     .catch((err) => next(err)); // In this case, we send error handling to the error handling middleware.
@@ -128,8 +141,8 @@ router.post("/login", (req, res, next) => {
 // GET  /auth/verify  -  Used to verify JWT stored on the client
 router.get("/verify", isAuthenticated, (req, res, next) => {
   // If JWT token is valid the payload gets decoded by the
-  // isAuthenticated middleware and is made available on `req.payload`
-  console.log(`req.payload`, req.payload);
+  // isAuthenticated middleware and is made available on `req.payload`.
+  // Not logged: it contains personal data (email, address, phone).
 
   // Send back the token payload object containing the user data
   res.status(200).json(req.payload);

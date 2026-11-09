@@ -6,29 +6,29 @@ const Item = require('../models/Item.model')
 
 const fileUploader = require('../config/cloudinary.config')
 
-router.get("/", (req, res) => {
+router.get("/", (req, res, next) => {
 
     Item.find().then(items => {
         res.json(items)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.get("/:id", (req, res) => {
+router.get("/:id", (req, res, next) => {
 
     const id = req.params.id
 
     Item.findById(id).then(items => {
         res.json(items)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.post("/", fileUploader.single("imagem"), (req, res) => {
+router.post("/", fileUploader.single("imagem"), (req, res, next) => {
 
     const item = req.body
 
@@ -46,12 +46,12 @@ router.post("/", fileUploader.single("imagem"), (req, res) => {
             res.json(updatedItem);
         })
         .catch(err => {
-            res.status(400).json(err);
+            next(err);
         });
 
 })
 
-router.put("/:id", fileUploader.single("imagem"), (req, res) => {
+router.put("/:id", fileUploader.single("imagem"), (req, res, next) => {
     const itemId = req.params.id;
     const item = req.body;
 
@@ -66,13 +66,13 @@ router.put("/:id", fileUploader.single("imagem"), (req, res) => {
             res.json(updatedItem);
         })
         .catch(err => {
-            res.status(400).json(err);
+            next(err);
         });
 });
 
 
 
-router.delete("/:id", (req, res) => {
+router.delete("/:id", (req, res, next) => {
 
     const id = req.params.id
 
@@ -82,7 +82,7 @@ router.delete("/:id", (req, res) => {
             itemDeleted
         })
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })

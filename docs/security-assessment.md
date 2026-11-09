@@ -4,7 +4,7 @@
 
 **How to read it.** Every step starts with its result in one line. The details come after. You can read any step on its own.
 
-**Status:** all 9 steps done (9 November 2026). Fixes follow in the issues linked in [step 9](#step-9-report).
+**Status:** all 9 steps done (9 November 2026). The decision for each finding is in [step 9](#step-9-report); results after the fixes are in [Retests](#retests).
 
 ---
 
@@ -51,7 +51,9 @@
 - [Step 7: Errors, logs, overload](#step-7-errors-logs-overload)
 - [Step 8: Tools](#step-8-tools)
 - [Step 9: Report](#step-9-report)
-- [Findings](#findings)
+  - [Findings](#findings)
+  - [Decisions](#decisions)
+- [Retests](#retests)
 
 ---
 
@@ -1211,7 +1213,38 @@ In test 3f I wrote that the Cloudinary values in the old `.env` were placeholder
 
 ## Step 9: Report
 
-**Result:** every finding has a decision: fix it, contain it, accept it for now, or report it to its owner. Rule used: fix when the file is being changed anyway and it takes little time; accept when other planned fixes already reduce the risk. The summary is at the [top of this document](#summary); all findings with their proof are in the [findings table](#findings).
+**Result:** 20 findings, each with a decision: fix it, contain it, accept it for now, or report it to its owner. First the findings with their proof, then the decisions.
+
+### Findings
+
+A finding is a suspicion that a real request has proved. Each one links to the step with the proof.
+
+| ID | Finding | Severity | OWASP 2025 | Proof |
+| --- | --- | --- | --- | --- |
+| F1 | Every new account gets the `admin` role. Anyone who signs up can manage the whole restaurant. | High | A01 Broken Access Control | [Step 2](#step-2-normal-use) |
+| F2 | The login token contains personal data (email, address, phone). A token is only encoded, not encrypted: anyone holding it can read it. | Medium | A04 Cryptographic Failures, GDPR | [Step 2](#step-2-normal-use) |
+| F3 | The server writes personal data (address, phone) into its log on every page load. | Medium | A09 Security Logging and Alerting Failures, GDPR | [Step 2](#step-2-normal-use) |
+| F4 | Login reveals which emails have an account: by the message, the size, and the time of the answer. Signup reveals it too. | Medium | A07 Authentication Failures | [Test 3a](#test-3a-does-login-reveal-which-emails-exist) |
+| F5 | Weak passwords are accepted: `Password1`, `Qwerty123`, `Restauranty1`. | Medium | A07 Authentication Failures | [Test 3b](#test-3b-how-weak-can-a-password-be) |
+| F6 | No limit on login attempts: about 10 guesses per second, no blocking, no slowdown. | High | A07 Authentication Failures | [Test 3c](#test-3c-can-i-guess-passwords-without-limit) |
+| F7 | Logout does not end the session: a copied token works for its full 6 hours after logout. | Medium | A07 Authentication Failures | [Test 3d](#test-3d-does-logout-really-log-you-out) |
+| F8 | A missing, broken or tampered token is answered with "500 server error" instead of "401 not allowed", with 11 to 17 log lines each. Attacks look like outages. | Medium | A10 Mishandling of Exceptional Conditions | [Test 3e](#test-3e-can-i-change-the-token-myself), [Test 7a](#test-7a-what-happens-with-no-token-or-a-broken-one) |
+| F9 | The server signs and checks tokens with one secret (HS256), and runs with `MySecret1!`, the value published in `.env.example` and the README. With it, anyone can make an admin token for any user, even one that does not exist. The app never complains about the default. | High | A02 Security Misconfiguration, A04 Cryptographic Failures | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
+| F10 | Real config files (`.env`) were committed in April 2025 and are still in the git history, including a MongoDB username and password (for `localhost`). | Low | A02 Security Misconfiguration | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
+| F11 | Anyone can list all users, or look up one user by ID, without logging in: password hashes, emails, addresses, phones, roles. Offline, 4 of 5 test passwords were recovered from the hashes in 3.4 seconds. | High | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read), [Test 5b](#test-5b-does-looking-up-one-user-leak-the-hash) |
+| F12 | Anyone can read all items, dietary categories, orders, coupons and campaigns without logging in. | Medium | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read) |
+| F13 | Anyone can create, change and delete coupons, campaigns, items, dietary categories and orders without logging in. None of these routes checks a token (step 1); proved with a request by creating a 100% coupon valid until 2099. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
+| F14 | Anyone can delete any user without logging in. The answer also returns the deleted user's password hash and personal data. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
+| F15 | Logged-in users also get every user's password hash. Since anyone can sign up, a token check would not help; a Gateway block only hides the route, the auth service still sends the hashes. | High | A01 Broken Access Control | [Test 5a](#test-5a-does-a-logged-in-user-also-get-other-users-hashes) |
+| F16 | Coupons accept any discount (-50, 1000, "lots") and an end date before the start date. The discount is stored as free text and never checked. | Medium | A06 Insecure Design | [Test 6a](#test-6a-does-the-app-check-what-a-discount-can-be) |
+| F17 | Error answers contain the raw database error: MongoDB, Mongoose, model names, field names and rules. The same line sends them in 32 places. | Low | A10 Mishandling of Exceptional Conditions | [Test 7b](#test-7b-what-do-errors-tell-an-attacker) |
+| F18 | Request metrics are labelled with the full URL. 200 junk requests created 201 new counters: an attacker can overload Prometheus and blind the monitoring. | Medium | A06 Insecure Design | [Test 7c](#test-7c-can-junk-requests-fill-up-the-monitoring) |
+| F19 | Outdated packages: the frontend has 36 known issues, mostly in build tools (0 critical), and `react-router` needs a major upgrade. The backends' issues are only in the development tool `nodemon`. | Low | A03 Software Supply Chain Failures | [Test 8a](#test-8a-npm-audit-known-vulnerable-packages) |
+| F20 | Cloudinary credentials (API key and secret) were written into the code in the first commit (April 2025). Removed in June 2025, but still in the public git history. They look real. Not tried; the owner should rotate them. | High | A07 Authentication Failures | [Test 8c](#test-8c-gitleaks-secrets-in-the-git-history) |
+
+### Decisions
+
+**Rule used:** fix when the file is being changed anyway and it takes little time; accept when other planned fixes already reduce the risk.
 
 **Kinds of decision**
 
@@ -1250,33 +1283,76 @@ Issue numbers link to GitHub.
 | F19 | Outdated packages | Low | Fix: images without development tools, frontend served as static files; npm audit and Trivy in the pipeline | [#5](https://github.com/springlaughing/restauranty-devsecops-aks/issues/5), [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 | F20 | Cloudinary keys in the git history | High | Report: tell the owner to rotate them. gitleaks on every push. | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 
-**Retest.** After the fixes, the same tests run again against the app on AKS. Each fixed finding gets its "after" proof, and the most important tests become automatic checks in the pipeline ([#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13)).
+**After the fixes:** each fix is tested again with the same attacks. The results are in [Retests](#retests), at the end of this document.
 
 ---
 
-## Findings
+## Retests
 
-A finding is a suspicion that a real request has proved. Each one links to the step with the proof.
+**What this is.** After each fix, the same tests run again. Each fixed finding gets its "after" proof. There are two rounds:
 
-| ID | Finding | Severity | OWASP 2025 | Proof |
-| --- | --- | --- | --- | --- |
-| F1 | Every new account gets the `admin` role. Anyone who signs up can manage the whole restaurant. | High | A01 Broken Access Control | [Step 2](#step-2-normal-use) |
-| F2 | The login token contains personal data (email, address, phone). A token is only encoded, not encrypted: anyone holding it can read it. | Medium | A04 Cryptographic Failures, GDPR | [Step 2](#step-2-normal-use) |
-| F3 | The server writes personal data (address, phone) into its log on every page load. | Medium | A09 Security Logging and Alerting Failures, GDPR | [Step 2](#step-2-normal-use) |
-| F4 | Login reveals which emails have an account: by the message, the size, and the time of the answer. Signup reveals it too. | Medium | A07 Authentication Failures | [Test 3a](#test-3a-does-login-reveal-which-emails-exist) |
-| F5 | Weak passwords are accepted: `Password1`, `Qwerty123`, `Restauranty1`. | Medium | A07 Authentication Failures | [Test 3b](#test-3b-how-weak-can-a-password-be) |
-| F6 | No limit on login attempts: about 10 guesses per second, no blocking, no slowdown. | High | A07 Authentication Failures | [Test 3c](#test-3c-can-i-guess-passwords-without-limit) |
-| F7 | Logout does not end the session: a copied token works for its full 6 hours after logout. | Medium | A07 Authentication Failures | [Test 3d](#test-3d-does-logout-really-log-you-out) |
-| F8 | A missing, broken or tampered token is answered with "500 server error" instead of "401 not allowed", with 11 to 17 log lines each. Attacks look like outages. | Medium | A10 Mishandling of Exceptional Conditions | [Test 3e](#test-3e-can-i-change-the-token-myself), [Test 7a](#test-7a-what-happens-with-no-token-or-a-broken-one) |
-| F9 | The server signs and checks tokens with one secret (HS256), and runs with `MySecret1!`, the value published in `.env.example` and the README. With it, anyone can make an admin token for any user, even one that does not exist. The app never complains about the default. | High | A02 Security Misconfiguration, A04 Cryptographic Failures | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
-| F10 | Real config files (`.env`) were committed in April 2025 and are still in the git history, including a MongoDB username and password (for `localhost`). | Low | A02 Security Misconfiguration | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
-| F11 | Anyone can list all users, or look up one user by ID, without logging in: password hashes, emails, addresses, phones, roles. Offline, 4 of 5 test passwords were recovered from the hashes in 3.4 seconds. | High | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read), [Test 5b](#test-5b-does-looking-up-one-user-leak-the-hash) |
-| F12 | Anyone can read all items, dietary categories, orders, coupons and campaigns without logging in. | Medium | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read) |
-| F13 | Anyone can create, change and delete coupons, campaigns, items, dietary categories and orders without logging in. None of these routes checks a token (step 1); proved with a request by creating a 100% coupon valid until 2099. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
-| F14 | Anyone can delete any user without logging in. The answer also returns the deleted user's password hash and personal data. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
-| F15 | Logged-in users also get every user's password hash. Since anyone can sign up, a token check would not help; a Gateway block only hides the route, the auth service still sends the hashes. | High | A01 Broken Access Control | [Test 5a](#test-5a-does-a-logged-in-user-also-get-other-users-hashes) |
-| F16 | Coupons accept any discount (-50, 1000, "lots") and an end date before the start date. The discount is stored as free text and never checked. | Medium | A06 Insecure Design | [Test 6a](#test-6a-does-the-app-check-what-a-discount-can-be) |
-| F17 | Error answers contain the raw database error: MongoDB, Mongoose, model names, field names and rules. The same line sends them in 32 places. | Low | A10 Mishandling of Exceptional Conditions | [Test 7b](#test-7b-what-do-errors-tell-an-attacker) |
-| F18 | Request metrics are labelled with the full URL. 200 junk requests created 201 new counters: an attacker can overload Prometheus and blind the monitoring. | Medium | A06 Insecure Design | [Test 7c](#test-7c-can-junk-requests-fill-up-the-monitoring) |
-| F19 | Outdated packages: the frontend has 36 known issues, mostly in build tools (0 critical), and `react-router` needs a major upgrade. The backends' issues are only in the development tool `nodemon`. | Low | A03 Software Supply Chain Failures | [Test 8a](#test-8a-npm-audit-known-vulnerable-packages) |
-| F20 | Cloudinary credentials (API key and secret) were written into the code in the first commit (April 2025). Removed in June 2025, but still in the public git history. They look real. Not tried; the owner should rotate them. | High | A07 Authentication Failures | [Test 8c](#test-8c-gitleaks-secrets-in-the-git-history) |
+| Round | Where | What it proves |
+| --- | --- | --- |
+| Local | On my laptop, through HAProxy | That the code fixes work. Fast, so mistakes are found early. |
+| On AKS | The real deployment on my domain | That the fixes are really deployed, and the protections that exist only there: the Gateway block, the rate limit, Key Vault, NetworkPolicies. |
+
+The most important tests then become automatic checks in the pipeline ([#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13)), so they run after every deploy.
+
+### Retest 1: code fixes for #4 and #21, local (9 November 2026)
+
+**Result:** all six code fixes work. The same attacks as in the tests above now fail, and a real login still works.
+
+**What I did:** fixed the code on branch `4-rs256-signing` (one commit per fix), restarted the three backends with an RS256 key pair, and ran the attacks again through HAProxy.
+
+```bash
+B=http://localhost; J='Content-Type: application/json'
+
+# F9: forged admin token, signed HS256 with the old public secret
+FORGED=$(cd backend/auth && node -e '
+  console.log(require("jsonwebtoken").sign({ _id: "000000000000000000000000", role: "admin" },
+  "MySecret1!", { algorithm: "HS256", expiresIn: "1h" }))')
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/auth/verify -H "Authorization: Bearer $FORGED"
+
+# F8: no token, garbage token
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/auth/verify
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/auth/verify -H 'Authorization: Bearer not.a.token'
+
+# F4: unknown email, then known email with a wrong password
+curl -s -X POST $B/api/auth/login -H "$J" -d '{"email":"nobody@example.com","password":"Whatever1"}'
+curl -s -X POST $B/api/auth/login -H "$J" -d '{"email":"gordon@example.com","password":"Whatever1"}'
+
+# F11, F15: the user list
+curl -s $B/api/auth/users | jq -c '.[0:2][] | {email, password}'
+
+# F17: an invalid id
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/items/items/hello
+
+# A real login
+curl -s -X POST $B/api/auth/login -H "$J" -d '{"email":"gordon@example.com","password":"RawChicken1"}' | cut -c1-40
+```
+
+```text
+{"message":"Invalid or missing token"}  [HTTP 401]
+{"message":"Invalid or missing token"}  [HTTP 401]
+{"message":"Invalid or missing token"}  [HTTP 401]
+{"message":"Email or Password Incorrect"}
+{"message":"Email or Password Incorrect"}
+{"email":"gordon@example.com","password":null}
+{"email":"weak-Password1@example.com","password":null}
+{"message":"Invalid id"}  [HTTP 400]
+{"authToken":"eyJhbGci...   (token shortened in this document)
+```
+
+(`jq` prints `null` for a field that does not exist: the answers have no `password` field at all.)
+
+| Finding | Before | After |
+| --- | --- | --- |
+| F9 Forged admin token | 200, accepted | **401** |
+| F8 No token, garbage token | 500, 500 | **401, 401** |
+| F4 Unknown email vs wrong password | Two different messages; 20 ms vs 86 ms | **Same message**; times overlap (149 to 377 ms vs 156 to 359 ms, 10 alternating requests each) |
+| F11, F14, F15 Password hashes in answers | In the list, one user, and the delete answer | **In none** (0 of 7 users) |
+| F17 Raw database errors | `CastError` with the model name `Item` | **`{"message":"Invalid id"}`**; details only in the log |
+| F3 Personal data in the log | `req.payload { ... address ... }` on every page load | **Not logged** |
+| Real login | Works | **Still works.** The token header now says `"alg":"RS256"`. |
+
+**Still open, as planned:** the user list and all other routes still answer strangers (now without hashes). Token checks in discounts and items come with [#9](https://github.com/springlaughing/restauranty-devsecops-aks/issues/9); the Gateway block and the login rate limit come on AKS with [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10).

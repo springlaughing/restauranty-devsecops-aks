@@ -1,9 +1,12 @@
 const { expressjwt: jwt } = require("express-jwt");
+const { publicKey, verifyOptions } = require("../config/jwt");
 
-// Instantiate the JWT token validation middleware
+// Instantiate the JWT token validation middleware.
+// Only RS256 tokens signed by auth's private key, with the expected issuer
+// and audience, are accepted. Anything else is an UnauthorizedError (401).
 const isAuthenticated = jwt({
-  secret: process.env.SECRET,
-  algorithms: ["HS256"],
+  secret: publicKey,
+  ...verifyOptions,
   requestProperty: "payload",
   getToken: getTokenFromHeaders,
 });

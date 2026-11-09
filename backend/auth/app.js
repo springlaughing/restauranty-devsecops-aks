@@ -2,6 +2,9 @@
 // https://www.npmjs.com/package/dotenv
 require("dotenv").config();
 
+// Loads the JWT keys now, so a missing key stops the service at startup
+require("./config/jwt");
+
 // ℹ️ Connects to the database
 require("./db");
 
