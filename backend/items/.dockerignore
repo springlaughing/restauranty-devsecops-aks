@@ -1,0 +1,12 @@
+# Keep secrets, local state and junk out of the image
+node_modules
+npm-debug.log*
+.env
+.env.*
+!.env.example
+*.pem
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
