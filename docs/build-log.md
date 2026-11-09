@@ -26,6 +26,7 @@
 - [Part 3 — container images](#part-3--container-images)
   - [11. Hardened Dockerfiles for all four components](#11-hardened-dockerfiles-for-all-four-components)
   - [What is Trivy, and why we scan](#what-is-trivy-and-why-we-scan)
+  - [The software supply chain](#the-software-supply-chain)
 - [What is next](#what-is-next)
 
 ---
@@ -275,6 +276,39 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
 | client | 3 critical, 62 high (in the base OS) | **0** (OS packages upgraded) |
 
 Trivy is one of three tools in this project, each for a different job: Trivy for vulnerable packages in images, Semgrep for risky code patterns, gitleaks for secrets in git history (see the [security assessment](security-assessment.md), step 8).
+
+### The software supply chain
+
+**In one line:** the path a piece of software travels from source code to running in the cluster, and being able to trust every step of it.
+
+**The official names.** This has real terms, used across the industry:
+
+| Term | What it means |
+| --- | --- |
+| **Software supply chain** | The whole path from code to a running program: the source, the libraries it pulls in, the build, the image, the registry, the cluster. |
+| **Software supply chain security** | Making every step of that path trustworthy and checked. |
+| **Provenance** | A record of how an artifact was built and from which exact code, so its origin can be proven. |
+| **SBOM** (Software Bill of Materials) | A list of everything inside an image: every library and its version. Like an ingredients list on food. |
+| **SLSA** (said "salsa") | A public framework from the OpenSSF that grades how trustworthy a build is, in levels. |
+| **A03 Software Supply Chain Failures** | The matching category in the OWASP Top 10 2025. Findings F10, F19 and F20 sit here. |
+
+**Why it matters.** Most attacks no longer break in through the running app. They slip something bad in earlier: a poisoned library, a tampered image, a secret left in git. If each step is checked and traceable, a bad artifact is caught before it runs, and when something does go wrong, it can be traced back to where it came from.
+
+**Our chain, link by link.** For the image tag `client:bfb0e27`:
+
+| Step | What it is | What makes it trusted or traceable |
+| --- | --- | --- |
+| Source | Commit `bfb0e27` on `main` | Reached only through pull requests; gitleaks will scan every push for secrets (#13) |
+| Dependencies | The libraries in `package-lock.json` | Exact versions pinned; `npm audit` checks them (#13) |
+| Build | The hardened Dockerfile | Non-root, no dev tools, minimal base |
+| Scan | Trivy on the built image | 0 high or critical; the pipeline blocks on critical (#13) |
+| Name | The tag `bfb0e27` | The commit SHA, so the image points back to exact code |
+| Store | The private registry | Reached only with short-lived identity tokens, no stored password |
+| Run | The AKS cluster (next) | Only images from this registry; the kubelet identity needs AcrPull |
+
+Every link names where the code came from, what went into it, and who may touch it. That end-to-end trust is what "software supply chain security" means.
+
+**What a stricter setup would add** (next steps, not this week): **signing** each image so the cluster only runs images signed by the pipeline (for example with cosign), an **SBOM** stored next to each image, and **verified provenance** that proves the image was built by the pipeline from that commit. These raise the SLSA level.
 
 ---
 
