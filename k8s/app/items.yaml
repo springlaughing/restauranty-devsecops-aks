@@ -7,14 +7,71 @@
 #   - read-only root filesystem: an attacker cannot drop files into the image
 #   - CPU/memory requests and a memory limit
 # Secrets come from the Secret items-secrets, which holds only what this
-# service needs (created from Key Vault by scripts/setup-aks.sh; External
-# Secrets with one Azure identity per service replaces that in #8).
+# service needs. External Secrets fills it from Key Vault, signed in as this
+# service's own Azure identity (SecretStore and ExternalSecret below).
+# Reloader restarts the pods when a value in it changes.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: items
   namespace: restauranty
-automountServiceAccountToken: false
+  annotations:
+    # The Azure identity this ServiceAccount stands for (terraform/cluster-access,
+    # output workload_client_ids). Not a secret: without the federated
+    # credential in Azure, the id alone opens nothing.
+    azure.workload.identity/client-id: c4cca0e5-8a35-4900-b62a-c0f6ff45bcbe
+automountServiceAccountToken: false   # the pod never talks to the Kubernetes API
+---
+# Where items's secrets come from: Key Vault, signed in as items's own
+# Azure identity. External Secrets asks Kubernetes for a short-lived token of
+# the "items" ServiceAccount and trades it at Entra ID for an Azure token.
+# That identity may read only the secrets listed below (role per secret).
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: items
+  namespace: restauranty
+spec:
+  provider:
+    azurekv:
+      authType: WorkloadIdentity
+      vaultUrl: https://kv-evgenia-restauranty.vault.azure.net
+      tenantId: 84f58ce9-43c8-4932-b908-591a8a3007d3
+      serviceAccountRef:
+        name: items
+---
+# Fills the Secret items-secrets from Key Vault and keeps it in sync.
+# If Key Vault cannot be reached, the last synced Secret stays, so the app
+# keeps running (threat model, TB4: denial of service accepted).
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: items-secrets
+  namespace: restauranty
+spec:
+  refreshInterval: 1h              # a changed value in Key Vault arrives within the hour
+  secretStoreRef:
+    kind: SecretStore
+    name: items
+  target:
+    name: items-secrets
+    creationPolicy: Owner          # External Secrets owns the Secret: deleting this removes it
+  data:
+    - secretKey: mongo-password
+      remoteRef:
+        key: mongo-password
+    - secretKey: jwt-public-key
+      remoteRef:
+        key: jwt-public-key
+    - secretKey: cloud-name
+      remoteRef:
+        key: cloud-name
+    - secretKey: cloud-api-key
+      remoteRef:
+        key: cloud-api-key
+    - secretKey: cloud-api-secret
+      remoteRef:
+        key: cloud-api-secret
 ---
 apiVersion: v1
 kind: Service
@@ -36,6 +93,10 @@ kind: Deployment
 metadata:
   name: items
   namespace: restauranty
+  annotations:
+    # Restart (rolling, no downtime) when this Secret's content changes,
+    # e.g. after a password rotation in Key Vault.
+    secret.reloader.stakater.com/reload: "items-secrets"
 spec:
   replicas: 2                 # one pod can restart (rollout, rotation) while the other serves
   selector:

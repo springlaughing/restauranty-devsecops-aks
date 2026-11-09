@@ -1,4 +1,5 @@
-# The cluster-access layer: what the cluster may do in Azure.
+# The cluster-access layer: what the cluster and its workloads may do in Azure.
+# (Per-workload identities and their Key Vault rights: workload-identity.tf.)
 #
 # Three layers, three lifetimes:
 #   terraform/persistent   never destroyed (Key Vault, registry, static IP, DNS)
