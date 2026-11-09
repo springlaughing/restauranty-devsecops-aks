@@ -1,0 +1,35 @@
+# Which path goes where, on https://restauranty.aks.springlaughing.dev.
+# Same split as haproxy.cfg for local development. The longest matching
+# prefix wins, so /api/items goes to items and everything else to client.
+#
+# Only these four Services are reachable from outside. /metrics on the
+# backends is not routed: a request for /metrics lands on the client.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: restauranty
+  namespace: restauranty
+spec:
+  parentRefs:
+    - name: restauranty
+      namespace: gateway
+      sectionName: https-app
+  hostnames:
+    - restauranty.aks.springlaughing.dev
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /api/auth }
+      backendRefs:
+        - { name: auth, port: 80 }
+    - matches:
+        - path: { type: PathPrefix, value: /api/discounts }
+      backendRefs:
+        - { name: discounts, port: 80 }
+    - matches:
+        - path: { type: PathPrefix, value: /api/items }
+      backendRefs:
+        - { name: items, port: 80 }
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - { name: client, port: 80 }

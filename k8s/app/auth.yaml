@@ -1,0 +1,113 @@
+# auth: sign-up, login, users. The only service with the JWT private key: it is the only one that can create tokens.
+#
+# Hardening, the same for every app pod (the restauranty namespace enforces
+# the "restricted" Pod Security profile, so a pod without it is refused):
+#   - its own ServiceAccount, no Kubernetes API token mounted
+#   - non-root, no privilege escalation, no Linux capabilities, seccomp on
+#   - read-only root filesystem: an attacker cannot drop files into the image
+#   - CPU/memory requests and a memory limit
+# Secrets come from the Secret auth-secrets, which holds only what this
+# service needs (created from Key Vault by scripts/setup-aks.sh; External
+# Secrets with one Azure identity per service replaces that in #8).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: auth
+  namespace: restauranty
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: restauranty
+  labels:
+    app: auth
+spec:
+  selector:
+    app: auth
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: restauranty
+spec:
+  replicas: 2                 # one pod can restart (rollout, rotation) while the other serves
+  selector:
+    matchLabels:
+      app: auth
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0       # never fewer than 2 ready pods during a rollout
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      serviceAccountName: auth
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000         # "node" user in node:22-alpine
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1            # the two pods on different nodes when possible
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: auth
+      containers:
+        - name: auth
+          image: acrevgeniarestauranty.azurecr.io/auth:bfb0e27
+          ports:
+            - name: http
+              containerPort: 3001
+          env:
+            - name: PORT
+              value: "3001"
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: auth-secrets
+                  key: mongo-password
+            # $(MONGO_PASSWORD) is filled in by Kubernetes from the variable
+            # above. The password is hex, so it needs no URL escaping.
+            - name: MONGODB_URI
+              value: mongodb://restauranty:$(MONGO_PASSWORD)@mongodb:27017/restauranty?authSource=restauranty
+            - name: JWT_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: auth-secrets
+                  key: jwt-private-key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          # The service's own "UP" route. Ready = gets traffic; live = not restarted.
+          readinessProbe:
+            httpGet:
+              path: /api/auth
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/auth
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
