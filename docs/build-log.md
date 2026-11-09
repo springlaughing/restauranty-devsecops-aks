@@ -27,6 +27,12 @@
   - [11. Hardened Dockerfiles for all four components](#11-hardened-dockerfiles-for-all-four-components)
   - [What is Trivy, and why we scan](#what-is-trivy-and-why-we-scan)
   - [The software supply chain](#the-software-supply-chain)
+- [Part 4 — the app on AKS](#part-4--the-app-on-aks)
+  - [12. Cluster access: image pulls and the static IP](#12-cluster-access-image-pulls-and-the-static-ip)
+  - [13. DNS: the app's names point at the static IP](#13-dns-the-apps-names-point-at-the-static-ip)
+  - [14. MongoDB password made URL-safe](#14-mongodb-password-made-url-safe)
+  - [15. Kubernetes manifests, Gateway and HTTPS](#15-kubernetes-manifests-gateway-and-https)
+  - [What was created in Part 4](#what-was-created-in-part-4)
 - [What is next](#what-is-next)
 
 ---
@@ -190,8 +196,10 @@ It creates: Key Vault (RBAC, soft delete), a container registry (Basic), a stati
 KV=$(terraform output -raw key_vault_name)
 az keyvault secret set --vault-name "$KV" --name jwt-private-key --file jwt-private.pem
 az keyvault secret set --vault-name "$KV" --name jwt-public-key  --file jwt-public.pem
-az keyvault secret set --vault-name "$KV" --name mongo-password  --value '<a strong password>'
+az keyvault secret set --vault-name "$KV" --name mongo-password  --file <(openssl rand -hex 32 | tr -d '\n')
 ```
+
+The MongoDB password is hex because it goes inside a URL (see entry 14).
 
 Per-service identities and their Key Vault roles come next (#8), in a `cluster-access` layer that reads this one.
 
@@ -312,12 +320,214 @@ Every link names where the code came from, what went into it, and who may touch 
 
 ---
 
+## Part 4 — the app on AKS
+
+Goal: the app running on the cluster at https://restauranty.aks.springlaughing.dev, with a real HTTPS certificate. Issue #7, branch `7-manifests-gateway-https`.
+
+**Three Terraform layers, three lifetimes.** This part adds the third layer. Each layer has its own folder and state, so destroying one never touches another.
+
+| Layer | Folder | Lifetime | Holds |
+| --- | --- | --- | --- |
+| Persistent | `terraform/persistent/` (this repo) | Never destroyed | Key Vault, registry, static IP, DNS records, pipeline identity |
+| Cluster | `infra-aks/cluster` (separate repo) | Destroyed and rebuilt | The AKS cluster itself |
+| Cluster access | `terraform/cluster-access/` (this repo, new) | Applied again after every rebuild | What the cluster may do in Azure |
+
+### 12. Cluster access: image pulls and the static IP
+
+**Result:** the cluster may pull images from our registry and may use our static IP. Two role assignments, applied. Lives in `terraform/cluster-access/`.
+
+**Why two permissions.**
+
+- **AcrPull for the kubelet.** The kubelet is the agent on each node that starts containers. Our registry has no password login (admin user off), so the kubelet signs in with its own Azure identity. Without AcrPull, every pod fails with `ImagePullBackOff`. The role is pull only: the cluster can never push or change an image.
+- **Network Contributor for the cluster's identity, on the persistent resource group only.** The static IP lives in `rg-evgenia-restauranty`, not in the cluster's own resource group. Azure lets a load balancer use an IP only if its owner may "join" that IP. The scope is that one group, not the whole subscription.
+
+**Why a separate layer.** A rebuilt cluster gets new identities, so these roles must be created again after every rebuild. Keeping them here, and not in the shared `infra-aks` repo, keeps Restauranty's permissions out of the voting app's cluster code. The layer only *reads* the cluster, registry and resource group (data sources), so `terraform destroy` here removes the two roles and nothing else.
+
+```bash
+cd terraform/cluster-access
+export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+terraform init
+terraform plan -out access.tfplan   # review: 2 to add
+terraform apply access.tfplan
+```
+
+Per-service identities for Key Vault come into this same layer next (#8).
+
+### 13. DNS: the app's names point at the static IP
+
+**Result:** `restauranty.aks.springlaughing.dev` and `grafana.aks.springlaughing.dev` both resolve to `4.182.101.186`. Two A records, applied. Lives in `terraform/persistent/dns.tf`.
+
+**Why in the persistent layer.** The IP never changes, so the records never need to change either. They are set once and survive every cluster rebuild. This also matters for HTTPS: Let's Encrypt checks the name before it issues a certificate, and a stale record would make that check fail.
+
+**The zone is reused from the vote app on AKS.** The zone `aks.springlaughing.dev` was made for the vote app's AKS run, which used the name `vote.aks.springlaughing.dev`. Its teardown deleted the `vote` record, but the zone and its delegation at Porkbun stayed. A zone can hold many names, so Restauranty just adds its own two names next to where `vote` was. Reusing it saved a step: a new zone gets four new name servers, which have to be entered at Porkbun by hand.
+
+```
+springlaughing.dev                 your domain, at Porkbun
+└── aks.springlaughing.dev         zone in Azure (made for the vote app on AKS)
+    ├── vote         (deleted)     the vote app on AKS
+    ├── restauranty  → 4.182.101.186
+    └── grafana      → 4.182.101.186
+```
+
+**The zone is only read.** The zone belongs to the `infra-aks/dns` project. Here it is a data source, so `terraform destroy` removes only our two records, never the zone or the voting app's records.
+
+**Why `grafana` already.** Grafana comes later (#14, #17), but its name is in the same certificate (entry 15). One certificate for both names now means no second issue later.
+
+```bash
+cd terraform/persistent
+terraform plan -out persistent.tfplan   # review: 2 to add
+terraform apply persistent.tfplan
+dig +short restauranty.aks.springlaughing.dev   # 4.182.101.186
+```
+
+### 14. MongoDB password made URL-safe
+
+**Result:** `mongo-password` in Key Vault is now 64 hex characters. A new secret, `mongo-root-password`, is created by the setup script on its first run.
+
+**Why two MongoDB passwords.** They belong to two different users. `mongo-password` is for `restauranty`, the user the three backends log in as; it may only read and write the app's own database. `mongo-root-password` is for `root`, the administrator, used only for admin work like rotating the app password (#16). No app gets the root password, so a hacked backend cannot create users or touch other databases. The script generates the root password straight into Key Vault (only if it is missing), so it is never typed, printed or stored anywhere else.
+
+**Why.** The apps connect with a URL that contains the password: `mongodb://restauranty:<password>@mongodb:27017/restauranty`. The old value had characters such as `/` or `+`, which have a meaning inside a URL and break it. Hex uses only `0-9` and `a-f`, so it never needs escaping. Nothing used the old value yet, and Key Vault keeps it as an older version.
+
+```bash
+az keyvault secret set --vault-name kv-evgenia-restauranty -n mongo-password \
+  --file <(openssl rand -hex 32 | tr -d '\n') --output none
+```
+
+`--file <(...)` hands the value over as a temporary file, not as a command argument, so it never shows up in the process list or the shell history.
+
+### 15. Kubernetes manifests, Gateway and HTTPS
+
+**Result:** the app runs on AKS at https://restauranty.aks.springlaughing.dev, behind the static IP, with a Let's Encrypt **staging** certificate. Sign-up, login and token checks work end to end. Creating an item waits for the Cloudinary keys.
+
+**What runs where.**
+
+| Namespace | What runs there | Why separate |
+| --- | --- | --- |
+| `nginx-gateway` | The NGINX Gateway Fabric controller | Installed by Helm; turns Gateway objects into NGINX config |
+| `cert-manager` | cert-manager | Installed by Helm; gets and renews certificates |
+| `gateway` | The Gateway's NGINX pods, the certificate and its private key | No app pod runs here, so no app has a reason to read the TLS key (threat model, TB1) |
+| `restauranty` | auth, discounts, items, client, MongoDB | The app |
+
+**The Gateway** (`k8s/platform/gateway.yaml`) is the only way in from the internet. It has three listeners:
+
+- **port 80**: serves only the Let's Encrypt check and a permanent redirect to HTTPS. Plain HTTP is never served.
+- **port 443 for `restauranty`**: routes by path, the same split as `haproxy.cfg` locally: `/api/auth`, `/api/discounts`, `/api/items` to the three backends, everything else to the client.
+- **port 443 for `grafana`**: ready for Grafana later.
+
+The HTTPS listeners accept routes only from namespaces labelled `gateway-access: "true"`, so a stray route in any other namespace cannot publish a service. Two annotations on the Gateway tell Azure to put the static IP from entry 12 on its load balancer.
+
+**Why NGINX Gateway Fabric.** It is the same controller as the voting app, so the setup is known. Version 2.4 added `RateLimitPolicy`, which the login rate limit needs (#10). Raw NGINX config snippets stay switched off: a snippet can do anything NGINX can, so it could get around every other rule.
+
+**Why `externalTrafficPolicy: Local`.** Azure then sends traffic only to nodes that run an NGINX pod, so NGINX sees the visitor's real IP. Without it, NGINX sees a node's IP, and a per-IP login limit (#10) would count all visitors as a few addresses.
+
+**HTTPS** (`k8s/platform/cluster-issuers.yaml`, `certificate.yaml`). cert-manager gets a free certificate from Let's Encrypt. To prove we own the name, Let's Encrypt fetches a file from `http://<name>/.well-known/acme-challenge/...`, and cert-manager answers through the Gateway's port 80 (HTTP-01). This needs no write rights in the DNS zone. **Staging first**: the staging certificate is not trusted by browsers, but its limits are generous. Production allows only 5 certificates for the same names per week, so it is used only once staging works. A new private key is made at every renewal.
+
+**MongoDB** (`k8s/app/mongodb.yaml`). One pod, data on a zone-redundant Azure disk (`k8s/platform/storageclass.yaml`). The disk keeps three copies in three zones, so MongoDB can move to another zone if a node dies. Two users, created on the first start:
+
+| User | Rights | Who has the password |
+| --- | --- | --- |
+| `root` | Everything | Only Key Vault and the MongoDB pod; used for admin work like password rotation (#16) |
+| `restauranty` | Read and write on the `restauranty` database only | The three backends |
+
+So a hacked backend cannot create users, change rights or read other databases (threat model, TB3).
+
+**Why MongoDB in the cluster, not Atlas.** The planned tests need it here. A NetworkPolicy can only keep an attacker pod away from a database that runs inside the cluster (#11), and the rotation demo needs admin access (#16). The limit: the disk is deleted with the cluster, so the data does not survive a rebuild (accepted for the demo).
+
+**The four app components** (`k8s/app/auth.yaml`, `discounts.yaml`, `items.yaml`, `client.yaml`). Every pod is hardened the same way:
+
+| Setting | What it stops |
+| --- | --- |
+| Runs as a non-root user | A break-out starts without root rights |
+| No privilege escalation, all Linux capabilities dropped | The process cannot gain rights later |
+| Read-only root filesystem (only `/tmp` writable where needed) | An attacker cannot drop tools or change files in the image |
+| seccomp `RuntimeDefault` | Blocks rarely used, risky kernel calls |
+| Own ServiceAccount, no Kubernetes API token mounted | A hacked pod has no key to the Kubernetes API |
+| Memory limit | One pod cannot starve the node |
+| 2 replicas, spread over nodes | One pod can restart while the other serves |
+
+The `restauranty` namespace **enforces** these rules: Kubernetes' Pod Security "restricted" profile refuses any pod that breaks them, even one added by mistake later.
+
+Images are pinned to the commit tag `bfb0e27`, not `latest`, so the cluster runs exactly the scanned image (entry 11).
+
+**Secrets: one per workload, only what it needs.**
+
+| Secret | Contents |
+| --- | --- |
+| `mongodb-secrets` | root password, app password |
+| `auth-secrets` | app password, JWT **private** key (the only service that can sign tokens) |
+| `discounts-secrets` | app password, JWT public key |
+| `items-secrets` | app password, JWT public key, Cloudinary keys (needed to create items) |
+
+For now the setup script copies the values from Key Vault into these Secrets. In #8, External Secrets takes over with one Azure identity per service, and keeps the same Secret names, so the Deployments do not change.
+
+**The setup script** (`scripts/setup-aks.sh`) does everything in order and is safe to run again:
+
+1. Checks that `kubectl` points at our cluster.
+2. Installs the Gateway API CRDs, NGINX Gateway Fabric 2.8.1 and cert-manager v1.21.3 (exact versions).
+3. Applies the namespaces, storage class, Gateway, issuers and certificate.
+4. Creates the Secrets from Key Vault (values passed as files, never as command arguments).
+5. Deploys MongoDB, waits for it, then deploys the app and the routes.
+6. Prints the status.
+
+```bash
+./scripts/setup-aks.sh
+kubectl get certificate -n gateway        # READY=True after a few minutes
+curl -kI https://restauranty.aks.springlaughing.dev   # -k while the certificate is from staging
+```
+
+**Proof: the smoke test** (9 November, after `./scripts/setup-aks.sh`):
+
+| Check | Command (short) | Result |
+| --- | --- | --- |
+| Static IP on the Gateway | `kubectl get gateway -n gateway` | `ADDRESS 4.182.101.186`, `PROGRAMMED True` |
+| HTTP goes to HTTPS | `curl -I http://restauranty.aks.springlaughing.dev/menu` | `301`, `Location: https://.../menu` |
+| Certificate | `openssl s_client ... \| openssl x509 -noout -issuer -ext subjectAltName` | Let's Encrypt (STAGING), both names; `READY True` after 90 seconds |
+| Routing | `curl -k https://.../api/auth` (and the others) | Each backend answers "... Server UP!"; `/` gives the React page |
+| `/metrics` not public | `curl -k https://.../metrics` | The React page: the backends' metrics are not reachable from outside |
+| No token, no data | `curl -k https://.../api/items/items` | `401` |
+| Sign up and log in | `POST /api/auth/signup`, `POST /api/auth/login` | `201`, then a token signed with `RS256` |
+| Token accepted | items, coupons, `/api/auth/verify` with the token | `200` each |
+| MongoDB users | MongoDB log on first start | `Created user 'restauranty' with readWrite on 'restauranty'` |
+
+**One stop on the way.** The first run stopped with `line 119: f: command not found`. The script file had been edited while it was running. Bash reads a script from disk bit by bit, so it resumed in the middle of a changed line. Everything before that point was already applied. The second run finished, and showed that the script is safe to repeat: unchanged things stay `unchanged`. Lesson: never edit a script while it runs.
+
+**Cloudinary is needed to create items.** Item images are uploaded to Cloudinary, and the create route always expects an image (`backend/items/routes/items.routes.js` reads `req.file.path` with no check). Without Cloudinary keys, `items` starts and can list items, but creating one fails. Cloudinary is a separate company, so it is its own trust boundary: only `items` gets its keys. They go into Key Vault without passing through the shell history:
+
+```bash
+for n in cloud-name cloud-api-key cloud-api-secret; do
+  read -rsp "$n: " V; echo        # -s: what you type is not shown
+  az keyvault secret set --vault-name kv-evgenia-restauranty -n "$n" --file <(printf %s "$V") --output none
+done; unset V
+./scripts/setup-aks.sh             # picks them up and restarts the pods
+```
+
+### What was created in Part 4
+
+| Thing | Where | State |
+| --- | --- | --- |
+| Role: AcrPull for the kubelet on the registry | Azure, `terraform/cluster-access/` | Applied |
+| Role: Network Contributor for the cluster on `rg-evgenia-restauranty` | Azure, `terraform/cluster-access/` | Applied |
+| A records `restauranty`, `grafana` → `4.182.101.186` | Azure DNS, `terraform/persistent/dns.tf` | Applied |
+| `mongo-password` replaced with hex | Key Vault | Done |
+| `mongo-root-password` | Key Vault | Created by the script (first run) |
+| Namespaces `gateway`, `restauranty` (Pod Security enforced) | `k8s/platform/namespaces.yaml` | Deployed |
+| Storage class `managed-csi-zrs` | `k8s/platform/storageclass.yaml` | Deployed |
+| Gateway + HTTP→HTTPS redirect | `k8s/platform/gateway.yaml` | Deployed |
+| Let's Encrypt issuers (staging, production) + certificate | `k8s/platform/cluster-issuers.yaml`, `certificate.yaml` | Deployed |
+| Helm values for NGINX Gateway Fabric and cert-manager | `k8s/platform/*-values.yaml` | Deployed |
+| MongoDB StatefulSet with two users | `k8s/app/mongodb.yaml` | Deployed |
+| auth, discounts, items, client + their ServiceAccounts and Services | `k8s/app/*.yaml` | Deployed |
+| Path routing | `k8s/app/httproute.yaml` | Deployed |
+| Setup script | `scripts/setup-aks.sh` | Used (safe to run again) |
+
+---
+
 ## What is next
 
 | Task | Issue |
 | --- | --- |
-| Push the images to the registry; docker-compose for local dev | #5, #1 |
-| Manifests, MongoDB, Gateway routing, HTTPS | #7 |
+| docker-compose for local dev | #1 |
+| Cloudinary keys, then create an item; production certificate | #7 |
 | Per-service identities, External Secrets, NetworkPolicies | #8, #11 |
 | Gateway block on the user list, login rate limit | #10 |
 | Pipeline with security gates | #12, #13 |
