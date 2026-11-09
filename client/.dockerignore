@@ -1,0 +1,12 @@
+# Keep local state and junk out of the build context
+node_modules
+build
+npm-debug.log*
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+Dockerfile
+.dockerignore
+README.md
