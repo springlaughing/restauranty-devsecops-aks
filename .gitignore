@@ -8,3 +8,12 @@ backend/*/.env
 backend/*/node_modules
 mobile/.expo
 build
+
+# Keys, infrastructure state, cluster access
+*.pem
+*.key
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+kubeconfig*
