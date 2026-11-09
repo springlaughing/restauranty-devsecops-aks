@@ -1,0 +1,16 @@
+# Reloader: restarts a Deployment when a Secret it uses changes, and only
+# then. Needed because a running pod reads its environment variables once,
+# at start: a rotated password reaches the app only through a restart.
+# Installed by scripts/setup-aks.sh.
+
+reloader:
+  # Only Deployments that ask for it, with the annotation
+  # secret.reloader.stakater.com/reload: "<secret name>".
+  autoReloadAll: false
+  # A rolling restart by an annotation on the pod template (not an extra
+  # environment variable), so the YAML in Git and the live object stay alike.
+  reloadStrategy: annotations
+  # Only the app namespace: Reloader gets a Role there, no ClusterRole.
+  watchGlobally: false
+  namespaces: ["restauranty"]
+  ignoreConfigMaps: true

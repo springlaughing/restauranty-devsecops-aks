@@ -11,14 +11,64 @@
 #   restauranty  the apps' user: readWrite on the "restauranty" database
 #                only. Cannot create users, change roles or read other
 #                databases.
-# Passwords come from the Secret mongodb-secrets (from Key Vault, see
-# scripts/setup-aks.sh; External Secrets takes over in #8).
+# Passwords come from the Secret mongodb-secrets, filled from Key Vault by
+# External Secrets as MongoDB's own Azure identity (below).
+# No Reloader here: MongoDB reads these passwords only on its very first
+# start (empty disk). Changing a password later is done inside MongoDB
+# (rotation, #16), so a restart would only cause downtime.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mongodb
   namespace: restauranty
-automountServiceAccountToken: false   # MongoDB never talks to the Kubernetes API
+  annotations:
+    # The Azure identity this ServiceAccount stands for (terraform/cluster-access,
+    # output workload_client_ids). Not a secret: without the federated
+    # credential in Azure, the id alone opens nothing.
+    azure.workload.identity/client-id: 8ea73f13-8be4-4c8e-896a-b417385d06a5
+automountServiceAccountToken: false   # the pod never talks to the Kubernetes API
+---
+# Where mongodb's secrets come from: Key Vault, signed in as mongodb's own
+# Azure identity. External Secrets asks Kubernetes for a short-lived token of
+# the "mongodb" ServiceAccount and trades it at Entra ID for an Azure token.
+# That identity may read only the secrets listed below (role per secret).
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: mongodb
+  namespace: restauranty
+spec:
+  provider:
+    azurekv:
+      authType: WorkloadIdentity
+      vaultUrl: https://kv-evgenia-restauranty.vault.azure.net
+      tenantId: 84f58ce9-43c8-4932-b908-591a8a3007d3
+      serviceAccountRef:
+        name: mongodb
+---
+# Fills the Secret mongodb-secrets from Key Vault and keeps it in sync.
+# If Key Vault cannot be reached, the last synced Secret stays, so the app
+# keeps running (threat model, TB4: denial of service accepted).
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: mongodb-secrets
+  namespace: restauranty
+spec:
+  refreshInterval: 1h              # a changed value in Key Vault arrives within the hour
+  secretStoreRef:
+    kind: SecretStore
+    name: mongodb
+  target:
+    name: mongodb-secrets
+    creationPolicy: Owner          # External Secrets owns the Secret: deleting this removes it
+  data:
+    - secretKey: root-password
+      remoteRef:
+        key: mongo-root-password
+    - secretKey: app-password
+      remoteRef:
+        key: mongo-password
 ---
 apiVersion: v1
 kind: ConfigMap
