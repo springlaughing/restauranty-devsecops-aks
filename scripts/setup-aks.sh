@@ -14,10 +14,14 @@ APP_NS="restauranty"
 NGF_VERSION="2.8.1"                      # chart and app version; 2.4+ has RateLimitPolicy (#10)
 CERT_MANAGER_VERSION="v1.21.3"
 
+TLS_BACKUP="restauranty-tls-backup"      # Key Vault secret: copy of the HTTPS certificate Secret
+
 cd "$(dirname "$0")/.."
 log() { echo; echo "==> $*"; }
+kv() { az keyvault secret show --vault-name "$KEY_VAULT" -n "$1" --query value -o tsv; }
+kv_exists() { az keyvault secret show --vault-name "$KEY_VAULT" -n "$1" >/dev/null 2>&1; }
 
-for tool in az kubectl helm openssl; do
+for tool in az kubectl helm openssl jq; do
   command -v "$tool" >/dev/null || { echo "Missing tool: $tool"; exit 1; }
 done
 
@@ -59,6 +63,14 @@ for _ in $(seq 1 12); do                 # cert-manager's webhook may need a few
   echo "  cert-manager webhook not ready yet, retrying in 5 s"
   sleep 5
 done
+# After a rebuild, put the saved certificate back BEFORE cert-manager sees the
+# Certificate. A valid Secret with matching names and issuer means cert-manager
+# issues nothing, so a rebuild does not use up Let's Encrypt's limit of 5
+# production certificates per week. An expired copy is simply renewed.
+if ! kubectl get secret restauranty-tls -n gateway >/dev/null 2>&1 && kv_exists "$TLS_BACKUP"; then
+  echo "  restoring the HTTPS certificate from Key Vault"
+  kv "$TLS_BACKUP" | kubectl apply -f -
+fi
 kubectl apply -f k8s/platform/certificate.yaml
 
 # 4. Secrets: Key Vault -> one Kubernetes Secret per workload, each with only
@@ -68,8 +80,6 @@ kubectl apply -f k8s/platform/certificate.yaml
 #    Values are passed through files (process substitution), never as command
 #    arguments, so they never show up in `ps` or the shell history.
 log "Secrets from Key Vault ${KEY_VAULT}"
-kv() { az keyvault secret show --vault-name "$KEY_VAULT" -n "$1" --query value -o tsv; }
-kv_exists() { az keyvault secret show --vault-name "$KEY_VAULT" -n "$1" >/dev/null 2>&1; }
 
 # The MongoDB root password has no other home: create it once if it is missing.
 if ! kv_exists mongo-root-password; then
@@ -124,12 +134,32 @@ for d in auth discounts items client; do
   kubectl rollout status "deployment/$d" -n "$APP_NS" --timeout=5m
 done
 
-# 6. Where things stand
+# 6. Save the HTTPS certificate in Key Vault, so the next rebuild can restore it
+#    (step 3). Only the parts cert-manager checks are kept; saved again only
+#    when the certificate changed (first issue or renewal).
+log "Backing up the HTTPS certificate"
+if kubectl wait certificate/restauranty-tls -n gateway --for=condition=Ready --timeout=3m >/dev/null; then
+  live_crt=$(kubectl get secret restauranty-tls -n gateway -o jsonpath='{.data.tls\.crt}')
+  saved_crt=$(kv "$TLS_BACKUP" 2>/dev/null | jq -r '.data["tls.crt"] // empty' || true)
+  if [ "$live_crt" = "$saved_crt" ]; then
+    echo "  unchanged, backup kept"
+  else
+    az keyvault secret set --vault-name "$KEY_VAULT" -n "$TLS_BACKUP" --output none --file <(
+      kubectl get secret restauranty-tls -n gateway -o json | jq -c '{
+        apiVersion, kind, type, data,
+        metadata: { name: .metadata.name, namespace: .metadata.namespace,
+                    labels: .metadata.labels, annotations: .metadata.annotations } }')
+    echo "  saved to Key Vault as ${TLS_BACKUP}"
+  fi
+else
+  echo "  certificate not ready yet: run this script again later to back it up"
+fi
+
+# 7. Where things stand
 log "Status"
 kubectl get gateway -n gateway
 kubectl get svc -n gateway
 kubectl get certificate -n gateway
 kubectl get pods -n "$APP_NS" -o wide
 echo
-echo "Certificate READY=False for a few minutes is normal (Let's Encrypt checks port 80)."
-echo "Then: curl -I https://restauranty.aks.springlaughing.dev  (staging: add -k)"
+echo "Open: https://restauranty.aks.springlaughing.dev"
