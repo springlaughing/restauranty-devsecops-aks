@@ -1252,6 +1252,65 @@ Issue numbers link to GitHub.
 
 **Retest.** After the fixes, the same tests run again against the app on AKS. Each fixed finding gets its "after" proof, and the most important tests become automatic checks in the pipeline ([#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13)).
 
+### Retest 1: code fixes for #4 and #21, local (9 November 2026)
+
+**Result:** all six code fixes work. The same attacks as in the tests above now fail, and a real login still works.
+
+**What I did:** fixed the code on branch `4-rs256-signing` (one commit per fix), restarted the three backends with an RS256 key pair, and ran the attacks again through HAProxy.
+
+```bash
+B=http://localhost; J='Content-Type: application/json'
+
+# F9: forged admin token, signed HS256 with the old public secret
+FORGED=$(cd backend/auth && node -e '
+  console.log(require("jsonwebtoken").sign({ _id: "000000000000000000000000", role: "admin" },
+  "MySecret1!", { algorithm: "HS256", expiresIn: "1h" }))')
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/auth/verify -H "Authorization: Bearer $FORGED"
+
+# F8: no token, garbage token
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/auth/verify
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/auth/verify -H 'Authorization: Bearer not.a.token'
+
+# F4: unknown email, then known email with a wrong password
+curl -s -X POST $B/api/auth/login -H "$J" -d '{"email":"nobody@example.com","password":"Whatever1"}'
+curl -s -X POST $B/api/auth/login -H "$J" -d '{"email":"gordon@example.com","password":"Whatever1"}'
+
+# F11, F15: the user list
+curl -s $B/api/auth/users | jq -c '.[0:2][] | {email, password}'
+
+# F17: an invalid id
+curl -s -w '  [HTTP %{http_code}]\n' $B/api/items/items/hello
+
+# A real login
+curl -s -X POST $B/api/auth/login -H "$J" -d '{"email":"gordon@example.com","password":"RawChicken1"}' | cut -c1-40
+```
+
+```text
+{"message":"Invalid or missing token"}  [HTTP 401]
+{"message":"Invalid or missing token"}  [HTTP 401]
+{"message":"Invalid or missing token"}  [HTTP 401]
+{"message":"Email or Password Incorrect"}
+{"message":"Email or Password Incorrect"}
+{"email":"gordon@example.com","password":null}
+{"email":"weak-Password1@example.com","password":null}
+{"message":"Invalid id"}  [HTTP 400]
+{"authToken":"eyJhbGci...   (token shortened in this document)
+```
+
+(`jq` prints `null` for a field that does not exist: the answers have no `password` field at all.)
+
+| Finding | Before | After |
+| --- | --- | --- |
+| F9 Forged admin token | 200, accepted | **401** |
+| F8 No token, garbage token | 500, 500 | **401, 401** |
+| F4 Unknown email vs wrong password | Two different messages; 20 ms vs 86 ms | **Same message**; times overlap (149 to 377 ms vs 156 to 359 ms, 10 alternating requests each) |
+| F11, F14, F15 Password hashes in answers | In the list, one user, and the delete answer | **In none** (0 of 7 users) |
+| F17 Raw database errors | `CastError` with the model name `Item` | **`{"message":"Invalid id"}`**; details only in the log |
+| F3 Personal data in the log | `req.payload { ... address ... }` on every page load | **Not logged** |
+| Real login | Works | **Still works.** The token header now says `"alg":"RS256"`. |
+
+**Still open, as planned:** the user list and all other routes still answer strangers (now without hashes). Token checks in discounts and items come with [#9](https://github.com/springlaughing/restauranty-devsecops-aks/issues/9); the Gateway block and the login rate limit come on AKS with [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10).
+
 ---
 
 ## Findings
