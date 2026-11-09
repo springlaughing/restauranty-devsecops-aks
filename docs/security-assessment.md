@@ -1213,12 +1213,13 @@ In test 3f I wrote that the Cloudinary values in the old `.env` were placeholder
 
 **Result:** every finding has a decision: fix it, contain it, accept it for now, or report it to its owner. Rule used: fix when the file is being changed anyway and it takes little time; accept when other planned fixes already reduce the risk. The summary is at the [top of this document](#summary); all findings with their proof are in the [findings table](#findings).
 
-**Four kinds of decision**
+**Kinds of decision**
 
 | Decision | Meaning |
 | --- | --- |
-| **Fix** | Change the app's code so the problem is gone. |
-| **Contain** | Block it outside the app (at the Gateway) until the code is fixed, and as a second layer after. |
+| **Fix** | Change the app's code so the problem is gone at its source. |
+| **Contain** | Put a barrier in front of the app (at the Gateway). The weakness is still inside, but strangers cannot reach it. Faster than a fix, and a second layer after it. |
+| **Detect** | Does not stop anything: an alert tells me when an attack happens. Used together with the others. |
 | **Accept** | Not fixed this week, on purpose. The reason and what production would do go into `SECURITY.md`. |
 | **Report** | The problem belongs to someone else. Tell them; do not touch it. |
 
@@ -1233,7 +1234,7 @@ Issue numbers link to GitHub.
 | F3 | Personal data in the server log | Medium | Fix: remove the `console.log` lines that print token content and records | [#21](https://github.com/springlaughing/restauranty-devsecops-aks/issues/21) |
 | F4 | Login reveals which emails exist | Medium | Fix: one message for "no such user" and "wrong password" | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4) |
 | F5 | Weak passwords accepted | Medium | Accept: the fixes for F11 and F6 remove offline guessing and slow down online guessing. Production: at least 12 characters and a check against leaked passwords. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
-| F6 | No limit on login attempts | High | Contain: rate limit at the Gateway, alert on many failed logins | [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10), [#15](https://github.com/springlaughing/restauranty-devsecops-aks/issues/15) |
+| F6 | No limit on login attempts | High | Contain: rate limit at the Gateway. Detect: alert on many failed logins. | [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10), [#15](https://github.com/springlaughing/restauranty-devsecops-aks/issues/15) |
 | F7 | Logout does not end the session | Medium | Accept: tokens expire after 6 hours. Production: short tokens and a way to revoke them. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
 | F8 | Token errors answered with 500 | Medium | Fix: answer 401, one short log line | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4) |
 | F9 | Public signing secret, one secret for all services | High | Fix: RS256 key pair, private key only in auth, keys only in Key Vault | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4), [#8](https://github.com/springlaughing/restauranty-devsecops-aks/issues/8) |
