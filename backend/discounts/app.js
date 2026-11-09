@@ -31,11 +31,14 @@ app.get("/api/discounts", (req, res, next) => {
     res.json("Discounts Server UP!");
 });
 
+// Every data route below requires a valid login token (RS256, checked locally)
+const { isAuthenticated } = require("./middleware/jwt.middleware");
+
 const CouponRoutes = require("./routes/coupons.routes");
-app.use("/api/discounts/coupons", CouponRoutes);
+app.use("/api/discounts/coupons", isAuthenticated, CouponRoutes);
 
 const CampaignRoutes = require("./routes/campaigns.routes");
-app.use("/api/discounts/campaign", CampaignRoutes);
+app.use("/api/discounts/campaign", isAuthenticated, CampaignRoutes);
 
 // Expose /metrics endpoint for Prometheus to scrape metrics
 app.get('/metrics', async (req, res) => {

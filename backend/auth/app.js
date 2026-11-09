@@ -31,11 +31,14 @@ app.get("/api/auth", (req, res, next) => {
     res.json("Auth Server UP!");
 });
 
+// Every data route below requires a valid login token (RS256, checked locally)
+const { isAuthenticated } = require("./middleware/jwt.middleware");
+
 const authRoutes = require("./routes/auth.routes");
 app.use("/api/auth", authRoutes);
 
 const UsersRoutes = require("./routes/users.routes");
-app.use("/api/auth/users", UsersRoutes);
+app.use("/api/auth/users", isAuthenticated, UsersRoutes);
 
 // Expose /metrics endpoint for Prometheus to scrape metrics
 app.get('/metrics', async (req, res) => {
