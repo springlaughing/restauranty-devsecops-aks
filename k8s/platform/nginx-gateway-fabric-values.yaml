@@ -1,0 +1,21 @@
+# NGINX Gateway Fabric: the controller that turns Gateway and HTTPRoute
+# objects into NGINX config. Installed by scripts/setup-aks.sh.
+# Same controller as the voting app, now on 2.x: 2.4 added RateLimitPolicy,
+# used for the login rate limit (#10).
+
+nginxGateway:
+  # No usage data sent to F5.
+  productTelemetry:
+    enable: false
+  # Raw NGINX config snippets stay off (the default): a snippet can do
+  # anything NGINX can, so it is a way around every other policy.
+  snippets:
+    enable: false
+
+nginx:
+  service:
+    type: LoadBalancer
+    # Local: Azure sends traffic only to nodes that run an NGINX pod, so
+    # NGINX sees the visitor's real IP. Per-IP rate limits (#10) and the
+    # access logs (#14) need it. This is the chart default, kept on purpose.
+    externalTrafficPolicy: Local

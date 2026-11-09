@@ -1,0 +1,125 @@
+# items: menu items, dietary info, orders. Checks login tokens itself, with the JWT public key only.
+#
+# Hardening, the same for every app pod (the restauranty namespace enforces
+# the "restricted" Pod Security profile, so a pod without it is refused):
+#   - its own ServiceAccount, no Kubernetes API token mounted
+#   - non-root, no privilege escalation, no Linux capabilities, seccomp on
+#   - read-only root filesystem: an attacker cannot drop files into the image
+#   - CPU/memory requests and a memory limit
+# Secrets come from the Secret items-secrets, which holds only what this
+# service needs (created from Key Vault by scripts/setup-aks.sh; External
+# Secrets with one Azure identity per service replaces that in #8).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: items
+  namespace: restauranty
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: items
+  namespace: restauranty
+  labels:
+    app: items
+spec:
+  selector:
+    app: items
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: items
+  namespace: restauranty
+spec:
+  replicas: 2                 # one pod can restart (rollout, rotation) while the other serves
+  selector:
+    matchLabels:
+      app: items
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0       # never fewer than 2 ready pods during a rollout
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: items
+    spec:
+      serviceAccountName: items
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000         # "node" user in node:22-alpine
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1            # the two pods on different nodes when possible
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: items
+      containers:
+        - name: items
+          image: acrevgeniarestauranty.azurecr.io/items:bfb0e27
+          ports:
+            - name: http
+              containerPort: 3003
+          env:
+            - name: PORT
+              value: "3003"
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: items-secrets
+                  key: mongo-password
+            # $(MONGO_PASSWORD) is filled in by Kubernetes from the variable
+            # above. The password is hex, so it needs no URL escaping.
+            - name: MONGODB_URI
+              value: mongodb://restauranty:$(MONGO_PASSWORD)@mongodb:27017/restauranty?authSource=restauranty
+            - name: JWT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: items-secrets
+                  key: jwt-public-key
+            # Cloudinary (image uploads). optional: true lets the pod start
+            # without them, but creating an item always uploads an image,
+            # so item creation fails until the keys are in Key Vault.
+            - name: CLOUD_NAME
+              valueFrom:
+                secretKeyRef: { name: items-secrets, key: cloud-name, optional: true }
+            - name: CLOUD_API_KEY
+              valueFrom:
+                secretKeyRef: { name: items-secrets, key: cloud-api-key, optional: true }
+            - name: CLOUD_API_SECRET
+              valueFrom:
+                secretKeyRef: { name: items-secrets, key: cloud-api-secret, optional: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          # The service's own "UP" route. Ready = gets traffic; live = not restarted.
+          readinessProbe:
+            httpGet:
+              path: /api/items
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/items
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20

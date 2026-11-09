@@ -1,0 +1,26 @@
+# One certificate for both public names. cert-manager stores it (with its
+# private key) in the Secret restauranty-tls, in the gateway namespace, where
+# only NGINX and cert-manager read it.
+#
+# Production issuer. Staging worked first (READY in 90 seconds), but its
+# certificate is useless in a browser here: .dev is on the browsers' HSTS
+# preload list, so they refuse an untrusted certificate with no way to
+# click through. Production allows 5 certificates per week for these names.
+# Renewal is automatic, 30 days before the 90-day certificate expires.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: restauranty-tls
+  namespace: gateway
+spec:
+  secretName: restauranty-tls
+  dnsNames:
+    - restauranty.aks.springlaughing.dev
+    - grafana.aks.springlaughing.dev
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always        # a new private key on every renewal
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod

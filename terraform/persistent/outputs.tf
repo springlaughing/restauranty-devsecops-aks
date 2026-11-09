@@ -42,3 +42,13 @@ output "pipeline_identity_principal_id" {
   description = "Principal (object) id of the pipeline identity, for role assignments."
   value       = azurerm_user_assigned_identity.pipeline.principal_id
 }
+
+output "app_hostnames" {
+  description = "Full names that resolve to the Gateway's static IP."
+  value       = [for r in azurerm_dns_a_record.app : r.fqdn]
+}
+
+output "gateway_public_ip_name" {
+  description = "Name of the static IP, for the Gateway's azure-pip-name annotation."
+  value       = azurerm_public_ip.gateway.name
+}

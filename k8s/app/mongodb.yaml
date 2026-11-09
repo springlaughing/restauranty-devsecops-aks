@@ -1,0 +1,149 @@
+# MongoDB inside the cluster, one pod, data on a zone-redundant Azure disk.
+#
+# Why in the cluster and not Atlas: the threat model's TB3 tests need it
+# here. A NetworkPolicy can only keep an attacker pod away from a database
+# that runs in the cluster (#11), and the password rotation demo (#16)
+# needs admin access to change the app user's password.
+#
+# Two users, created on the first start only (empty disk):
+#   root         admin of the whole server. Used only for admin work
+#                (password rotation). No app gets this password.
+#   restauranty  the apps' user: readWrite on the "restauranty" database
+#                only. Cannot create users, change roles or read other
+#                databases.
+# Passwords come from the Secret mongodb-secrets (from Key Vault, see
+# scripts/setup-aks.sh; External Secrets takes over in #8).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongodb
+  namespace: restauranty
+automountServiceAccountToken: false   # MongoDB never talks to the Kubernetes API
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-init
+  namespace: restauranty
+data:
+  # Runs once, when the data directory is empty, as the root user.
+  create-app-user.js: |
+    const appDb = db.getSiblingDB("restauranty");
+    appDb.createUser({
+      user: "restauranty",
+      pwd: process.env.MONGO_APP_PASSWORD,
+      roles: [{ role: "readWrite", db: "restauranty" }],
+    });
+    print("Created user 'restauranty' with readWrite on 'restauranty'");
+---
+# Headless Service: gives the pod the stable name mongodb-0.mongodb and the
+# short name "mongodb" that the apps connect to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: restauranty
+  labels:
+    app: mongodb
+spec:
+  clusterIP: None
+  selector:
+    app: mongodb
+  ports:
+    - name: mongodb
+      port: 27017
+      targetPort: mongodb
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: restauranty
+spec:
+  serviceName: mongodb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      serviceAccountName: mongodb
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999          # the "mongodb" user in the official image
+        runAsGroup: 999
+        fsGroup: 999            # the disk is made writable for this group
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mongodb
+          image: mongo:8.0.34
+          args: ["--auth", "--bind_ip_all"]
+          ports:
+            - name: mongodb
+              containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              value: root
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secrets
+                  key: root-password
+            - name: MONGO_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secrets
+                  key: app-password
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          # Checks only the port, so a check never needs a password.
+          readinessProbe:
+            tcpSocket:
+              port: mongodb
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: mongodb
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+            - name: configdb
+              mountPath: /data/configdb
+            - name: tmp
+              mountPath: /tmp
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+      volumes:
+        - name: configdb
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: mongodb-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: managed-csi-zrs
+        resources:
+          requests:
+            storage: 8Gi
