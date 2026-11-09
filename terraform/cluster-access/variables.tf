@@ -21,3 +21,26 @@ variable "acr_name" {
   type        = string
   default     = "acrevgeniarestauranty"
 }
+
+variable "key_vault_name" {
+  description = "The Key Vault from terraform/persistent."
+  type        = string
+  default     = "kv-evgenia-restauranty"
+}
+
+variable "app_namespace" {
+  description = "Kubernetes namespace of the app's ServiceAccounts."
+  type        = string
+  default     = "restauranty"
+}
+
+variable "workload_secrets" {
+  description = "Which Key Vault secrets each workload may read. One identity per key, named like its ServiceAccount."
+  type        = map(list(string))
+  default = {
+    auth      = ["jwt-private-key", "mongo-password"]
+    discounts = ["jwt-public-key", "mongo-password"]
+    items     = ["jwt-public-key", "mongo-password", "cloud-name", "cloud-api-key", "cloud-api-secret"]
+    mongodb   = ["mongo-root-password", "mongo-password"]
+  }
+}
