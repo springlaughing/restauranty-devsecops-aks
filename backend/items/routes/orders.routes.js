@@ -8,7 +8,6 @@ const Order = require('../models/Order.model')
 router.get("/", (req, res, next) => {
 
     Order.find().then(orders => {
-        console.log(orders);
         res.json(orders)
     }).catch(err => {
         next(err)

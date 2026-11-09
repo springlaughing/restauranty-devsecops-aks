@@ -31,12 +31,9 @@ router.post("/", fileUploader.single("imagem"), (req, res, next) => {
 
     const dietary = req.body
 
-    console.log(dietary)
-    console.log(5)
 
     Dietary.create(dietary)
         .then(newDietary => {
-            console.log(newDietary)
             let id = newDietary._id;
             return Dietary.findByIdAndUpdate(
                 id,
