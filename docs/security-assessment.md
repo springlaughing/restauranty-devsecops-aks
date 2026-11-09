@@ -1250,7 +1250,14 @@ Issue numbers link to GitHub.
 | F19 | Outdated packages | Low | Fix: images without development tools, frontend served as static files; npm audit and Trivy in the pipeline | [#5](https://github.com/springlaughing/restauranty-devsecops-aks/issues/5), [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 | F20 | Cloudinary keys in the git history | High | Report: tell the owner to rotate them. gitleaks on every push. | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 
-**Retest.** After the fixes, the same tests run again against the app on AKS. Each fixed finding gets its "after" proof, and the most important tests become automatic checks in the pipeline ([#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13)).
+**Retest.** After each fix, the same tests run again. Each fixed finding gets its "after" proof. There are two rounds:
+
+| Round | Where | What it proves |
+| --- | --- | --- |
+| Local | On my laptop, through HAProxy | That the code fixes work. Fast, so mistakes are found early. |
+| On AKS | The real deployment on my domain | That the fixes are really deployed, and the protections that exist only there: the Gateway block, the rate limit, Key Vault, NetworkPolicies. |
+
+The most important tests then become automatic checks in the pipeline ([#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13)), so they run after every deploy.
 
 ### Retest 1: code fixes for #4 and #21, local (9 November 2026)
 
