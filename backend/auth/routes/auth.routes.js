@@ -19,6 +19,15 @@ const { privateKey, signOptions } = require("../config/jwt");
 // How many rounds should bcrypt run the salt (default - 10 rounds)
 const saltRounds = 10;
 
+// One answer for every failed login, so it never tells whether an email
+// has an account.
+const LOGIN_FAILED = "Email or Password Incorrect";
+
+// A bcrypt hash that matches no real password. When the email is unknown,
+// login still compares against it, so that answer takes as long as a wrong
+// password: the response time does not reveal which emails exist either.
+const DUMMY_HASH = bcrypt.hashSync("no-account-has-this-password", saltRounds);
+
 // POST /auth/signup  - Creates a new user in the database
 router.post("/signup", (req, res, next) => {
   const { name, surname, email, password, address, phoneNumber } = req.body;
@@ -88,8 +97,8 @@ router.post("/signup", (req, res, next) => {
 router.post("/login", (req, res, next) => {
   const { email, password } = req.body;
 
-  // Check if email or password are provided as empty string
-  if (email === "" || password === "") {
+  // Check that email and password are given and not empty
+  if (!email || !password) {
     res.status(400).json({ message: "Provide email and password." });
     return;
   }
@@ -98,8 +107,9 @@ router.post("/login", (req, res, next) => {
   User.findOne({ email })
     .then((foundUser) => {
       if (!foundUser) {
-        // If the user is not found, send an error response
-        res.status(401).json({ message: "User not found." });
+        // Same work and same answer as a wrong password
+        bcrypt.compareSync(password, DUMMY_HASH);
+        res.status(401).json({ message: LOGIN_FAILED });
         return;
       }
 
@@ -119,7 +129,7 @@ router.post("/login", (req, res, next) => {
         // Send the token as the response
         res.status(200).json({ authToken: authToken });
       } else {
-        res.status(401).json({ message: "Email or Password Incorrect" });
+        res.status(401).json({ message: LOGIN_FAILED });
       }
     })
     .catch((err) => next(err)); // In this case, we send error handling to the error handling middleware.
