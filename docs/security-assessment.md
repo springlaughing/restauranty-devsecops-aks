@@ -51,7 +51,8 @@
 - [Step 7: Errors, logs, overload](#step-7-errors-logs-overload)
 - [Step 8: Tools](#step-8-tools)
 - [Step 9: Report](#step-9-report)
-- [Findings](#findings)
+  - [Findings](#findings)
+  - [Decisions](#decisions)
 - [Retests](#retests)
 
 ---
@@ -1212,7 +1213,38 @@ In test 3f I wrote that the Cloudinary values in the old `.env` were placeholder
 
 ## Step 9: Report
 
-**Result:** every finding has a decision: fix it, contain it, accept it for now, or report it to its owner. Rule used: fix when the file is being changed anyway and it takes little time; accept when other planned fixes already reduce the risk. The summary is at the [top of this document](#summary); all findings with their proof are in the [findings table](#findings).
+**Result:** 20 findings, each with a decision: fix it, contain it, accept it for now, or report it to its owner. First the findings with their proof, then the decisions.
+
+### Findings
+
+A finding is a suspicion that a real request has proved. Each one links to the step with the proof.
+
+| ID | Finding | Severity | OWASP 2025 | Proof |
+| --- | --- | --- | --- | --- |
+| F1 | Every new account gets the `admin` role. Anyone who signs up can manage the whole restaurant. | High | A01 Broken Access Control | [Step 2](#step-2-normal-use) |
+| F2 | The login token contains personal data (email, address, phone). A token is only encoded, not encrypted: anyone holding it can read it. | Medium | A04 Cryptographic Failures, GDPR | [Step 2](#step-2-normal-use) |
+| F3 | The server writes personal data (address, phone) into its log on every page load. | Medium | A09 Security Logging and Alerting Failures, GDPR | [Step 2](#step-2-normal-use) |
+| F4 | Login reveals which emails have an account: by the message, the size, and the time of the answer. Signup reveals it too. | Medium | A07 Authentication Failures | [Test 3a](#test-3a-does-login-reveal-which-emails-exist) |
+| F5 | Weak passwords are accepted: `Password1`, `Qwerty123`, `Restauranty1`. | Medium | A07 Authentication Failures | [Test 3b](#test-3b-how-weak-can-a-password-be) |
+| F6 | No limit on login attempts: about 10 guesses per second, no blocking, no slowdown. | High | A07 Authentication Failures | [Test 3c](#test-3c-can-i-guess-passwords-without-limit) |
+| F7 | Logout does not end the session: a copied token works for its full 6 hours after logout. | Medium | A07 Authentication Failures | [Test 3d](#test-3d-does-logout-really-log-you-out) |
+| F8 | A missing, broken or tampered token is answered with "500 server error" instead of "401 not allowed", with 11 to 17 log lines each. Attacks look like outages. | Medium | A10 Mishandling of Exceptional Conditions | [Test 3e](#test-3e-can-i-change-the-token-myself), [Test 7a](#test-7a-what-happens-with-no-token-or-a-broken-one) |
+| F9 | The server signs and checks tokens with one secret (HS256), and runs with `MySecret1!`, the value published in `.env.example` and the README. With it, anyone can make an admin token for any user, even one that does not exist. The app never complains about the default. | High | A02 Security Misconfiguration, A04 Cryptographic Failures | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
+| F10 | Real config files (`.env`) were committed in April 2025 and are still in the git history, including a MongoDB username and password (for `localhost`). | Low | A02 Security Misconfiguration | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
+| F11 | Anyone can list all users, or look up one user by ID, without logging in: password hashes, emails, addresses, phones, roles. Offline, 4 of 5 test passwords were recovered from the hashes in 3.4 seconds. | High | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read), [Test 5b](#test-5b-does-looking-up-one-user-leak-the-hash) |
+| F12 | Anyone can read all items, dietary categories, orders, coupons and campaigns without logging in. | Medium | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read) |
+| F13 | Anyone can create, change and delete coupons, campaigns, items, dietary categories and orders without logging in. None of these routes checks a token (step 1); proved with a request by creating a 100% coupon valid until 2099. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
+| F14 | Anyone can delete any user without logging in. The answer also returns the deleted user's password hash and personal data. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
+| F15 | Logged-in users also get every user's password hash. Since anyone can sign up, a token check would not help; a Gateway block only hides the route, the auth service still sends the hashes. | High | A01 Broken Access Control | [Test 5a](#test-5a-does-a-logged-in-user-also-get-other-users-hashes) |
+| F16 | Coupons accept any discount (-50, 1000, "lots") and an end date before the start date. The discount is stored as free text and never checked. | Medium | A06 Insecure Design | [Test 6a](#test-6a-does-the-app-check-what-a-discount-can-be) |
+| F17 | Error answers contain the raw database error: MongoDB, Mongoose, model names, field names and rules. The same line sends them in 32 places. | Low | A10 Mishandling of Exceptional Conditions | [Test 7b](#test-7b-what-do-errors-tell-an-attacker) |
+| F18 | Request metrics are labelled with the full URL. 200 junk requests created 201 new counters: an attacker can overload Prometheus and blind the monitoring. | Medium | A06 Insecure Design | [Test 7c](#test-7c-can-junk-requests-fill-up-the-monitoring) |
+| F19 | Outdated packages: the frontend has 36 known issues, mostly in build tools (0 critical), and `react-router` needs a major upgrade. The backends' issues are only in the development tool `nodemon`. | Low | A03 Software Supply Chain Failures | [Test 8a](#test-8a-npm-audit-known-vulnerable-packages) |
+| F20 | Cloudinary credentials (API key and secret) were written into the code in the first commit (April 2025). Removed in June 2025, but still in the public git history. They look real. Not tried; the owner should rotate them. | High | A07 Authentication Failures | [Test 8c](#test-8c-gitleaks-secrets-in-the-git-history) |
+
+### Decisions
+
+**Rule used:** fix when the file is being changed anyway and it takes little time; accept when other planned fixes already reduce the risk.
 
 **Kinds of decision**
 
@@ -1252,35 +1284,6 @@ Issue numbers link to GitHub.
 | F20 | Cloudinary keys in the git history | High | Report: tell the owner to rotate them. gitleaks on every push. | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 
 **After the fixes:** each fix is tested again with the same attacks. The results are in [Retests](#retests), at the end of this document.
-
----
-
-## Findings
-
-A finding is a suspicion that a real request has proved. Each one links to the step with the proof.
-
-| ID | Finding | Severity | OWASP 2025 | Proof |
-| --- | --- | --- | --- | --- |
-| F1 | Every new account gets the `admin` role. Anyone who signs up can manage the whole restaurant. | High | A01 Broken Access Control | [Step 2](#step-2-normal-use) |
-| F2 | The login token contains personal data (email, address, phone). A token is only encoded, not encrypted: anyone holding it can read it. | Medium | A04 Cryptographic Failures, GDPR | [Step 2](#step-2-normal-use) |
-| F3 | The server writes personal data (address, phone) into its log on every page load. | Medium | A09 Security Logging and Alerting Failures, GDPR | [Step 2](#step-2-normal-use) |
-| F4 | Login reveals which emails have an account: by the message, the size, and the time of the answer. Signup reveals it too. | Medium | A07 Authentication Failures | [Test 3a](#test-3a-does-login-reveal-which-emails-exist) |
-| F5 | Weak passwords are accepted: `Password1`, `Qwerty123`, `Restauranty1`. | Medium | A07 Authentication Failures | [Test 3b](#test-3b-how-weak-can-a-password-be) |
-| F6 | No limit on login attempts: about 10 guesses per second, no blocking, no slowdown. | High | A07 Authentication Failures | [Test 3c](#test-3c-can-i-guess-passwords-without-limit) |
-| F7 | Logout does not end the session: a copied token works for its full 6 hours after logout. | Medium | A07 Authentication Failures | [Test 3d](#test-3d-does-logout-really-log-you-out) |
-| F8 | A missing, broken or tampered token is answered with "500 server error" instead of "401 not allowed", with 11 to 17 log lines each. Attacks look like outages. | Medium | A10 Mishandling of Exceptional Conditions | [Test 3e](#test-3e-can-i-change-the-token-myself), [Test 7a](#test-7a-what-happens-with-no-token-or-a-broken-one) |
-| F9 | The server signs and checks tokens with one secret (HS256), and runs with `MySecret1!`, the value published in `.env.example` and the README. With it, anyone can make an admin token for any user, even one that does not exist. The app never complains about the default. | High | A02 Security Misconfiguration, A04 Cryptographic Failures | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
-| F10 | Real config files (`.env`) were committed in April 2025 and are still in the git history, including a MongoDB username and password (for `localhost`). | Low | A02 Security Misconfiguration | [Test 3f](#test-3f-can-i-make-my-own-token-from-nothing) |
-| F11 | Anyone can list all users, or look up one user by ID, without logging in: password hashes, emails, addresses, phones, roles. Offline, 4 of 5 test passwords were recovered from the hashes in 3.4 seconds. | High | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read), [Test 5b](#test-5b-does-looking-up-one-user-leak-the-hash) |
-| F12 | Anyone can read all items, dietary categories, orders, coupons and campaigns without logging in. | Medium | A01 Broken Access Control | [Test 4a](#test-4a-what-can-a-stranger-read) |
-| F13 | Anyone can create, change and delete coupons, campaigns, items, dietary categories and orders without logging in. None of these routes checks a token (step 1); proved with a request by creating a 100% coupon valid until 2099. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
-| F14 | Anyone can delete any user without logging in. The answer also returns the deleted user's password hash and personal data. | High | A01 Broken Access Control | [Test 4b](#test-4b-what-can-a-stranger-change-or-delete) |
-| F15 | Logged-in users also get every user's password hash. Since anyone can sign up, a token check would not help; a Gateway block only hides the route, the auth service still sends the hashes. | High | A01 Broken Access Control | [Test 5a](#test-5a-does-a-logged-in-user-also-get-other-users-hashes) |
-| F16 | Coupons accept any discount (-50, 1000, "lots") and an end date before the start date. The discount is stored as free text and never checked. | Medium | A06 Insecure Design | [Test 6a](#test-6a-does-the-app-check-what-a-discount-can-be) |
-| F17 | Error answers contain the raw database error: MongoDB, Mongoose, model names, field names and rules. The same line sends them in 32 places. | Low | A10 Mishandling of Exceptional Conditions | [Test 7b](#test-7b-what-do-errors-tell-an-attacker) |
-| F18 | Request metrics are labelled with the full URL. 200 junk requests created 201 new counters: an attacker can overload Prometheus and blind the monitoring. | Medium | A06 Insecure Design | [Test 7c](#test-7c-can-junk-requests-fill-up-the-monitoring) |
-| F19 | Outdated packages: the frontend has 36 known issues, mostly in build tools (0 critical), and `react-router` needs a major upgrade. The backends' issues are only in the development tool `nodemon`. | Low | A03 Software Supply Chain Failures | [Test 8a](#test-8a-npm-audit-known-vulnerable-packages) |
-| F20 | Cloudinary credentials (API key and secret) were written into the code in the first commit (April 2025). Removed in June 2025, but still in the public git history. They look real. Not tried; the owner should rotate them. | High | A07 Authentication Failures | [Test 8c](#test-8c-gitleaks-secrets-in-the-git-history) |
 
 ---
 
