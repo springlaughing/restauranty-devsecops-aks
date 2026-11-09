@@ -5,29 +5,29 @@ const Campaigns = require('../models/campaigns.model')
 
 // const fileUploader = require('./../config/cloudinary.config')
 
-router.get("/", (req, res) => {
+router.get("/", (req, res, next) => {
 
     Campaigns.find().then(campaigns => {
         res.json(campaigns)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.get("/:id", (req, res) => {
+router.get("/:id", (req, res, next) => {
 
     const id = req.params.id
 
     Campaigns.findById(id).then(campaign => {
         res.json(campaign)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.post("/", (req, res) => {
+router.post("/", (req, res, next) => {
 
     const campaign = req.body
 
@@ -42,23 +42,23 @@ router.post("/", (req, res) => {
             res.json(updatedCampaign);
         })
         .catch(err => {
-            res.status(400).json(err);
+            next(err);
         });
 
 })
 
-router.put("/:id", (req, res) => {
+router.put("/:id", (req, res, next) => {
 
     const campaign = req.body
 
     Campaigns.findByIdAndUpdate(campaign._id, campaign, { new: true }).then(newCampaign => {
         res.json(newCampaign)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 })
 
-router.delete("/:id", (req, res) => {
+router.delete("/:id", (req, res, next) => {
 
     const id = req.params.id
 
@@ -68,7 +68,7 @@ router.delete("/:id", (req, res) => {
             couponDeleted
         })
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })

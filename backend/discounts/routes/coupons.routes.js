@@ -5,29 +5,29 @@ const Coupons = require('../models/coupons.model')
 
 // const fileUploader = require('./../config/cloudinary.config')
 
-router.get("/", (req, res) => {
+router.get("/", (req, res, next) => {
 
     Coupons.find().then(coupons => {
         res.json(coupons)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.get("/:id", (req, res) => {
+router.get("/:id", (req, res, next) => {
 
     const id = req.params.id
 
     Coupons.findById(id).then(coupon => {
         res.json(coupon)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
 
-router.post("/", (req, res) => {
+router.post("/", (req, res, next) => {
 
     const coupon = req.body
 
@@ -42,23 +42,23 @@ router.post("/", (req, res) => {
             res.json(updatedCoupon);
         })
         .catch(err => {
-            res.status(400).json(err);
+            next(err);
         });
 
 })
 
-router.put("/:id", (req, res) => {
+router.put("/:id", (req, res, next) => {
 
     const coupon = req.body
 
     Coupons.findByIdAndUpdate(coupon._id, coupon, { new: true }).then(newCoupon => {
         res.json(newCoupon)
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 })
 
-router.delete("/:id", (req, res) => {
+router.delete("/:id", (req, res, next) => {
 
     const id = req.params.id
 
@@ -68,7 +68,7 @@ router.delete("/:id", (req, res) => {
             couponDeleted
         })
     }).catch(err => {
-        res.status(400).json(err)
+        next(err)
     })
 
 })
