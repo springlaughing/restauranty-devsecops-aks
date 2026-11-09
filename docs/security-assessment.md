@@ -1254,7 +1254,7 @@ A finding is a suspicion that a real request has proved. Each one links to the s
 | **Contain** | Put a barrier in front of the app (at the Gateway). The weakness is still inside, but strangers cannot reach it. Faster than a fix, and a second layer after it. |
 | **Detect** | Does not stop anything: an alert tells me when an attack happens. Used together with the others. |
 | **Accept** | Not fixed this week, on purpose. The reason and what production would do go into `SECURITY.md`. |
-| **Report** | The problem belongs to someone else. Tell them; do not touch it. |
+| **Report** | The problem belongs to someone else. Tell them; do not touch it. (Considered for F20; see its row.) |
 
 **How each finding will be handled**
 
@@ -1281,7 +1281,7 @@ Issue numbers link to GitHub.
 | F17 | Raw database errors in answers | Low | Fix: the shared error handler answers briefly (same change as F8) | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4) |
 | F18 | Metrics labelled with the full URL | Medium | Fix: label by route pattern | [#14](https://github.com/springlaughing/restauranty-devsecops-aks/issues/14) |
 | F19 | Outdated packages | Low | Fix: images without development tools, frontend served as static files; npm audit and Trivy in the pipeline | [#5](https://github.com/springlaughing/restauranty-devsecops-aks/issues/5), [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
-| F20 | Cloudinary keys in the git history | High | Report: tell the owner to rotate them. gitleaks on every push. | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
+| F20 | Cloudinary keys in the git history | High | Not reported: the repo is a course project used by many groups, so the keys are most likely there on purpose. Keys not used. gitleaks on every push. | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 
 **After the fixes:** each fix is tested again with the same attacks. The results are in [Retests](#retests), at the end of this document.
 
@@ -1356,3 +1356,47 @@ curl -s -X POST $B/api/auth/login -H "$J" -d '{"email":"gordon@example.com","pas
 | Real login | Works | **Still works.** The token header now says `"alg":"RS256"`. |
 
 **Still open, as planned:** the user list and all other routes still answer strangers (now without hashes). Token checks in discounts and items come with [#9](https://github.com/springlaughing/restauranty-devsecops-aks/issues/9); the Gateway block and the login rate limit come on AKS with [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10).
+
+### Retest 2: token checks for #9, local (9 November 2026)
+
+**Result:** a stranger can no longer read, create or delete anything. Every data route answers 401 without a token. The admin pages still work, because the frontend now sends the token.
+
+**What I did:** added the token check where the routes are mounted (`app.js` in auth, discounts and items), made the frontend send the token to our own API, restarted the backends, and ran the stranger tests from tests 4a and 4b again.
+
+```bash
+B=http://localhost; J='Content-Type: application/json'
+for path in /api/auth/users /api/items/items /api/items/dietary /api/items/orders \
+            /api/discounts/coupons /api/discounts/campaign; do
+  curl -s -o /dev/null -w "$path HTTP %{http_code}\n" "$B$path"
+done
+curl -s -w '  [HTTP %{http_code}]\n' -X POST $B/api/discounts/coupons -H "$J" \
+  -d '{"name":"FREE-LUNCH-AGAIN","discount":"100","start":"2026-11-09","end":"2099-12-31"}'
+curl -s -w '  [HTTP %{http_code}]\n' -X DELETE $B/api/auth/users/<id>
+```
+
+```text
+/api/auth/users HTTP 401
+/api/items/items HTTP 401
+/api/items/dietary HTTP 401
+/api/items/orders HTTP 401
+/api/discounts/coupons HTTP 401
+/api/discounts/campaign HTTP 401
+{"message":"Invalid or missing token"}  [HTTP 401]
+{"message":"Invalid or missing token"}  [HTTP 401]
+```
+
+The frontend now sends the token to items and discounts. Compare with test 4c, where it did not:
+
+![The coupons request now carries the Authorization header with an RS256 token](evidence/09-coupons-request-with-token.png)
+
+| Finding | Before | After |
+| --- | --- | --- |
+| F12 Data readable without login | 200 on all 6 read routes | **401** on all 6 |
+| F13 Data changeable without login | 100% coupon created (200) | **401** |
+| F14 Any user deleted without login | 200, user gone | **401** |
+| F11 User list without login | 200 (after Retest 1: without hashes) | **401** |
+| Test 4c Frontend sends the token | Only to auth | **To every call to our API** |
+
+Health checks, `/metrics`, signup and login stay public on purpose: Kubernetes, Prometheus and new users need them.
+
+**Still open, as planned:** logged-in users can still do everything, because every account is admin (F1, accepted). The Gateway block and the login rate limit come on AKS with [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10).
