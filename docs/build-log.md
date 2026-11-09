@@ -23,6 +23,9 @@
   - [9. Cluster: AKS up](#9-cluster-aks-up)
   - [10. Persistent layer: Key Vault, registry, IP, identity](#10-persistent-layer-key-vault-registry-ip-identity)
 - [Findings and their fixes](#findings-and-their-fixes)
+- [Part 3 — container images](#part-3--container-images)
+  - [11. Hardened Dockerfiles for all four components](#11-hardened-dockerfiles-for-all-four-components)
+  - [What is Trivy, and why we scan](#what-is-trivy-and-why-we-scan)
 - [What is next](#what-is-next)
 
 ---
@@ -217,10 +220,61 @@ The 20 findings from the [security assessment](security-assessment.md), and whet
 | F16 | Any discount and any dates accepted | Medium | Accepted (closed to strangers by #9) |
 | F17 | Raw database errors in answers | Low | **Fixed** (entry 4) |
 | F18 | Metrics labelled with the full URL | Medium | Planned: label by route (#14) |
-| F19 | Outdated packages | Low | Planned: hardened images (#5) |
+| F19 | Outdated packages | Low | **Images done** (entry 11): 0 high/critical; pipeline scan still to add (#13) |
 | F20 | Cloudinary keys in git history | High | Not reported (course repo, keys not used) |
 
 Fixed so far: 10 of 20, all the code findings. The rest are either planned for AKS or accepted on purpose.
+
+---
+
+## Part 3 — container images
+
+### 11. Hardened Dockerfiles for all four components
+
+**Result:** each component now has a container image that runs as a non-root user and has no known high or critical vulnerabilities. (Issue #5; part of F19.)
+
+**Why.** The app will run as containers on AKS. A container built carelessly runs as root, ships development tools, and uses a base image full of outdated libraries. Each of those is a way in for an attacker. These images avoid all three.
+
+**The backends** (`backend/*/Dockerfile`): two stages. The first installs only the production dependencies. The second copies them into a small image with the app. It runs `node server.js` (not `nodemon`, a development tool), as the built-in non-root user, and `npm` is removed from the final image so its own vulnerabilities are gone.
+
+**The client** (`client/Dockerfile`): the React site is built with Node, then served by `nginx-unprivileged`, which runs as a non-root user on port 8080. The base image's operating-system packages are upgraded, which cleared outdated `libssl`, `libcrypto` and `brotli`.
+
+```bash
+# Build an image
+docker build -t restauranty-auth ./backend/auth
+
+# Check it runs as a non-root user
+docker run --rm --entrypoint sh restauranty-auth -c id   # uid=1000(node)
+```
+
+A `.dockerignore` in each folder keeps `.env` files, the JWT keys, `node_modules` and git history out of the image.
+
+### What is Trivy, and why we scan
+
+**In one line:** Trivy is a free tool that checks a container image for known security problems before it ships.
+
+**What it is.** Trivy is a real, widely used open-source scanner made by Aqua Security. It is one of the most common tools of its kind and runs in the pipelines of many companies. It scans container images, code folders and infrastructure files.
+
+**What it looks for.** Mainly **known vulnerabilities** (called CVEs). Every image contains many pieces of software: operating-system packages (like `libssl`) and application packages (from `package-lock.json`). Each has a version. Security researchers keep public lists of which versions have known problems. Trivy compares every package in the image against those lists and reports any match, with how serious it is and which version fixes it.
+
+**Why we use it.** An image can be built from perfectly fine code and still be dangerous, because a library inside it is old and has a known hole. A person cannot track thousands of packages by hand. Trivy does it in seconds, so a problem is caught before the image reaches the cluster.
+
+**How it becomes a gate.** In the pipeline (planned, #13), Trivy runs on every build and **fails the build if it finds a CRITICAL problem**. So a dangerous image never gets deployed. We block on CRITICAL only, not on everything, so the gate stays useful and is not switched off from noise.
+
+**What it found here.** The backend images had no critical problems. The client image first showed 3 critical and 62 high problems, all in the base image's operating-system packages. Upgrading those packages in the image cleared them.
+
+```bash
+# Scan an image for the serious problems, the way the pipeline will
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  aquasec/trivy:latest image --severity HIGH,CRITICAL restauranty-client
+```
+
+| Image | High / critical before | After |
+| --- | --- | --- |
+| auth, discounts, items | 0 critical, 10 high (in npm) | **0** (npm removed) |
+| client | 3 critical, 62 high (in the base OS) | **0** (OS packages upgraded) |
+
+Trivy is one of three tools in this project, each for a different job: Trivy for vulnerable packages in images, Semgrep for risky code patterns, gitleaks for secrets in git history (see the [security assessment](security-assessment.md), step 8).
 
 ---
 
@@ -228,8 +282,7 @@ Fixed so far: 10 of 20, all the code findings. The rest are either planned for A
 
 | Task | Issue |
 | --- | --- |
-| Apply the persistent layer; put the secrets in Key Vault | #6 |
-| Hardened Dockerfiles (non-root, no dev tools) and docker-compose | #5, #1 |
+| Push the images to the registry; docker-compose for local dev | #5, #1 |
 | Manifests, MongoDB, Gateway routing, HTTPS | #7 |
 | Per-service identities, External Secrets, NetworkPolicies | #8, #11 |
 | Gateway block on the user list, login rate limit | #10 |
