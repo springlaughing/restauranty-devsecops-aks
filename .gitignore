@@ -17,3 +17,6 @@ build
 *.tfstate.*
 .terraform/
 kubeconfig*
+*.tfplan
+crash.log
+crash.*.log
