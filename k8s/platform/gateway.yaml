@@ -1,0 +1,84 @@
+# The only way in from the internet (trust boundary TB1).
+#
+# NGINX Gateway Fabric sees this Gateway and starts NGINX pods plus a Service
+# of type LoadBalancer for it, in this namespace. The annotations below are
+# copied onto that Service and tell Azure to use the static IP from
+# terraform/persistent instead of creating a new one. The DNS records point
+# at that IP, so a cluster rebuild never changes the address.
+#
+# Listeners:
+#   http           port 80: only the Let's Encrypt check and a redirect to HTTPS
+#   https-app      port 443 for restauranty.aks.springlaughing.dev
+#   https-grafana  port 443 for grafana.aks.springlaughing.dev (Grafana, #14/#17)
+# Both HTTPS names share one certificate, so adding Grafana later needs no
+# new certificate (Let's Encrypt limits how often a name set can be issued).
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: restauranty
+  namespace: gateway
+spec:
+  gatewayClassName: nginx
+  infrastructure:
+    annotations:
+      # The IP lives in the persistent resource group, not the cluster's.
+      # The cluster identity has Network Contributor there (terraform/cluster-access).
+      service.beta.kubernetes.io/azure-load-balancer-resource-group: rg-evgenia-restauranty
+      service.beta.kubernetes.io/azure-pip-name: pip-evgenia-restauranty
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same        # only the redirect and cert-manager's check, both in this namespace
+    - name: https-app
+      protocol: HTTPS
+      port: 443
+      hostname: restauranty.aks.springlaughing.dev   # answers only for this name (SNI)
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: restauranty-tls                    # written by cert-manager (certificate.yaml)
+      allowedRoutes:
+        namespaces:
+          from: Selector    # only namespaces that opt in with the label
+          selector:
+            matchLabels:
+              gateway-access: "true"
+    - name: https-grafana
+      protocol: HTTPS
+      port: 443
+      hostname: grafana.aks.springlaughing.dev
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: restauranty-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: "true"
+---
+# Plain HTTP is never served: every request on port 80 gets a permanent
+# redirect to the same URL on HTTPS. cert-manager's check during issuing
+# uses a longer, exact path (/.well-known/acme-challenge/<token>), and the
+# most specific path wins, so the check still reaches cert-manager.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: redirect-to-https
+  namespace: gateway
+spec:
+  parentRefs:
+    - name: restauranty
+      sectionName: http
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301

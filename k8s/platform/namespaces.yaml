@@ -1,0 +1,29 @@
+# Two namespaces, two levels of trust.
+#
+# gateway:     the Gateway's NGINX pods, the HTTPS certificate and its private
+#              key. App pods never run here, so an app ServiceAccount has no
+#              reason to read Secrets here (threat model, TB1).
+# restauranty: the four app components and MongoDB.
+#
+# Pod Security Admission: Kubernetes checks every new pod against a built-in
+# profile and refuses pods that break it. "restricted" = non-root, no
+# privilege escalation, all Linux capabilities dropped, seccomp on.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+  labels:
+    # NGINX and cert-manager's challenge pods are not ours to harden, so the
+    # middle profile is enforced; "restricted" only warns.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: restauranty
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    # The Gateway accepts routes only from namespaces with this label.
+    gateway-access: "true"

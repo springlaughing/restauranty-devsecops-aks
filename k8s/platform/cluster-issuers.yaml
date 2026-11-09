@@ -1,0 +1,47 @@
+# Let's Encrypt, checked with HTTP-01 (same method as the voting app on AKS).
+#
+# How a certificate is issued: Let's Encrypt asks for
+# http://<name>/.well-known/acme-challenge/<token>. cert-manager answers it
+# with a short-lived pod and an HTTPRoute on the Gateway's port 80 listener.
+# Getting that answer proves we control the name.
+#
+# No DNS-01: cert-manager needs no write rights in the shared DNS zone.
+# Limits: no wildcard certificates, and port 80 must be open to the internet.
+#
+# Staging first (untrusted certificate, generous limits), production once
+# staging works: production allows 5 certificates per name set per 7 days.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-staging-account
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: restauranty
+                namespace: gateway
+                kind: Gateway
+                sectionName: http
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod-account
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: restauranty
+                namespace: gateway
+                kind: Gateway
+                sectionName: http

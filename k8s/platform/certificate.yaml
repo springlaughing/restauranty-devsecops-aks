@@ -1,0 +1,24 @@
+# One certificate for both public names. cert-manager stores it (with its
+# private key) in the Secret restauranty-tls, in the gateway namespace, where
+# only NGINX and cert-manager read it.
+#
+# Start: letsencrypt-staging. Once it shows READY=True, change issuerRef to
+# letsencrypt-prod and apply again; cert-manager then replaces it.
+# Renewal is automatic, 30 days before the 90-day certificate expires.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: restauranty-tls
+  namespace: gateway
+spec:
+  secretName: restauranty-tls
+  dnsNames:
+    - restauranty.aks.springlaughing.dev
+    - grafana.aks.springlaughing.dev
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always        # a new private key on every renewal
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-staging
