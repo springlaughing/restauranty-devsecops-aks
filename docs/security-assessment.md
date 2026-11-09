@@ -4,17 +4,53 @@
 
 **How to read it.** Every step starts with its result in one line. The details come after. You can read any step on its own.
 
-**Status:** steps 1 to 8 of 9 done (9 November 2026).
+**Status:** all 9 steps done (9 November 2026). Fixes follow in the issues linked in [step 9](#step-9-report).
+
+---
+
+## Summary
+
+**In one line:** without logging in, anyone could read every user's password hash, change or delete any data, and make their own admin token.
+
+**What I tested.** The app as I received it, on my laptop, with fake users. 8 steps along the OWASP Web Security Testing Guide, from listing every route to running security tools.
+
+**What I found: 20 problems.**
+
+| Severity | Count | Meaning |
+| --- | --- | --- |
+| High | 8 | Anyone on the internet can read private data, change data, or act as another user |
+| Medium | 9 | Makes an attack easier, or needs an extra condition |
+| Low | 3 | Good practice missing, no direct harm alone |
+
+**The three worst:**
+
+1. **Every user's password hash and personal data, without logging in** (F11). One request to `/api/auth/users`. From the hashes, 4 of 5 test passwords were recovered offline in 3.4 seconds.
+2. **Anyone can make an admin token** (F9). The server signs tokens with `MySecret1!`, which is published in the repo. The server accepted a token for a user that does not exist.
+3. **Anyone can change or delete everything** (F13, F14). Without a token: a 100% coupon valid until 2099, a deleted user.
+
+**How the problems chain together.** No login → the user list gives emails and hashes (F11) → weak passwords are guessed offline (F5) → log in → every account is admin (F1). From nothing to admin in under a minute.
+
+**What already works.** Passwords are hashed with bcrypt (cost 10). Tampered tokens are refused. Signup ignores extra fields like `role`, and its answer contains no password. The browser never gets stack traces.
+
+**People and tools found different things.** `npm audit` and Semgrep found none of the 19 problems found by hand: those are in this app's own logic, which tools do not understand. gitleaks found leaked Cloudinary keys in the git history (F20) that I had missed. Both are needed.
 
 ---
 
 ## Contents
 
+- [Summary](#summary)
 - [Scope: what I tested and how](#scope-what-i-tested-and-how)
 - [Method: how the testing is organised](#method-how-the-testing-is-organised)
 - [Steps](#steps)
 - [Step 1: Recon. What can be reached?](#step-1-recon-what-can-be-reached)
-- [Steps 2 to 9](#step-2-normal-use)
+- [Step 2: Normal use](#step-2-normal-use)
+- [Step 3: Login and token](#step-3-login-and-token)
+- [Step 4: Permissions](#step-4-permissions)
+- [Step 5: Data exposure](#step-5-data-exposure)
+- [Step 6: Input and business logic](#step-6-input-and-business-logic)
+- [Step 7: Errors, logs, overload](#step-7-errors-logs-overload)
+- [Step 8: Tools](#step-8-tools)
+- [Step 9: Report](#step-9-report)
 - [Findings](#findings)
 
 ---
@@ -108,7 +144,7 @@ How to report a problem in this project will be described in `SECURITY.md` (plan
 | 6 | **Input and business logic.** Extra fields, wrong IDs, a 100% coupon. | INPV, BUSL | Done |
 | 7 | **Errors, logs, overload.** Error codes, what lands in the logs, heavy load. | ERRH | Done |
 | 8 | **Tools.** `npm audit` and Semgrep, to catch what I missed. | - | Done |
-| 9 | **Report.** Final findings table and fixes. | - | To do |
+| 9 | **Report.** Final findings table and fixes. | - | Done |
 
 ---
 
@@ -1175,9 +1211,45 @@ In test 3f I wrote that the Cloudinary values in the old `.env` were placeholder
 
 ## Step 9: Report
 
-**Goal:** the final findings table, with severity, OWASP tag, proof, and the fix.
+**Result:** every finding has a decision: fix it, contain it, accept it for now, or report it to its owner. Rule used: fix when the file is being changed anyway and it takes little time; accept when other planned fixes already reduce the risk. The summary is at the [top of this document](#summary); all findings with their proof are in the [findings table](#findings).
 
-*To do.*
+**Four kinds of decision**
+
+| Decision | Meaning |
+| --- | --- |
+| **Fix** | Change the app's code so the problem is gone. |
+| **Contain** | Block it outside the app (at the Gateway) until the code is fixed, and as a second layer after. |
+| **Accept** | Not fixed this week, on purpose. The reason and what production would do go into `SECURITY.md`. |
+| **Report** | The problem belongs to someone else. Tell them; do not touch it. |
+
+**How each finding will be handled**
+
+Issue numbers link to GitHub.
+
+| ID | Finding | Severity | Decision | Issue |
+| --- | --- | --- | --- | --- |
+| F1 | Every new account is admin | High | Accept: the frontend is an admin back office, so this is a demo shortcut. Production: new accounts get `user`. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
+| F2 | Personal data inside the token | Medium | Accept: the profile page reads it from the token. Production: only `_id` and `role`. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
+| F3 | Personal data in the server log | Medium | Fix: remove the `console.log` lines that print token content and records | [#21](https://github.com/springlaughing/restauranty-devsecops-aks/issues/21) |
+| F4 | Login reveals which emails exist | Medium | Fix: one message for "no such user" and "wrong password" | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4) |
+| F5 | Weak passwords accepted | Medium | Accept: the fixes for F11 and F6 remove offline guessing and slow down online guessing. Production: at least 12 characters and a check against leaked passwords. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
+| F6 | No limit on login attempts | High | Contain: rate limit at the Gateway, alert on many failed logins | [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10), [#15](https://github.com/springlaughing/restauranty-devsecops-aks/issues/15) |
+| F7 | Logout does not end the session | Medium | Accept: tokens expire after 6 hours. Production: short tokens and a way to revoke them. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
+| F8 | Token errors answered with 500 | Medium | Fix: answer 401, one short log line | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4) |
+| F9 | Public signing secret, one secret for all services | High | Fix: RS256 key pair, private key only in auth, keys only in Key Vault | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4), [#8](https://github.com/springlaughing/restauranty-devsecops-aks/issues/8) |
+| F10 | Old `.env` files in the git history | Low | Fix: never reuse those values; gitleaks on every push | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
+| F11 | User list with hashes, without login | High | Contain: block `/api/auth/users` at the Gateway. Fix: no `password` in any answer. | [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10), [#21](https://github.com/springlaughing/restauranty-devsecops-aks/issues/21) |
+| F12 | All data readable without login | Medium | Fix: token checks in discounts and items | [#9](https://github.com/springlaughing/restauranty-devsecops-aks/issues/9) |
+| F13 | All data changeable without login | High | Fix: token checks in discounts and items; the frontend must send the token (test 4c) | [#9](https://github.com/springlaughing/restauranty-devsecops-aks/issues/9) |
+| F14 | Any user deleted without login | High | Contain: the Gateway block on `/api/auth/users` covers it. Fix: no `password` in the answer. | [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10), [#21](https://github.com/springlaughing/restauranty-devsecops-aks/issues/21) |
+| F15 | Logged-in users get every hash | High | Fix: the User model leaves out `password` everywhere | [#21](https://github.com/springlaughing/restauranty-devsecops-aks/issues/21) |
+| F16 | Any discount and any dates accepted | Medium | Accept: a business rule, and no longer open to strangers once writes need a token (F13). Production: discount 0 to 100, end after start. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
+| F17 | Raw database errors in answers | Low | Fix: the shared error handler answers briefly (same change as F8) | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4) |
+| F18 | Metrics labelled with the full URL | Medium | Fix: label by route pattern | [#14](https://github.com/springlaughing/restauranty-devsecops-aks/issues/14) |
+| F19 | Outdated packages | Low | Fix: images without development tools, frontend served as static files; npm audit and Trivy in the pipeline | [#5](https://github.com/springlaughing/restauranty-devsecops-aks/issues/5), [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
+| F20 | Cloudinary keys in the git history | High | Report: tell the owner to rotate them. gitleaks on every push. | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
+
+**Retest.** After the fixes, the same tests run again against the app on AKS. Each fixed finding gets its "after" proof, and the most important tests become automatic checks in the pipeline ([#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13)).
 
 ---
 
