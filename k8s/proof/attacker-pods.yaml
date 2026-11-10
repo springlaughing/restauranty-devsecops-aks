@@ -1,0 +1,67 @@
+# Proof for #11 (threat model TB2/TB3): a pod taken over by an attacker
+# cannot reach MongoDB or the app's services.
+#
+# Two attackers, each just a shell with curl:
+#   - attacker in restauranty: a hacked pod right next to the app
+#   - attacker in default:     a hacked pod somewhere else in the cluster
+#
+# Neither has an "app" label, so no Service sends traffic to it and no
+# allow rule matches it. Both pass the "restricted" Pod Security profile,
+# like any app pod must.
+#
+#   kubectl apply -f k8s/proof/attacker-pods.yaml
+#   ./scripts/test-network.sh
+#   kubectl delete -f k8s/proof/attacker-pods.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker
+  namespace: restauranty
+  labels:
+    role: attacker
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100              # curl_user in the image
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sleep", "infinity"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 32Mi }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker
+  namespace: default
+  labels:
+    role: attacker
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      command: ["sleep", "infinity"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 32Mi }
