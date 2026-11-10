@@ -73,6 +73,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [How the pipeline reaches the cluster: the whole chain](#how-the-pipeline-reaches-the-cluster-the-whole-chain)
   - [31. GitHub: the approval gate and branch protection](#31-github-the-approval-gate-and-branch-protection)
   - [32. The workflow, part by part](#32-the-workflow-part-by-part)
+  - [When the pipeline deploys, and how production teams do it](#when-the-pipeline-deploys-and-how-production-teams-do-it)
   - [33. First run: the pull request](#33-first-run-the-pull-request)
   - [34. First run on main: Entra ID refused the sign-in](#34-first-run-on-main-entra-id-refused-the-sign-in)
   - [35. First deploy by the pipeline](#35-first-deploy-by-the-pipeline)
@@ -2194,6 +2195,76 @@ env:
 **What the pipeline does not deploy.** The platform parts (the Gateway, cert-manager, External Secrets, Reloader, the flood limit) are still installed by `scripts/setup-aks.sh`. They change rarely and need Helm. The pipeline handles what changes often: the app.
 
 **A known gap: the tag in git.** The manifests in git keep the tag `bfb0e27`. After a cluster rebuild, `scripts/setup-aks.sh` deploys that old tag. Fix for now: after a rebuild, start the workflow by hand on `main` ("Run workflow"), which deploys the newest images.
+
+### When the pipeline deploys, and how production teams do it
+
+**In one line:** the pipeline deploys after a **merge**, never after a pull request, and only when I approve. Several merges can go out in one deploy, which is one of the normal ways production teams work, with one risk to watch.
+
+#### Which jobs run, by event
+
+What starts the run decides what the run does:
+
+| What I do | Event | Build (4 jobs) | Push to the registry | Deploy |
+| --- | --- | --- | --- | --- |
+| Open a pull request, or add commits to it | `pull_request` | Runs | Skipped | Skipped |
+| Merge the pull request into `main` | `push` to `main` | Runs | Runs | **Waits for my approval**, then runs |
+| "Run workflow" on `main` | `workflow_dispatch` | Runs | Runs | Waits for my approval, then runs |
+| "Run workflow" on another branch | `workflow_dispatch` | Runs | Refused by Entra ID (entry 36) | Skipped |
+
+Two lines in the workflow decide this:
+
+```yaml
+# build job, the two push steps:
+if: github.event_name != 'pull_request'
+
+# deploy job:
+if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+environment: production          # makes the job wait for my approval
+```
+
+**Where to see it:** the **Actions** tab in GitHub lists every run with its event. A run that waits for me shows a yellow clock and a **"Review deployments"** button, and GitHub sends me an email, because I am the required reviewer. In the terminal:
+
+```
+$ gh run list --limit 5          # the event column: pull_request, push, workflow_dispatch
+$ gh run view <run id>           # which jobs ran, were skipped, or wait
+```
+
+So every pull request shows the pipeline twice: while it is open (build only), and after the merge (build, push, then deploy after my click). If I do not click, nothing is deployed. **"Reject"** ends the run without a deploy.
+
+#### Several merges, one deploy
+
+`main` grows with every merge: each merge adds to everything before it. Each run builds and deploys exactly its own commit. Suppose I merge three times without approving:
+
+| Merge | Run | Deploys, if I approve it |
+| --- | --- | --- |
+| A | Run 1 builds A, the deploy waits | The code up to A |
+| B | Run 2 builds A+B, the deploy waits | The code up to A+B |
+| C | Run 3 builds A+B+C, the deploy waits | The code up to **A+B+C** |
+
+Approving run 3 puts all three merges live at once. Nothing is lost, because its images contain everything.
+
+**The risk: an old waiting run.** If run 1 still waits and I approve it later by mistake, it deploys the **older** code. That is an accidental rollback: B and C disappear from production. So: reject old waiting deploys. Planned for #13: a check in the deploy job that stops if `main` has already moved past the run's commit.
+
+**Docs-only merges.** Every merge asks to deploy, even one that changes only documentation. That builds four new images from the same code and restarts every pod for nothing. The image tag is the commit id, so every merge gives every image a new name, and Kubernetes rolls out new pods. Planned for #13: the workflow ignores changes that touch only `docs/`, `notes/` and `*.md` files.
+
+#### How production teams do it
+
+There are three common styles:
+
+| Style | How it works | Who uses it |
+| --- | --- | --- |
+| **Continuous deployment** | Every merge goes live automatically, with no click. Safety comes from good tests, gradual rollouts (a few users first), feature flags (new code switched off until ready) and fast rollback. | Many web companies. They deploy many times a day. |
+| **Continuous delivery with approval** (this project) | Every merge produces a version that could go live; a person decides when it does. Several merges often go out together, like A+B+C above. | Banks, healthcare and other regulated fields, and teams with fixed release times |
+| **GitOps** | Merging a change into a deployment repo **is** the deploy. A tool inside the cluster (Argo CD) sees the change and applies it, so the pipeline needs no rights in the cluster. | Many Kubernetes teams |
+
+Two principles almost all of them share:
+
+1. **Small batches are safer.** If one deploy carries one change and something breaks, it is clear which change caused it. If it carries ten, someone has to search. The DORA research on software delivery keeps finding that teams who deploy small changes often have fewer failed deployments, not more. Batching A+B+C is fine now and then, but not as a habit.
+2. **Build once, then promote the same image.** In a typical setup a merge deploys to a **staging** environment first, tests run there, and the approval promotes the **same** image to production. Nothing is rebuilt for production, so production runs exactly what was tested.
+
+**Where this project stands.** Continuous delivery with approval. It matches the brief's "on merges to main (or manual approval)", and it shows a person in control. There is no staging before the approval, so my click means "I trust the build and the scans". The pipeline already builds once per commit, tagged with the commit id. So adding staging later would be one more deploy job that uses the same images, not a new build.
+
+**An approval is only as good as what the approver checks.** In a regulated team, the reviewer looks at the test results, the scan results and the list of changes before clicking. Once #13 adds Trivy and `npm audit` to the same run, my click has real information behind it.
 
 ### 33. First run: the pull request
 
