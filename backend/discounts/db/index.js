@@ -23,8 +23,17 @@ mongoose
     mongoConnectionGauge.set(1);  // Set gauge to 1 for connected
   })
   .catch((err) => {
-    console.error("Error connecting to mongo: ", err);
-    mongoConnectionGauge.set(0);  // Set gauge to 0 if connection fails
+    // The first connection failed, for example because MongoDB is still
+    // starting after a cluster restart. Mongoose does not try a first
+    // connection again, so this server would stay up without a database:
+    // every login answers 500 while the health check still passes (#28).
+    // So exit instead. Kubernetes restarts the container, and the new one
+    // connects once MongoDB is ready. Kubernetes waits longer before each
+    // restart (10 s, 20 s, 40 s, ... up to 5 minutes).
+    // (A connection lost later is different: Mongoose reconnects by itself,
+    // see the events below.)
+    console.error(`Error connecting to mongo: ${err.message}. Exiting, so the container restarts.`);
+    process.exit(1);
   });
 
 // Also listen to connection events to update the metric dynamically.
