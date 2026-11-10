@@ -82,10 +82,13 @@ jobs:
       # here (security assessment, test 8b). If the login ever moves to a
       # cookie, this line must go.
       - name: Semgrep
+        env:
+          # The full id: rules from the Semgrep registry repeat their name at the end
+          CSRF_RULE: javascript.express.security.audit.express-check-csurf-middleware-usage.express-check-csurf-middleware-usage
         run: |
           docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
             semgrep scan --config p/default --config p/secrets --metrics=off --error \
-              --exclude-rule javascript.express.security.audit.express-check-csurf-middleware-usage \
+              --exclude-rule "$CSRF_RULE" \
               backend client/src
 
   build:
