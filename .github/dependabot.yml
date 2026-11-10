@@ -1,0 +1,40 @@
+# Dependabot (#13): once a week, opens pull requests that update
+#   - the npm packages of the three backends and the frontend
+#   - the base images in the four Dockerfiles
+#   - the GitHub Actions in the workflows (they are pinned by commit SHA;
+#     Dependabot moves the pin and the version comment together)
+#
+# Every update is a normal pull request, so it goes through all the gates
+# (npm audit, Semgrep, Trivy) before I merge it.
+#
+# cooldown: a new version must be public for 7 days before Dependabot
+# suggests it. Poisoned releases are usually found and pulled within hours
+# or days (the bad Trivy release in March 2026 was online for about 3 hours).
+# Security fixes for known vulnerabilities are not delayed by the cooldown.
+#
+# Small updates (minor, patch) come grouped in one pull request per folder,
+# so the list stays short. Major updates come one by one: they can break things.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories: [/backend/auth, /backend/discounts, /backend/items, /client]
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directories: [/backend/auth, /backend/discounts, /backend/items, /client]
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,18 +1,33 @@
-# CI/CD for Restauranty (#12).
+# CI/CD for Restauranty (#12), with security gates (#13).
 #
-#   pull request to main  ->  build: install, test, build the 4 images (no push, no Azure)
-#   merge to main         ->  build + push the 4 images, tagged with the commit SHA
-#                         ->  deploy: waits for my approval (environment "production"),
-#                             then deploys exactly those images to AKS
+#   pull request to main  ->  code scan (Semgrep)
+#                             build x4: install, npm audit, test, build image, Trivy, SBOM
+#                             "all gates passed": one check that sums up the gates
+#   merge to main         ->  the same gates, then
+#                             push: the 4 scanned images go to the registry
+#                             deploy: waits for my approval (environment "production"),
+#                                     deploys exactly those images, by digest
+#                             api tests: attacks from the security assessment, must fail
+#                             zap: a passive web scan, report saved with the run
 #
-# No passwords or keys are stored in GitHub. Each job that needs Azure asks
+# A gate that fails stops everything after it: nothing is pushed or deployed.
+# Secrets in the git history are checked by a separate workflow, secret-scan.yaml.
+#
+# No passwords or keys are stored in GitHub. A job that needs Azure asks
 # GitHub for a short-lived OIDC token and trades it at Entra ID for an Azure
 # token (terraform/persistent/github.tf):
-#   - build/push signs in as the "pipeline" identity: may push images, nothing else;
+#   - push signs in as the "pipeline" identity: may push images, nothing else;
 #     Entra trusts it only for jobs on the main branch.
 #   - deploy signs in as the "deploy" identity: may fetch this cluster's credentials;
 #     Entra trusts it only for jobs in the environment "production".
 # The ids below are not secrets: without a matching federated credential they open nothing.
+#
+# Supply chain: every action is pinned by commit SHA and every tool image by
+# digest (sha256:...). A tag like "v7" is a label the owner can move to other
+# code; a SHA or digest names the exact bytes. In March 2026 attackers moved
+# 76 of 77 tags of the Trivy GitHub Action to malware that stole pipeline
+# secrets (CVE-2026-33634). Pipelines pinned by SHA were not affected.
+# Dependabot (.github/dependabot.yml) keeps the pins up to date.
 
 name: ci-cd
 
@@ -21,7 +36,11 @@ on:
     branches: [main]
   push:
     branches: [main]
-  workflow_dispatch:    # run by hand; from a feature branch, Entra refuses the sign-in
+    # A push that only changes documentation builds and deploys nothing.
+    # Pull requests always run every gate, so "all gates passed" can be a
+    # required check: a check that never starts would block the merge.
+    paths-ignore: ['docs/**', 'notes/**', '**/*.md']
+  workflow_dispatch:    # run by hand; from a feature branch, nothing is pushed or deployed
 
 # Default for every job: read the code, nothing else. Jobs ask for more below.
 permissions:
@@ -37,14 +56,49 @@ env:
   CLUSTER_NAME: aks-evgenia-k8s-dev
   CLUSTER_RESOURCE_GROUP: rg-evgenia-k8s-dev
   APP_URL: https://restauranty.aks.springlaughing.dev
+  # Security tools, run as Docker images pinned by digest
+  SEMGREP_IMAGE: semgrep/semgrep:1.183.0@sha256:2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0
+  TRIVY_IMAGE: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+  ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af
 
 jobs:
+  # ---------------------------------------------------------------- gates
+  semgrep:
+    name: code scan (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Semgrep looks for risky patterns in our own code. --error: any
+      # finding fails the job.
+      #
+      # One rule is turned off: express-check-csurf-middleware-usage
+      # ("no CSRF protection in this Express app"). CSRF needs a login kept
+      # in a cookie, which the browser sends by itself. This app keeps the
+      # token in Local Storage and its own code puts it in the Authorization
+      # header, which another website cannot do. So the rule does not apply
+      # here (security assessment, test 8b). If the login ever moves to a
+      # cookie, this line must go.
+      - name: Semgrep
+        env:
+          # The full id: rules from the Semgrep registry repeat their name at the end
+          CSRF_RULE: javascript.express.security.audit.express-check-csurf-middleware-usage.express-check-csurf-middleware-usage
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" \
+            semgrep scan --config p/default --config p/secrets --metrics=off --error \
+              --exclude-rule "$CSRF_RULE" \
+              backend client/src
+
   build:
     name: build ${{ matrix.component }}
     runs-on: ubuntu-latest
+    # This job runs code from npm packages (build tools, tests). It has no
+    # id-token permission, so that code cannot sign in to Azure. Pushing
+    # happens in a separate job that runs no npm code.
     permissions:
       contents: read
-      id-token: write   # to ask GitHub for an OIDC token (used only on main)
     strategy:
       fail-fast: false  # one broken component does not hide the others' results
       matrix:
@@ -56,21 +110,41 @@ jobs:
     env:
       IMAGE: acrevgeniarestauranty.azurecr.io/${{ matrix.component }}:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false   # npm code cannot read a GitHub token from .git/config
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22    # the same major version as the images (node:22-alpine)
           cache: npm
           cache-dependency-path: ${{ matrix.path }}/package-lock.json
 
+      # --ignore-scripts: packages may not run their own install scripts.
+      # Those scripts are how most npm attacks start (the code runs the
+      # moment you install). Only fsevents (macOS only) and core-js (prints
+      # a message) have one here; neither is needed on Linux.
       - name: Install dependencies
         working-directory: ${{ matrix.path }}
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      # Fails on a CRITICAL known vulnerability. Backends: only the packages
+      # that ship (--omit=dev). Client: all of them, because the build tools
+      # produce the code that runs in the browser. HIGH and lower are shown
+      # in the log but do not block: the client's build tools have HIGH ones
+      # whose only fix is leaving Create React App (security assessment, F19).
+      - name: npm audit
+        working-directory: ${{ matrix.path }}
+        run: |
+          if [ "${{ matrix.component }}" = client ]; then
+            npm audit --audit-level=critical
+          else
+            npm audit --omit=dev --audit-level=critical
+          fi
 
       # The client has a component test. The backends have no tests, so they
-      # get a syntax check; the real checks for them are the security tests
-      # after the deploy (#13).
+      # get a syntax check; the real checks for them are the API tests after
+      # the deploy.
       - name: Test
         working-directory: ${{ matrix.path }}
         run: |
@@ -81,29 +155,119 @@ jobs:
             node --check server.js
           fi
 
+      # The image is saved to a file. Trivy scans that file, and the push job
+      # pushes that same file: what was scanned is exactly what ships.
       - name: Build image
-        run: docker build -t "$IMAGE" "${{ matrix.path }}"
+        run: |
+          docker build -t "$IMAGE" "${{ matrix.path }}"
+          docker save -o image.tar "$IMAGE"
 
-      # Only on main. On a pull request the job stops here: nothing is pushed,
-      # and the job never signs in to Azure.
+      # Trivy compares every OS package and npm package in the image with
+      # lists of known vulnerabilities. First a report of HIGH and CRITICAL,
+      # then the gate: fail on CRITICAL.
+      # --ignore-unfixed: only vulnerabilities that already have a fixed
+      # version. A CRITICAL with no fix anywhere would block every deploy
+      # with nothing I can do; it is listed in the report instead.
+      - name: Trivy
+        run: |
+          trivy() {
+            docker run --rm -v "$PWD:/work" -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+              "$TRIVY_IMAGE" image --input /work/image.tar --no-progress "$@"
+          }
+          echo "::group::Report: HIGH and CRITICAL"
+          trivy --severity HIGH,CRITICAL
+          echo "::endgroup::"
+          trivy --severity CRITICAL --ignore-unfixed --exit-code 1
+
+      # The SBOM (software bill of materials): the parts list of the image,
+      # every OS and npm package with its version, in the CycloneDX format.
+      # The nightly scan (nightly-scan.yaml) checks the SBOMs of the images
+      # in production against each day's new vulnerabilities, without
+      # pulling the images or signing in to Azure.
+      - name: SBOM
+        run: |
+          docker run --rm -v "$PWD:/work" -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" image --input /work/image.tar --no-progress \
+              --format cyclonedx --output /work/sbom.cdx.json
+          echo "$(grep -c '"bom-ref"' sbom.cdx.json) entries in the SBOM"
+
+      - name: Keep the SBOM for the nightly scan
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ matrix.component }}
+          path: sbom.cdx.json
+          retention-days: 90   # the longest GitHub keeps artifacts
+
+      - name: Keep the image for the push job
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.component }}
+          path: image.tar
+          retention-days: 1
+
+  # One check that sums up all the gates. In GitHub's branch protection it is
+  # the required check: a pull request cannot be merged while it is red.
+  gates:
+    name: all gates passed
+    needs: [semgrep, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the results
+        run: |
+          echo "Semgrep: ${{ needs.semgrep.result }}, build and scans: ${{ needs.build.result }}"
+          [ "${{ needs.semgrep.result }}" = success ] && [ "${{ needs.build.result }}" = success ]
+
+  # ---------------------------------------------------------------- release
+  push:
+    name: push images
+    needs: gates
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # to sign in to Azure as the pipeline identity
+    # The digest of each pushed image, for the deploy job
+    outputs:
+      auth: ${{ steps.push.outputs.auth }}
+      discounts: ${{ steps.push.outputs.discounts }}
+      items: ${{ steps.push.outputs.items }}
+      client: ${{ steps.push.outputs.client }}
+    # No checkout, no npm: this job only loads the scanned image files and
+    # pushes them.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          path: images
+
       - name: Sign in to Azure as the pipeline identity
-        if: github.event_name != 'pull_request'
-        uses: azure/login@v3
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
         with:
           client-id: ${{ env.PIPELINE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Push image
-        if: github.event_name != 'pull_request'
+      # The digest (sha256:...) is a hash of the image's contents, read back
+      # from the registry. The deploy uses it instead of the tag: a tag can
+      # be moved to another image, a digest cannot.
+      - name: Push images
+        id: push
         run: |
           az acr login --name "$ACR_NAME"
-          docker push "$IMAGE"
+          for c in auth discounts items client; do
+            image="$REGISTRY/$c:$GITHUB_SHA"
+            docker load -i "images/image-$c/image.tar"
+            docker push "$image"
+            digest=$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' | jq -r .digest)
+            echo "$c=$image@$digest" | tee -a "$GITHUB_OUTPUT"
+          done
 
   deploy:
     name: deploy to AKS
-    needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: push
     runs-on: ubuntu-latest
     # The job waits here until I approve it in GitHub. Only jobs in this
     # environment can sign in as the deploy identity.
@@ -117,10 +281,27 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # An approval can wait for hours. If newer code reached main in the
+      # meantime, deploying this run would put older code back (a rollback
+      # nobody asked for). Newer docs-only commits are fine: they change
+      # nothing that is deployed.
+      - name: Stop if main has newer code
+        run: |
+          git fetch --depth=1 origin main
+          newer=$(git diff --name-only HEAD FETCH_HEAD -- . ':(exclude)docs' ':(exclude)notes' ':(exclude)*.md')
+          if [ -n "$newer" ]; then
+            echo "::error::main has newer code than this run ($GITHUB_SHA). Deploy the newest run instead. Changed:"
+            echo "$newer"
+            exit 1
+          fi
+          echo "main has no newer code: OK to deploy $GITHUB_SHA"
 
       - name: Sign in to Azure as the deploy identity
-        uses: azure/login@v3
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
         with:
           client-id: ${{ env.DEPLOY_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
@@ -130,10 +311,21 @@ jobs:
         run: az aks get-credentials --resource-group "$CLUSTER_RESOURCE_GROUP" --name "$CLUSTER_NAME" --overwrite-existing
 
       # The manifests in git name a fixed image tag. Here, in this run's copy
-      # only, every app image is pointed at the images this run just built.
-      - name: Point the manifests at this commit's images
+      # only, every app image is pointed at the image this run scanned and
+      # pushed: name:tag@sha256:digest. Kubernetes pulls by the digest; the
+      # tag is only there for people reading it.
+      - name: Point the manifests at this run's images
+        env:
+          AUTH: ${{ needs.push.outputs.auth }}
+          DISCOUNTS: ${{ needs.push.outputs.discounts }}
+          ITEMS: ${{ needs.push.outputs.items }}
+          CLIENT: ${{ needs.push.outputs.client }}
         run: |
-          sed -i -E "s#(${REGISTRY}/(auth|discounts|items|client)):[0-9a-f]+#\1:${GITHUB_SHA}#" k8s/app/*.yaml
+          for ref in "$AUTH" "$DISCOUNTS" "$ITEMS" "$CLIENT"; do
+            case "$ref" in *@sha256:*) ;; *) echo "::error::missing digest: '$ref'"; exit 1;; esac
+            name=${ref%%:*}    # registry/component
+            sed -i -E "s#${name}:[^[:space:]]+#${ref}#" k8s/app/*.yaml
+          done
           grep -n "image:" k8s/app/*.yaml
 
       # The app and its network rules. Platform parts (Gateway, cert-manager,
@@ -149,3 +341,42 @@ jobs:
         run: |
           curl -fsS -o /dev/null -w "website %{http_code}\n" "$APP_URL/"
           curl -fsS -w "\n" "$APP_URL/api/auth"
+
+  # ---------------------------------------------------------------- after the deploy
+  # The attacks from the security assessment, run against the live app. Each
+  # one must fail. No Azure sign-in: the job tests from outside, like a stranger.
+  api-tests:
+    name: API security tests
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Run the tests
+        run: ./scripts/test-api-security.sh "$APP_URL"
+
+  # OWASP ZAP baseline: crawls the site for a minute and reports what it sees
+  # without attacking (missing security headers, cookie flags, information
+  # leaks). It does not block the run: the report is for me to read. It is
+  # saved with the run (Summary > Artifacts) and shown in the job summary.
+  zap:
+    name: ZAP baseline scan
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Scan
+        continue-on-error: true
+        run: |
+          mkdir -m 777 zap    # the ZAP image runs as its own user, not the runner's
+          docker run --rm -v "$PWD/zap:/zap/wrk" "$ZAP_IMAGE" \
+            zap-baseline.py -t "$APP_URL" -m 1 -I \
+              -r zap-report.html -J zap-report.json -w zap-report.md
+      - name: Show the summary
+        if: always()
+        run: cat zap/zap-report.md >> "$GITHUB_STEP_SUMMARY" || echo "no report"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: zap-report
+          path: zap/

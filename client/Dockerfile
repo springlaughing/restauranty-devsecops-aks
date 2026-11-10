@@ -1,8 +1,9 @@
-# --- Stage 1: build the static site with Node
+# --- Stage 1: build the static site with Node.
+# --ignore-scripts: packages may not run their own install scripts (none needed here).
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY . .
 
 # The API base URL is baked into the build. On AKS the site and the API share

@@ -1,8 +1,9 @@
-# --- Stage 1: install production dependencies only (no nodemon, no dev tools)
+# --- Stage 1: install production dependencies only (no nodemon, no dev tools).
+# --ignore-scripts: packages may not run their own install scripts (none needed here).
 FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # --- Stage 2: the image that ships: Node, the app, prod dependencies
 FROM node:22-alpine

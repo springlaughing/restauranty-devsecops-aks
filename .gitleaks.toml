@@ -1,0 +1,22 @@
+# gitleaks settings: all of gitleaks' standard rules, plus one exception.
+# Single old findings are accepted one by one in .gitleaksignore instead.
+
+[extend]
+useDefault = true
+
+# Image tags in the docs, like acrevgeniarestauranty.azurecr.io/auth:<commit>.
+# The word "auth" followed by a 40-character commit SHA looks to the
+# generic-api-key rule like "auth: <some key>". It is the auth service's
+# image, tagged with the git commit it was built from: public information.
+# Allowed only in these two shapes, so a real "auth:" secret elsewhere is
+# still caught. (No ^ anchor: gitleaks reads git diffs, where each line
+# starts with "+".)
+#   - an image reference:           ...azurecr.io/auth:<sha>
+#   - a `kubectl get pods` line:    auth-<pod id>   auth:<sha>
+[[allowlists]]
+description = "auth image tagged with a git commit SHA"
+regexTarget = "line"
+regexes = [
+  '''azurecr\.io/auth:[0-9a-f]{40}''',
+  '''\bauth-[a-z0-9]+-[a-z0-9]{5}\s+auth:[0-9a-f]{40}''',
+]
