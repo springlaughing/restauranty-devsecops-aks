@@ -1737,6 +1737,25 @@ Full outputs: `docs/evidence/10-edge-before.txt`, `10-edge-after.txt`.
 
 **Why two and not one.** The build job runs `npm ci`, which installs packages from the internet: 156 per backend, 1,516 for the client. Any of them could be poisoned (event-stream, 2018). If the build job had the deploy identity, a poisoned package could reach the cluster directly: read Secrets, delete things, change the network rules, without anyone approving. With two identities, the deploy identity exists only inside the approved deploy job.
 
+**Each identity has exactly one role**, read back from Azure:
+
+```
+$ az role assignment list --assignee <principal id> --all --query "[].{role:roleDefinitionName, scope:scope}" -o tsv
+== id-evgenia-restauranty-pipeline
+AcrPush                                       .../registries/acrevgeniarestauranty
+== id-evgenia-restauranty-deploy
+Azure Kubernetes Service Cluster User Role    .../managedClusters/aks-evgenia-k8s-dev
+```
+
+**Why one can reach the cluster's Secrets and the other cannot.** The Secrets here are the Kubernetes Secrets inside the cluster (`auth-secrets` holds the JWT private key and the MongoDB password, `items-secrets` the Cloudinary keys). The only way to read them is the cluster's API, which needs two doors:
+
+| Door | Pipeline identity (build job) | Deploy identity (deploy job) |
+| --- | --- | --- |
+| 1. Azure hands out the cluster's connection file (`az aks get-credentials`) only to an identity with a role on the cluster | Refused: it has no role on the cluster, so it cannot even talk to Kubernetes | Allowed: Cluster User Role |
+| 2. Kubernetes checks the certificate in that file | Never gets here | Allowed: on this cluster it is the admin certificate (the known gap), so it could read every Secret |
+
+Neither identity can read **Key Vault**, where the secrets are kept. Only the four workload identities (entry 18), each for its own secrets, and my own account can. The deploy job's only path to secret values is the copies that External Secrets writes into the cluster.
+
 **What the split does not stop: a poisoned image.** The build job can still push an image, and an image is exactly what goes to production after my approval. A poisoned package gets into it in two ways:
 
 | Way | What happens |
