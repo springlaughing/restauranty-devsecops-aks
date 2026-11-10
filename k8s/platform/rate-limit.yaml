@@ -1,0 +1,31 @@
+# Flood limit (#10): one IP address may send at most 50 requests per second
+# to anything behind the Gateway, with room for a burst of 100.
+#
+# Normal use stays far below: loading the app is about 10 requests, and a
+# person clicking around sends a few per second. The limit only stops one
+# machine from overloading the app. It does not stop a flood from many
+# machines at once (a DDoS); that needs Azure DDoS Protection or a WAF.
+#
+# Set on the Gateway, so it covers every route, including Grafana later.
+# On /api/auth/login the stricter login limit (k8s/app/edge-rules.yaml)
+# replaces this one: in NGINX, a location with its own limit_req does not
+# inherit the server's.
+apiVersion: gateway.nginx.org/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: flood
+  namespace: gateway
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: restauranty
+  rateLimit:
+    rejectCode: 429
+    logLevel: warn
+    local:
+      rules:
+        - key: $binary_remote_addr
+          rate: 50r/s
+          burst: 100
+          noDelay: true

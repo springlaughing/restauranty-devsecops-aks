@@ -1,0 +1,106 @@
+# Rules at the edge (#10): the Gateway refuses some requests before any app
+# code runs. A first, fast layer ("contain"), on top of the code fixes.
+#
+#   1. The user list (/api/auth/users) is closed to everyone: 403.
+#      The frontend never calls it. The code already asks for a token and
+#      sends no password hashes (#9, #21), but any logged-in user (and every
+#      new user is admin, F1) could still read everyone's personal data.
+#   2. Login is limited per IP address: password guessing (F6) becomes
+#      about 60 times slower, and the attacker gets 429 answers.
+#
+# The flood limit for all paths is on the Gateway itself:
+# k8s/platform/rate-limit.yaml.
+#
+# Each rule is its own HTTPRoute, because a policy applies to a whole route.
+# More specific matches win over the general /api/auth route in httproute.yaml.
+
+# 1. The user list: matched without regard to case. Express, the backend's
+#    web framework, ignores case in paths, so /api/auth/USERS reaches the same
+#    code. A case-sensitive block would be bypassed with one capital letter.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: block-user-list
+  namespace: restauranty
+spec:
+  parentRefs:
+    - name: restauranty
+      namespace: gateway
+      sectionName: https-app
+  hostnames:
+    - restauranty.aks.springlaughing.dev
+  rules:
+    - matches:
+        # NGF accepts only patterns that start with "/", so no (?i) flag:
+        # each letter lists both cases instead.
+        - path: { type: RegularExpression, value: "/api/auth/[Uu][Ss][Ee][Rr][Ss]" }
+      # A route needs a backend to be valid; the AccessPolicy below makes
+      # sure no request ever reaches it.
+      backendRefs:
+        - { name: auth, port: 80 }
+---
+apiVersion: gateway.nginx.org/v1alpha1
+kind: AccessPolicy
+metadata:
+  name: block-user-list
+  namespace: restauranty
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: block-user-list
+  action: Deny
+  rules:
+    - name: everyone-ipv4
+      source:
+        type: IPAddress
+        ipAddress: { address: 0.0.0.0/0 }
+    - name: everyone-ipv6
+      source:
+        type: IPAddress
+        ipAddress: { address: "::/0" }
+---
+# 2. Login, with its own limit.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: login
+  namespace: restauranty
+spec:
+  parentRefs:
+    - name: restauranty
+      namespace: gateway
+      sectionName: https-app
+  hostnames:
+    - restauranty.aks.springlaughing.dev
+  rules:
+    - matches:
+        - path: { type: Exact, value: /api/auth/login }
+      backendRefs:
+        - { name: auth, port: 80 }
+---
+# 10 logins per minute per IP address, with room for 5 quick tries first
+# (a person who mistypes a password twice never notices). Before: about
+# 10 guesses per second, so 36,000 an hour. After: about 600 an hour.
+#
+# The key is the caller's IP. The Gateway's Service keeps the real client
+# IP (externalTrafficPolicy: Local), so each caller gets their own count.
+apiVersion: gateway.nginx.org/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: login
+  namespace: restauranty
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: login
+  rateLimit:
+    rejectCode: 429
+    logLevel: warn
+    local:
+      rules:
+        - key: $binary_remote_addr
+          rate: 10r/m
+          burst: 5
+          noDelay: true

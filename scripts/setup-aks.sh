@@ -61,6 +61,7 @@ log "Applying platform manifests"
 kubectl apply -f k8s/platform/namespaces.yaml
 kubectl apply -f k8s/platform/storageclass.yaml
 kubectl apply -f k8s/platform/gateway.yaml
+kubectl apply -f k8s/platform/rate-limit.yaml   # flood limit per IP (#10)
 for _ in $(seq 1 12); do                 # cert-manager's webhook may need a few seconds
   kubectl apply -f k8s/platform/cluster-issuers.yaml && break
   echo "  cert-manager webhook not ready yet, retrying in 5 s"
