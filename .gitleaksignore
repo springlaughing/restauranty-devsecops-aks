@@ -1,0 +1,12 @@
+# Known gitleaks findings that are accepted, one fingerprint per line
+# (commit:file:rule:line). Every other finding fails the "secrets" check.
+#
+# Cloudinary API secrets written into the code in the original app's first
+# commit (April 2025), removed in June 2025, still in the git history.
+# Security assessment, finding F20 and test 8c. They belong to the original
+# authors' account, not mine: not used, not tried. Rewriting the history
+# would not help, because the original repository and its forks keep them.
+# My own Cloudinary keys live only in Azure Key Vault.
+6b078979a0a0bd185dd3e88c3bced020dea3f02e:backend/auth/config/cloudinary.config.js:generic-api-key:9
+6b078979a0a0bd185dd3e88c3bced020dea3f02e:backend/discounts/config/cloudinary.config.js:generic-api-key:9
+6b078979a0a0bd185dd3e88c3bced020dea3f02e:backend/items/config/cloudinary.config.js:generic-api-key:9
