@@ -1,6 +1,6 @@
 # --- Stage 1: install production dependencies only (no nodemon, no dev tools).
 # --ignore-scripts: packages may not run their own install scripts (none needed here).
-FROM node:14-alpine AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
