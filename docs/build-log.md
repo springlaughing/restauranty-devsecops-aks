@@ -1735,7 +1735,18 @@ Full outputs: `docs/evidence/10-edge-before.txt`, `10-edge-after.txt`.
 | `id-evgenia-restauranty-pipeline` (existed since entry 10) | Push images to the registry (role AcrPush) | `repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:ref:refs/heads/main`: the `main` branch | Every merge, automatically |
 | `id-evgenia-restauranty-deploy` (new) | Fetch this one cluster's credentials (role "Azure Kubernetes Service Cluster User Role") | `repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:environment:production` | Only after I approve the deploy |
 
-**Why two and not one.** The build job runs `npm ci`, which installs hundreds of packages from the internet. Any of them could be poisoned (event-stream, 2018). If the build job had the deploy identity, a poisoned package could reach the cluster. With two identities, the build job can at most push an image. The deploy identity exists only inside the approved deploy job.
+**Why two and not one.** The build job runs `npm ci`, which installs packages from the internet: 156 per backend, 1,516 for the client. Any of them could be poisoned (event-stream, 2018). If the build job had the deploy identity, a poisoned package could reach the cluster directly: read Secrets, delete things, change the network rules, without anyone approving. With two identities, the deploy identity exists only inside the approved deploy job.
+
+**What the split does not stop: a poisoned image.** The build job can still push an image, and an image is exactly what goes to production after my approval. A poisoned package gets into it in two ways:
+
+| Way | What happens |
+| --- | --- |
+| The poison is in a package version | The package is inside the image like any other. The backends' final images keep every package the app needs to run (about 128 of 156; only the 28 development tools are left out). The client's final image has no `node_modules`, but the code of the libraries it uses is compiled into the JavaScript that every visitor's browser runs. |
+| The poison runs during `npm ci` | Packages may have **install scripts**, which run while installing, with the job's rights. On `main`, the build job may ask for an OIDC token, so a script could sign in as the push identity and push any image, even replace the image under this commit's tag. Today three packages have install scripts (`fsevents`, macOS only; `core-js` and `core-js-pure`, which print a message), all harmless, but a new version could add one. |
+
+**What protects already:** every package in the four lock files has an integrity hash (156 of 156, 1,516 of 1,516). `npm ci` refuses a package whose content does not match its hash. So a package cannot change silently under the same version: poison can only come in through a change to `package-lock.json`, which shows up in a pull request.
+
+**Planned in #13:** `npm ci --ignore-scripts`, so install scripts never run; the build job split in two, so the job that runs npm code holds no identity and a separate job only pushes; deploy by digest (`image@sha256:…`) instead of tag, so the cluster runs exactly the image that was built and scanned; Trivy and `npm audit` for known bad versions. Image signing with a check in the cluster would be the production answer.
 
 **New file `terraform/persistent/github.tf`:**
 
