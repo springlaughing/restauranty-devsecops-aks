@@ -147,6 +147,11 @@ for d in auth discounts items client; do
   kubectl rollout status "deployment/$d" -n "$APP_NS" --timeout=5m
 done
 
+# Network rules: default deny, then only the paths the app uses (#11).
+# Test them with scripts/test-network.sh.
+log "Applying the network rules"
+kubectl apply -f k8s/network/
+
 # 7. Save the HTTPS certificate in Key Vault, so the next rebuild can restore it
 #    (step 3). Only the parts cert-manager checks are kept; saved again only
 #    when the certificate changed (first issue or renewal).

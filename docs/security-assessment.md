@@ -533,6 +533,8 @@ The check only asks: "was this token signed with my secret?" So **anyone who kno
 
 **Why the published secret works here.** The server runs with `MySecret1!` because its `.env` file was made by copying `.env.example`, the normal setup step. So the server's real secret *is* the published one. If the server used a different, random secret, this attack would fail with `invalid signature`, like in test 3e.
 
+Setting my own secret and forging with it would prove nothing — that is just the server owner using their own key. What makes this a finding is that the secret is public and documented as the default, and the app never forces a change: I took it from the GitHub repo, knowing nothing else about the server.
+
 **Why it matters.** Whoever has the secret can be any user, with any role, for as long as they like. No password needed, no login, no trace in the login logs.
 
 **What I did**
