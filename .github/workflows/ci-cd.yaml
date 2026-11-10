@@ -56,9 +56,9 @@ jobs:
     env:
       IMAGE: acrevgeniarestauranty.azurecr.io/${{ matrix.component }}:${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22    # the same major version as the images (node:22-alpine)
           cache: npm
@@ -88,7 +88,7 @@ jobs:
       # and the job never signs in to Azure.
       - name: Sign in to Azure as the pipeline identity
         if: github.event_name != 'pull_request'
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ env.PIPELINE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
@@ -117,10 +117,10 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Sign in to Azure as the deploy identity
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ env.DEPLOY_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
