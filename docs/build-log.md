@@ -65,6 +65,16 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [28. Two surprises: a refused pattern and a test too slow to matter](#28-two-surprises-a-refused-pattern-and-a-test-too-slow-to-matter)
   - [29. After the rules: 11 of 11](#29-after-the-rules-11-of-11)
   - [What #10 creates](#what-10-creates)
+- [Part 8 — the pipeline](#part-8--the-pipeline)
+  - [What a pipeline is](#what-a-pipeline-is)
+  - [How GitHub signs in to Azure: OIDC and federated identity](#how-github-signs-in-to-azure-oidc-and-federated-identity)
+  - [What "azurerm" is](#what-azurerm-is)
+  - [30. Azure: two identities, one to push, one to deploy](#30-azure-two-identities-one-to-push-one-to-deploy)
+  - [How the pipeline reaches the cluster: the whole chain](#how-the-pipeline-reaches-the-cluster-the-whole-chain)
+  - [31. GitHub: the approval gate and branch protection](#31-github-the-approval-gate-and-branch-protection)
+  - [32. The workflow, part by part](#32-the-workflow-part-by-part)
+  - [33. First run: the pull request](#33-first-run-the-pull-request)
+  - [What #12 creates](#what-12-creates)
 - [What is next](#what-is-next)
 
 ---
@@ -1636,11 +1646,524 @@ Full outputs: `docs/evidence/10-edge-before.txt`, `10-edge-after.txt`.
 
 ---
 
+## Part 8 — the pipeline
+
+**Goal:** every change reaches the cluster the same way: built, tested and deployed by GitHub Actions, never from my laptop. GitHub gets into Azure without any password stored in GitHub. Issue #12, branch `12-pipeline`.
+
+| When | What the pipeline does |
+| --- | --- |
+| Someone opens a pull request to `main` | Installs, tests and builds the four images. It does not sign in to Azure and pushes nothing. |
+| A pull request is merged into `main` | The same, then pushes the four images to the registry, each tagged with the commit's ID |
+| After the push | The deploy waits until I approve it in GitHub, then puts exactly those images on AKS and checks that the site answers |
+
+### What a pipeline is
+
+**In one line:** a pipeline is a list of steps that a service runs by itself on every change: build, test, deliver.
+
+| Word | Meaning |
+| --- | --- |
+| **CI**, continuous integration | Every change is built and tested automatically, so a broken change shows up before it is merged |
+| **CD**, continuous delivery | Tested changes are delivered to the servers automatically. "Delivery" when a person approves the last step; "deployment" when nobody does. This pipeline is delivery: I approve. |
+| **GitHub Actions** | GitHub's own pipeline service |
+| **Workflow** | One pipeline, written as a YAML file in `.github/workflows/`. Here: `.github/workflows/ci-cd.yaml`, the name the brief asks for |
+| **Job** | A group of steps. Each job runs on its own fresh virtual machine from GitHub, called a **runner**, which is thrown away afterwards |
+| **Step** | One command, or one ready-made **action** (a small published program, such as `actions/checkout`) |
+
+**Before #12**, images were built and pushed from my laptop (entry 11), and the manifests were applied from my laptop (`scripts/setup-aks.sh`). That has three problems: it depends on my machine and on me remembering every step; nothing guarantees the tests ran; and my laptop needs the rights to change everything.
+
+### How GitHub signs in to Azure: OIDC and federated identity
+
+**In one line:** for each job, GitHub writes a short signed note that says who the job is. Azure checks the note against a rule I set up, and only then lets the job in. No password exists anywhere.
+
+**The old way, and why it is risky.** Create a password for the pipeline in Azure (a "client secret") and store it in GitHub's secret settings. That password:
+
+- lives for months or years;
+- works from anywhere, for anyone who gets hold of it: a log that prints it by mistake, a poisoned package in the build, a break-in at the CI company;
+- must be changed by hand.
+
+**A real case: CircleCI, January 2023.** Malware on one CircleCI engineer's laptop stole a logged-in session. Through it, attackers reached CircleCI's systems, where customers' stored secrets were kept. CircleCI told every customer to rotate every secret stored with them: cloud keys, tokens, SSH keys. With OIDC there is nothing stored that could be stolen this way.
+
+**The words of the new way:**
+
+| Word | Meaning |
+| --- | --- |
+| **Entra ID** | Microsoft's identity service. It decides who may sign in to Azure. (Its old name is Azure Active Directory.) |
+| **Managed identity** | An Azure account for a program, not a person. It has no password at all. "User-assigned" means I create it myself, as its own resource. |
+| **OIDC**, OpenID Connect | A standard way for one service to prove an identity to another with a signed token |
+| **OIDC token** | A short note GitHub writes and signs for one job, valid for minutes. It says, for example, "this job runs in repo springlaughing/restauranty-devsecops-aks, on branch main". Only GitHub can sign it, so nobody can fake it. |
+| **Issuer** | Who signed the token: `https://token.actions.githubusercontent.com` |
+| **Subject** | Who the token is about: the repo, plus the branch or the environment of the job |
+| **Audience** | Who the token is meant for: `api://AzureADTokenExchange`, Entra ID's token exchange |
+| **Federated credential** | A rule attached to a managed identity: "accept a token from this issuer, about exactly this subject, for this audience". "Federated" means Azure trusts another identity system (GitHub) for this one question. |
+
+**What happens when a job signs in:**
+
+```
+ 1. job ──"I need a token"──> GitHub                     (needs permission id-token: write)
+ 2. GitHub ──signed token──> job                         issuer   = token.actions.githubusercontent.com
+                                                         subject  = repo:springlaughing/restauranty-devsecops-aks:environment:production
+                                                         audience = api://AzureADTokenExchange
+ 3. job ──token + "I want to be identity f4f5b9dd-…"──> Entra ID
+ 4. Entra ID checks: signed by GitHub? Issuer, subject and audience equal to a federated
+    credential on that identity?
+ 5. yes ──> Azure access token for that identity, valid about one hour
+    no  ──> refused
+```
+
+| | Client secret in GitHub | OIDC with a federated credential |
+| --- | --- | --- |
+| What is stored in GitHub | A password | Nothing secret. Only ids, which open nothing on their own |
+| How long a stolen credential works | Until someone changes it, often months | The GitHub token: minutes. The Azure token: about an hour |
+| Who can use it | Anyone, from anywhere | Only a job whose repo and branch or environment match the rule |
+| Rotation | By hand | Nothing to rotate |
+
+### What "azurerm" is
+
+**Terraform** describes infrastructure in files, then creates it. Terraform itself knows no cloud. A **provider** is a plugin that turns Terraform files into one platform's API calls.
+
+**azurerm** is the provider for Azure. The name comes from **Azure Resource Manager**, Azure's own layer that creates, changes and deletes every Azure resource. Every resource type that starts with `azurerm_`, such as `azurerm_user_assigned_identity`, comes from this provider. This project uses version 4.81.0, fixed in each layer's `.terraform.lock.hcl`, so every run uses the same version.
+
+### 30. Azure: two identities, one to push, one to deploy
+
+**In one line:** two managed identities with different rights, each trusted for a different kind of GitHub job. The powerful one is used only after I approve.
+
+| Identity | May do in Azure | Trusted for jobs with subject | When it is used |
+| --- | --- | --- | --- |
+| `id-evgenia-restauranty-pipeline` (existed since entry 10) | Push images to the registry (role AcrPush) | `repo:…:ref:refs/heads/main`: the `main` branch | Every merge, automatically |
+| `id-evgenia-restauranty-deploy` (new) | Fetch this one cluster's credentials (role "Azure Kubernetes Service Cluster User Role") | `repo:…:environment:production` | Only after I approve the deploy |
+
+**Why two and not one.** The build job runs `npm ci`, which installs hundreds of packages from the internet. Any of them could be poisoned (event-stream, 2018). If the build job had the deploy identity, a poisoned package could reach the cluster. With two identities, the build job can at most push an image. The deploy identity exists only inside the approved deploy job.
+
+**New file `terraform/persistent/github.tf`:**
+
+```hcl
+locals {
+  github_issuer   = "https://token.actions.githubusercontent.com"
+  github_audience = ["api://AzureADTokenExchange"]
+}
+
+# Build and push: every merge to main, no approval needed.
+resource "azurerm_federated_identity_credential" "pipeline_main" {
+  name                      = "github-main"
+  user_assigned_identity_id = azurerm_user_assigned_identity.pipeline.id
+  issuer                    = local.github_issuer
+  audience                  = local.github_audience
+  subject                   = "repo:${var.github_repo}:ref:refs/heads/main"
+}
+
+# Deploy: a separate identity. Its only right is on the cluster.
+resource "azurerm_user_assigned_identity" "deploy" {
+  name                = "id-${local.name_suffix}-deploy"
+  resource_group_name = azurerm_resource_group.persistent.name
+  location            = azurerm_resource_group.persistent.location
+  tags                = local.common_tags
+}
+
+# Trusted only for jobs in the GitHub environment "production".
+resource "azurerm_federated_identity_credential" "deploy_production" {
+  name                      = "github-production"
+  user_assigned_identity_id = azurerm_user_assigned_identity.deploy.id
+  issuer                    = local.github_issuer
+  audience                  = local.github_audience
+  subject                   = "repo:${var.github_repo}:environment:production"
+}
+```
+
+| Part | What it does |
+| --- | --- |
+| `locals` | Two values used twice below: GitHub's token signer, and Entra's token exchange as the audience |
+| `pipeline_main` | The rule on the existing push identity: accept a GitHub token only for the `main` branch of this repo |
+| `azurerm_user_assigned_identity.deploy` | The new deploy identity, in the persistent resource group, next to the push identity |
+| `deploy_production` | The rule on the deploy identity: accept a GitHub token only for jobs in the environment `production` |
+| `${var.github_repo}` | `springlaughing/restauranty-devsecops-aks`, from a new variable |
+
+**New file `terraform/cluster-access/pipeline.tf`:**
+
+```hcl
+data "azurerm_user_assigned_identity" "deploy" {
+  name                = "id-evgenia-restauranty-deploy"
+  resource_group_name = data.azurerm_resource_group.persistent.name
+}
+
+# Allows "az aks get-credentials" for this cluster only.
+resource "azurerm_role_assignment" "deploy_cluster_user" {
+  scope                            = data.azurerm_kubernetes_cluster.aks.id
+  role_definition_name             = "Azure Kubernetes Service Cluster User Role"
+  principal_id                     = data.azurerm_user_assigned_identity.deploy.principal_id
+  skip_service_principal_aad_check = true
+}
+```
+
+| Part | What it does |
+| --- | --- |
+| `data "azurerm_user_assigned_identity"` | Looks up the deploy identity made by the persistent layer. A `data` block only reads; it never creates or deletes. |
+| `scope = …aks.id` | The role applies to this one cluster, nothing else in Azure |
+| `Azure Kubernetes Service Cluster User Role` | May ask Azure for the cluster's connection details (`az aks get-credentials`) |
+| `skip_service_principal_aad_check` | The identity is brand new; this skips a check that can fail while Entra ID is still spreading it to all its servers |
+
+**Why the files are in two different layers.** The identities and the GitHub rules go in `persistent`, which is never destroyed: GitHub's address never changes. The role goes in `cluster-access`, because it points at the cluster, and a rebuilt cluster gets a new id.
+
+**Changes to existing files:**
+
+| File | Change |
+| --- | --- |
+| `terraform/persistent/variables.tf` | New variable `github_repo` = `springlaughing/restauranty-devsecops-aks` |
+| `terraform/persistent/outputs.tf` | New output `deploy_client_id`, the id the workflow needs |
+| `terraform/persistent/main.tf` | Comment only: the push identity's GitHub rule is now in `github.tf` |
+
+**A renamed field.** The first plan warned that `resource_group_name` and then `parent_id` are "deprecated" (old, to be removed). The installed provider's own description shows the new name:
+
+```
+$ terraform providers schema -json | jq -r '.provider_schemas[].resource_schemas.azurerm_federated_identity_credential.block.attributes | to_entries[] | "\(.key) deprecated=\(.value.deprecated // false)"'
+parent_id  deprecated=true
+resource_group_name  deprecated=true
+user_assigned_identity_id  deprecated=false
+...
+```
+
+So the rules use `user_assigned_identity_id`. Asking the installed provider is safer than a web page, which may describe another version.
+
+**Applied, in this order** (the second layer looks up the identity the first one creates):
+
+```
+$ cd terraform/persistent && terraform apply persistent.tfplan
+Apply complete! Resources: 3 added, 0 changed, 0 destroyed.
+deploy_client_id = "f4f5b9dd-3677-4e1f-addf-8ae2b060a6b0"
+
+$ cd ../cluster-access && terraform apply access.tfplan
+azurerm_role_assignment.deploy_cluster_user: Creation complete after 28s
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+```
+
+### How the pipeline reaches the cluster: the whole chain
+
+**In one line:** the deploy job proves itself twice: to Azure with the OIDC token, then to Kubernetes with a certificate that Azure hands out.
+
+```
+ deploy job (environment "production", after my approval)
+    │ 1. OIDC token from GitHub (subject …:environment:production)
+    v
+ Entra ID ── matches the federated credential? ──> Azure token for id-…-deploy
+    │ 2. az aks get-credentials
+    v
+ Azure ── does id-…-deploy have "Cluster User Role" on this cluster? ──> kubeconfig file
+    │ 3. kubectl apply …  (the kubeconfig holds a client certificate)
+    v
+ Kubernetes API of aks-evgenia-k8s-dev
+```
+
+| Step | Who checks | Proof used |
+| --- | --- | --- |
+| GitHub to Azure | Entra ID | The OIDC token, against the federated credential |
+| Azure to the cluster's details | Azure, by role | The Azure token, against the role assignment |
+| Into Kubernetes | The cluster itself | A **client certificate**: a file signed by the cluster that says who the holder is |
+
+**The known gap: the certificate means full admin.** This cluster has no Entra ID integration. Then Kubernetes knows nothing about Azure identities: it only checks certificates, and the certificate Azure hands out is the cluster's admin certificate. Azure has no way to give out "only the `restauranty` namespace".
+
+What keeps the risk small:
+
+- Only the deploy job can get the certificate, only on `main`, and only after I approve.
+- The runner is a fresh machine that GitHub throws away after the job, together with the file.
+
+What it does not fix: the certificate itself is valid for a long time. If someone copied it during a deploy, it would keep working until the cluster's certificates are replaced (`az aks rotate-certs`). That is an accepted risk for this week.
+
+**What production would do:** turn on Entra ID integration with Azure RBAC on the cluster and switch off local accounts. Then Kubernetes checks Azure identities itself, and the deploy identity can get the role "Azure Kubernetes Service RBAC Writer" on the `restauranty` namespace only. Even better is **GitOps**: a tool inside the cluster (Argo CD) pulls the wanted state from git, so the pipeline needs no cluster rights at all.
+
+### 31. GitHub: the approval gate and branch protection
+
+**In one line:** two settings on GitHub. Deploys wait for my approval, and nobody changes `main` without a pull request.
+
+**Environment `production`** (repo → Settings → Environments):
+
+| Setting | Value | What it protects |
+| --- | --- | --- |
+| Required reviewers | `springlaughing` | The deploy job waits until I click "Approve". Before that, GitHub does not even issue the job's OIDC token. |
+| Deployment branches | `main` only | A job from any other branch cannot use this environment, so it can never match the deploy identity's rule |
+
+**Branch protection on `main`** (repo → Settings → Branches):
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| Require a pull request before merging | On | Every change to `main` goes through a pull request, so the pipeline's checks run first |
+| Required approvals | 0 | I work alone: requiring an approval would stop me from merging my own work |
+| Force pushes | Off | Nobody can rewrite `main`'s history |
+
+**Read back with the GitHub API**, to check the settings really are what I think:
+
+```
+$ gh api repos/springlaughing/restauranty-devsecops-aks/environments \
+    --jq '.environments[] | {name, reviewers: [.protection_rules[] | select(.reviewers) | .reviewers[].reviewer.login]}'
+{"name":"production","reviewers":["springlaughing"]}
+
+$ gh api repos/springlaughing/restauranty-devsecops-aks/environments/production/deployment-branch-policies --jq '.branch_policies[].name'
+main
+
+$ gh api repos/springlaughing/restauranty-devsecops-aks/branches/main/protection \
+    --jq '{approvals: .required_pull_request_reviews.required_approving_review_count, enforce_admins: .enforce_admins.enabled, force_push: .allow_force_pushes.enabled}'
+{"approvals":0,"enforce_admins":false,"force_push":false}
+```
+
+**Two doors left open for the admin (me), on purpose:**
+
+- `enforce_admins: false`: as repo admin I could still push straight to `main`.
+- The environment allows admins to skip the approval.
+
+Normal for a one-person project. Production would close both, so the rules hold for everyone.
+
+### 32. The workflow, part by part
+
+**In one line:** one file, `.github/workflows/ci-cd.yaml`, with two jobs: `build` (four times, once per component) and `deploy`.
+
+Two kinds of variables appear in it:
+
+- `${{ … }}` is filled in by GitHub before the step runs. Example: `${{ matrix.component }}` becomes `auth`.
+- `$NAME` is a normal shell variable, read when the command runs. Example: `$IMAGE`.
+
+**When it runs:**
+
+```yaml
+name: ci-cd
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+```
+
+| Trigger | Meaning |
+| --- | --- |
+| `pull_request` to `main` | Every pull request: build and test only |
+| `push` to `main` | A merge: build, push, then deploy after approval |
+| `workflow_dispatch` | A "Run workflow" button in GitHub, to start it by hand. From a feature branch, Entra ID refuses the sign-in, which is a useful test. After a cluster rebuild, a run on `main` puts the newest images back. |
+
+**Rights, and fixed values:**
+
+```yaml
+permissions:
+  contents: read
+
+env:
+  AZURE_TENANT_ID: 84f58ce9-43c8-4932-b908-591a8a3007d3
+  AZURE_SUBSCRIPTION_ID: daf9c53c-7096-4293-9bb1-f7ad8263db1a
+  PIPELINE_CLIENT_ID: d708b138-ba0b-44a0-beae-5c0cb5bcf9ea   # id-evgenia-restauranty-pipeline
+  DEPLOY_CLIENT_ID: f4f5b9dd-3677-4e1f-addf-8ae2b060a6b0     # id-evgenia-restauranty-deploy
+  ACR_NAME: acrevgeniarestauranty
+  REGISTRY: acrevgeniarestauranty.azurecr.io
+  CLUSTER_NAME: aks-evgenia-k8s-dev
+  CLUSTER_RESOURCE_GROUP: rg-evgenia-k8s-dev
+  APP_URL: https://restauranty.aks.springlaughing.dev
+```
+
+| Part | Meaning |
+| --- | --- |
+| `permissions: contents: read` | Every job may only read the code by default. Each job asks for more only if it needs it. GitHub gives each job a token for the GitHub API; this keeps that token weak. |
+| `env` | Values every job can read. The tenant (my Entra directory), the subscription, and the two client ids are **not secrets**: without a federated credential that matches the job, they open nothing. So no GitHub secrets are needed at all. |
+
+**Job 1, `build`: who, where, how often:**
+
+```yaml
+  build:
+    name: build ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { component: auth, path: backend/auth }
+          - { component: discounts, path: backend/discounts }
+          - { component: items, path: backend/items }
+          - { component: client, path: client }
+    env:
+      IMAGE: acrevgeniarestauranty.azurecr.io/${{ matrix.component }}:${{ github.sha }}
+```
+
+| Part | Meaning |
+| --- | --- |
+| `runs-on: ubuntu-latest` | A fresh Linux machine from GitHub for each run, with Docker, Node.js, the Azure CLI and kubectl already installed |
+| `id-token: write` | May ask GitHub for an OIDC token. Without this, the Azure sign-in cannot work. |
+| `matrix` | Run the same job four times, once per component, side by side. `component` and `path` change in each copy. |
+| `fail-fast: false` | If one component fails, the other three still finish, so one run shows every problem |
+| `IMAGE` | The image's full name, for example `acrevgeniarestauranty.azurecr.io/auth:2b75634…`. The tag is the commit's full id (`github.sha`). |
+
+**Why the commit id as the tag.** Each image says exactly which code it was built from, and a tag never moves. The usual alternative, `latest`, points at a different image after every push, so nobody can tell what is really running.
+
+**Job 1, `build`: the steps:**
+
+```yaml
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.path }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.path }}
+        run: npm ci
+
+      - name: Test
+        working-directory: ${{ matrix.path }}
+        run: |
+          if [ "${{ matrix.component }}" = client ]; then
+            CI=true npm test -- --watchAll=false
+          else
+            node --check app.js
+            node --check server.js
+          fi
+
+      - name: Build image
+        run: docker build -t "$IMAGE" "${{ matrix.path }}"
+```
+
+| Step | What it does |
+| --- | --- |
+| `actions/checkout` | Copies the repo's code onto the runner |
+| `actions/setup-node` | Installs Node.js 22, the same major version as the images (`node:22-alpine`). `cache: npm` keeps downloaded packages between runs, keyed by the lock file, so the next run is faster. |
+| `npm ci` | Installs exactly the versions in `package-lock.json`, nothing newer. `npm install` could pick newer versions and change the lock file. |
+| Test, client | Runs the client's component test (`src/App.test.jsx`: the start page shows the logo and the welcome text). `CI=true` and `--watchAll=false` make it run once and stop, instead of waiting for file changes. |
+| Test, backends | They have no tests. `node --check` at least proves every file parses: a typo fails the build. The real checks for them are the security tests after the deploy (#13). |
+| `docker build` | Builds the image from the component's own `Dockerfile` (entry 11) |
+
+**Job 1, `build`: push, on `main` only:**
+
+```yaml
+      - name: Sign in to Azure as the pipeline identity
+        if: github.event_name != 'pull_request'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.PIPELINE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        run: |
+          az acr login --name "$ACR_NAME"
+          docker push "$IMAGE"
+```
+
+| Part | Meaning |
+| --- | --- |
+| `if: github.event_name != 'pull_request'` | Skipped on pull requests. A pull request never signs in to Azure and never pushes. |
+| `azure/login` | Microsoft's action. With only a client id and no secret, it uses OIDC: it asks GitHub for the token and trades it at Entra ID (the steps in "How GitHub signs in to Azure") |
+| `az acr login` | Uses the Azure sign-in to get a short-lived password for the registry, and gives it to Docker |
+| `docker push` | Uploads the image. The identity has AcrPush, so this works, and nothing else does. |
+
+**Job 2, `deploy`: conditions and the approval gate:**
+
+```yaml
+  deploy:
+    name: deploy to AKS
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ env.APP_URL }}
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+```
+
+| Part | Meaning |
+| --- | --- |
+| `needs: build` | Starts only after all four builds succeeded. One failed build means no deploy. |
+| `if: … refs/heads/main` | Only for `main`, never for a pull request |
+| `environment: production` | The approval gate (entry 31). The job waits until I approve. The OIDC token then carries the subject `…:environment:production`, which is the only subject the deploy identity accepts. `url` puts a link to the site on the run's page. |
+| `concurrency` | At most one deploy at a time. A second one waits; `cancel-in-progress: false` means a running deploy is never stopped halfway. |
+
+**Job 2, `deploy`: the steps:**
+
+```yaml
+      - uses: actions/checkout@v4
+
+      - name: Sign in to Azure as the deploy identity
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get the cluster's credentials
+        run: az aks get-credentials --resource-group "$CLUSTER_RESOURCE_GROUP" --name "$CLUSTER_NAME" --overwrite-existing
+
+      - name: Point the manifests at this commit's images
+        run: |
+          sed -i -E "s#(${REGISTRY}/(auth|discounts|items|client)):[0-9a-f]+#\1:${GITHUB_SHA}#" k8s/app/*.yaml
+          grep -n "image:" k8s/app/*.yaml
+
+      - name: Deploy
+        run: |
+          kubectl apply -f k8s/app/ -f k8s/network/
+          for d in auth discounts items client; do
+            kubectl rollout status "deployment/$d" -n restauranty --timeout=5m
+          done
+
+      - name: Smoke test
+        run: |
+          curl -fsS -o /dev/null -w "website %{http_code}\n" "$APP_URL/"
+          curl -fsS -w "\n" "$APP_URL/api/auth"
+```
+
+| Step | What it does |
+| --- | --- |
+| Sign in as the deploy identity | Same as above, with the other client id. Works only in the approved `production` job. |
+| `az aks get-credentials` | Writes the kubeconfig file, so `kubectl` can reach the cluster (the chain above) |
+| `sed …` | The manifests in git name a fixed tag (`:bfb0e27`). This replaces it with this run's commit id, in the runner's copy only; git is not changed. The pattern matches only the four app images: MongoDB's `mongo:8.0.34` stays as it is. `grep` prints the result into the log, as a record. |
+| `kubectl apply` | Sends the app's manifests and the network rules (Part 6) to the cluster. Kubernetes changes only what differs. |
+| `kubectl rollout status` | Waits until each Deployment runs its new pods and they are ready, up to 5 minutes each. If a new version does not start, the job fails. |
+| Smoke test | Two quick checks that the site answers: the home page and auth. `-f` makes `curl` fail on an error answer, so the job fails too. |
+
+**What the pipeline does not deploy.** The platform parts (the Gateway, cert-manager, External Secrets, Reloader, the flood limit) are still installed by `scripts/setup-aks.sh`. They change rarely and need Helm. The pipeline handles what changes often: the app.
+
+**A known gap: the tag in git.** The manifests in git keep the tag `bfb0e27`. After a cluster rebuild, `scripts/setup-aks.sh` deploys that old tag. Fix for now: after a rebuild, start the workflow by hand on `main` ("Run workflow"), which deploys the newest images.
+
+### 33. First run: the pull request
+
+**In one line:** the first run, on the pull request itself, built and tested all four components and correctly skipped the deploy.
+
+```
+$ gh run view 42882192526 --json jobs --jq '.jobs[] | "\(.conclusion)\t\(.name)"'
+success   build discounts    20s
+success   build items        17s
+success   build client       68s
+success   build auth         20s
+skipped   deploy to AKS
+```
+
+| Result | What it shows |
+| --- | --- |
+| Four builds `success` | All four install, pass their test or syntax check, and build their image on a clean machine, not just on my laptop |
+| client takes longest (68 s) | It is the only one with a real test, and the React build is the heaviest |
+| `deploy` `skipped` | A pull request never deploys. It never signed in to Azure either: those steps were skipped too |
+
+### What #12 creates
+
+| Thing | Where | State |
+| --- | --- | --- |
+| Deploy identity `id-evgenia-restauranty-deploy` | `terraform/persistent/github.tf` | Applied |
+| GitHub rules: `main` for the push identity, `environment:production` for the deploy identity | `terraform/persistent/github.tf` | Applied |
+| Deploy identity's role on the cluster | `terraform/cluster-access/pipeline.tf` | Applied |
+| Environment `production` with me as required reviewer, `main` only | GitHub settings | Set |
+| Branch protection: pull request required for `main` | GitHub settings | Set |
+| Workflow: build, test, push, deploy after approval, smoke test | `.github/workflows/ci-cd.yaml` | First run passed (pull request) |
+
+---
+
 ## What is next
 
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
 | Backends reconnect to MongoDB by themselves | #28 |
-| Pipeline with security gates | #12, #13 |
+| Pipeline security gates: Trivy, Semgrep, npm audit, tests after the deploy | #13 |
 | Monitoring, alerts, the attack demo | #14, #15 |

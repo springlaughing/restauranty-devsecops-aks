@@ -52,3 +52,10 @@ output "gateway_public_ip_name" {
   description = "Name of the static IP, for the Gateway's azure-pip-name annotation."
   value       = azurerm_public_ip.gateway.name
 }
+
+# For the workflow: these ids are not secrets. Without a federated credential
+# that trusts the job, an id alone opens nothing.
+output "deploy_client_id" {
+  description = "Client id of the deploy identity (AZURE_CLIENT_ID in the deploy job)."
+  value       = azurerm_user_assigned_identity.deploy.client_id
+}

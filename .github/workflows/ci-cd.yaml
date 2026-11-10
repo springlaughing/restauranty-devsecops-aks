@@ -1,0 +1,151 @@
+# CI/CD for Restauranty (#12).
+#
+#   pull request to main  ->  build: install, test, build the 4 images (no push, no Azure)
+#   merge to main         ->  build + push the 4 images, tagged with the commit SHA
+#                         ->  deploy: waits for my approval (environment "production"),
+#                             then deploys exactly those images to AKS
+#
+# No passwords or keys are stored in GitHub. Each job that needs Azure asks
+# GitHub for a short-lived OIDC token and trades it at Entra ID for an Azure
+# token (terraform/persistent/github.tf):
+#   - build/push signs in as the "pipeline" identity: may push images, nothing else;
+#     Entra trusts it only for jobs on the main branch.
+#   - deploy signs in as the "deploy" identity: may fetch this cluster's credentials;
+#     Entra trusts it only for jobs in the environment "production".
+# The ids below are not secrets: without a matching federated credential they open nothing.
+
+name: ci-cd
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:    # run by hand; from a feature branch, Entra refuses the sign-in
+
+# Default for every job: read the code, nothing else. Jobs ask for more below.
+permissions:
+  contents: read
+
+env:
+  AZURE_TENANT_ID: 84f58ce9-43c8-4932-b908-591a8a3007d3
+  AZURE_SUBSCRIPTION_ID: daf9c53c-7096-4293-9bb1-f7ad8263db1a
+  PIPELINE_CLIENT_ID: d708b138-ba0b-44a0-beae-5c0cb5bcf9ea   # id-evgenia-restauranty-pipeline
+  DEPLOY_CLIENT_ID: f4f5b9dd-3677-4e1f-addf-8ae2b060a6b0     # id-evgenia-restauranty-deploy
+  ACR_NAME: acrevgeniarestauranty
+  REGISTRY: acrevgeniarestauranty.azurecr.io
+  CLUSTER_NAME: aks-evgenia-k8s-dev
+  CLUSTER_RESOURCE_GROUP: rg-evgenia-k8s-dev
+  APP_URL: https://restauranty.aks.springlaughing.dev
+
+jobs:
+  build:
+    name: build ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # to ask GitHub for an OIDC token (used only on main)
+    strategy:
+      fail-fast: false  # one broken component does not hide the others' results
+      matrix:
+        include:
+          - { component: auth, path: backend/auth }
+          - { component: discounts, path: backend/discounts }
+          - { component: items, path: backend/items }
+          - { component: client, path: client }
+    env:
+      IMAGE: acrevgeniarestauranty.azurecr.io/${{ matrix.component }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22    # the same major version as the images (node:22-alpine)
+          cache: npm
+          cache-dependency-path: ${{ matrix.path }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.path }}
+        run: npm ci
+
+      # The client has a component test. The backends have no tests, so they
+      # get a syntax check; the real checks for them are the security tests
+      # after the deploy (#13).
+      - name: Test
+        working-directory: ${{ matrix.path }}
+        run: |
+          if [ "${{ matrix.component }}" = client ]; then
+            CI=true npm test -- --watchAll=false
+          else
+            node --check app.js
+            node --check server.js
+          fi
+
+      - name: Build image
+        run: docker build -t "$IMAGE" "${{ matrix.path }}"
+
+      # Only on main. On a pull request the job stops here: nothing is pushed,
+      # and the job never signs in to Azure.
+      - name: Sign in to Azure as the pipeline identity
+        if: github.event_name != 'pull_request'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.PIPELINE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        run: |
+          az acr login --name "$ACR_NAME"
+          docker push "$IMAGE"
+
+  deploy:
+    name: deploy to AKS
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # The job waits here until I approve it in GitHub. Only jobs in this
+    # environment can sign in as the deploy identity.
+    environment:
+      name: production
+      url: ${{ env.APP_URL }}
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false   # never stop a deploy halfway
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sign in to Azure as the deploy identity
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get the cluster's credentials
+        run: az aks get-credentials --resource-group "$CLUSTER_RESOURCE_GROUP" --name "$CLUSTER_NAME" --overwrite-existing
+
+      # The manifests in git name a fixed image tag. Here, in this run's copy
+      # only, every app image is pointed at the images this run just built.
+      - name: Point the manifests at this commit's images
+        run: |
+          sed -i -E "s#(${REGISTRY}/(auth|discounts|items|client)):[0-9a-f]+#\1:${GITHUB_SHA}#" k8s/app/*.yaml
+          grep -n "image:" k8s/app/*.yaml
+
+      # The app and its network rules. Platform parts (Gateway, cert-manager,
+      # External Secrets, rate limits) are installed by scripts/setup-aks.sh.
+      - name: Deploy
+        run: |
+          kubectl apply -f k8s/app/ -f k8s/network/
+          for d in auth discounts items client; do
+            kubectl rollout status "deployment/$d" -n restauranty --timeout=5m
+          done
+
+      - name: Smoke test
+        run: |
+          curl -fsS -o /dev/null -w "website %{http_code}\n" "$APP_URL/"
+          curl -fsS -w "\n" "$APP_URL/api/auth"

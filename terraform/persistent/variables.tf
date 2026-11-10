@@ -44,3 +44,9 @@ variable "dns_hostnames" {
   type        = list(string)
   default     = ["restauranty", "grafana"]
 }
+
+variable "github_repo" {
+  description = "GitHub repository (owner/name) whose Actions may sign in as the pipeline identities."
+  type        = string
+  default     = "springlaughing/restauranty-devsecops-aks"
+}
