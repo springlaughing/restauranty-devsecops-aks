@@ -3208,4 +3208,5 @@ The 2 restarts are the fix at work: each one is a backend that found no MongoDB 
 | Fail the build on an end-of-life base image or runtime, whatever its CVE count (entry 45) | — |
 | Monitoring, alerts, the attack demo; a Grafana panel for vulnerabilities (Trivy Operator), if time allows | #14, #15 |
 | Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
+| Reliability, outside this project's security focus: a readiness check that asks MongoDB's state (fast errors instead of 10 s waits, entry 46); MongoDB as a replica set for high availability | — |
 | Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
