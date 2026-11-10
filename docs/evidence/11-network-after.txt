@@ -1,0 +1,28 @@
+Policies in restauranty: 5
+
+The app still works
+  PASS  internet -> Gateway -> client                           200
+  PASS  internet -> Gateway -> auth -> MongoDB (wrong login)    401
+  PASS  items -> Cloudinary (api.cloudinary.com:443)            open
+
+A hacked pod in the app namespace
+  PASS  attacker -> MongoDB :27017                              blocked
+  PASS  attacker -> auth :3001                                  blocked
+
+A hacked pod in another namespace
+  PASS  attacker (default) -> MongoDB :27017                    blocked
+  PASS  attacker (default) -> auth :3001                        blocked
+
+A hacked app pod
+  PASS  discounts -> auth :3001 (backends do not call each other) blocked
+  PASS  auth -> internet (1.1.1.1:443, no way to send data out) blocked
+  PASS  items -> Azure metadata service (169.254.169.254:80)    blocked
+
+No app ServiceAccount may read Secrets
+  PASS  ServiceAccount auth: get secrets                        no
+  PASS  ServiceAccount discounts: get secrets                   no
+  PASS  ServiceAccount items: get secrets                       no
+  PASS  ServiceAccount client: get secrets                      no
+  PASS  ServiceAccount mongodb: get secrets                     no
+
+15 passed, 0 failed

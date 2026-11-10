@@ -4,7 +4,7 @@
 
 **How to read it.** Entries are in order. Each one starts with its result in one line. You can read any entry on its own.
 
-**All work below is from 9 November 2026.**
+**Parts 1 to 5 are from 9 November 2026, Part 6 from 10 November.**
 
 ---
 
@@ -39,6 +39,14 @@
   - [18. Azure: one identity per workload](#18-azure-one-identity-per-workload)
   - [19. Kubernetes: External Secrets and Reloader](#19-kubernetes-external-secrets-and-reloader)
   - [What #8 creates](#what-8-creates)
+- [Part 6 — network rules](#part-6--network-rules)
+  - [20. Before #11: every pod can reach every pod](#20-before-11-every-pod-can-reach-every-pod)
+  - [21. The rules: deny everything, then open what the app uses](#21-the-rules-deny-everything-then-open-what-the-app-uses)
+  - [22. The test: assume a pod is already hacked](#22-the-test-assume-a-pod-is-already-hacked)
+  - [23. Surprise: after a cluster restart, the backends lost MongoDB](#23-surprise-after-a-cluster-restart-the-backends-lost-mongodb)
+  - [24. Before the rules: the attacker reaches MongoDB, the password holds](#24-before-the-rules-the-attacker-reaches-mongodb-the-password-holds)
+  - [25. After the rules: every attack blocked, the app still works](#25-after-the-rules-every-attack-blocked-the-app-still-works)
+  - [What #11 creates](#what-11-creates)
 - [What is next](#what-is-next)
 
 ---
@@ -718,12 +726,375 @@ Azure itself refuses, not a script: the caller is `items`' identity, and it has 
 
 ---
 
+## Part 6 — network rules
+
+Goal: a pod that is taken over can reach only what its job needs. Nothing else in the cluster can reach the database or the services except through the Gateway. Issue #11, branch `11-network-policies`.
+
+The cluster was stopped overnight with `az aks stop` and started again with `az aks start`. Everything came back as it was: pods, MongoDB's disk, the certificate, the secrets.
+
+### 20. Before #11: every pod can reach every pod
+
+**In one line:** by default, Kubernetes lets any pod open a connection to any other pod, in any namespace.
+
+That is a Kubernetes design choice, not a mistake in this cluster. It means "inside the cluster" protects nothing on its own:
+
+| From | To | Allowed before #11? |
+| --- | --- | --- |
+| Any pod in any namespace | MongoDB, port 27017 | Yes |
+| Any pod | `auth`, `discounts`, `items` directly, around the Gateway | Yes |
+| `discounts` | `auth` (they never talk to each other) | Yes |
+| `auth` | Any address on the internet | Yes |
+| Any pod | The Azure metadata service, 169.254.169.254 | Yes |
+
+The rules to change this are called **NetworkPolicies**. Kubernetes only stores them: a separate component, the policy engine, must enforce them. Without one, the rules are accepted and silently ignored. This cluster has one: Cilium, switched on in entry 8.
+
+### 21. The rules: deny everything, then open what the app uses
+
+**In one line:** five rules in `k8s/network/policies.yaml`. The first blocks everything; the other four open only the paths the app really uses.
+
+**The paths the app really uses**, found by reading the code: the backends never call each other, and only `items` calls the internet (Cloudinary).
+
+```
+internet ──> Gateway ──> client, auth, discounts, items   (each on its port "http")
+                         auth, discounts, items ──> MongoDB :27017
+                         auth, discounts, items ──> cluster DNS :53
+                         items ──> Cloudinary, HTTPS :443
+```
+
+| Rule | What it allows |
+| --- | --- |
+| `default-deny` | Nothing, in or out, for every pod in `restauranty` |
+| `from-gateway` | The Gateway's NGINX pods reach the four app components on their `http` port |
+| `mongodb-from-backends` | Only `auth`, `discounts` and `items` reach MongoDB, on 27017 |
+| `backends-to-mongodb-and-dns` | The three backends may call MongoDB and the cluster DNS |
+| `items-to-internet-https` | `items` may call HTTPS on public addresses, for Cloudinary |
+
+**How the Gateway is recognised.** By its namespace (`gateway`) **and** a label on its pods. Checked on the cluster before applying the rules:
+
+```
+$ kubectl get pods -n gateway --show-labels
+NAME                                 READY   STATUS    RESTARTS   AGE   LABELS
+restauranty-nginx-85c5954cc8-6x6bh   1/1     Running   0          14h   app.kubernetes.io/instance=nginx-gateway,...,gateway.networking.k8s.io/gateway-name=restauranty,...
+```
+
+**What the rules cannot do:**
+
+- **Name a website.** A NetworkPolicy knows IP addresses, not names. So `items` may reach **any** public HTTPS address, not just `api.cloudinary.com`. Allowing a single domain needs Cilium's FQDN rules, which on AKS come with the paid Advanced Container Networking Services. Known gap.
+- **Stop an admin.** Someone with rights to create pods can usually delete the rules too. NetworkPolicies protect against a **taken-over app**, not a taken-over admin; that is the job of Kubernetes RBAC.
+
+**Not in this step:** the monitoring paths (Prometheus reads `/metrics`, logs go to Loki). The monitoring namespace does not exist yet; its rules come with #14.
+
+The setup script applies the rules after the app is up (`kubectl apply -f k8s/network/`), so a rebuilt cluster gets them too.
+
+### 22. The test: assume a pod is already hacked
+
+**In one line:** the test does not show how an attacker gets in. It assumes they already did, and checks what they can reach. Security people call this **assume breach**.
+
+Real attackers get into a pod through a bug in a library (Log4Shell, 2021), a poisoned npm package (event-stream, 2018), or stolen deploy rights (Tesla's open Kubernetes dashboard, 2018). The network rules do not stop the break-in. They limit what happens after it.
+
+**Two kinds of attacker** (`k8s/proof/attacker-pods.yaml` and the app pods themselves):
+
+| Attacker | Stands for |
+| --- | --- |
+| Pod `attacker` in `restauranty`: just `curl`, no `app` label | A new container the attacker controls, right next to the app |
+| Pod `attacker` in `default` | The same, somewhere else in the cluster |
+| The real `auth`, `discounts`, `items` pods (`kubectl exec`) | A bug in the app's code: the attacker runs code inside a real app pod |
+
+**The test script** `scripts/test-network.sh` runs 15 checks and prints PASS or FAIL for each:
+
+- **The app still works:** the website loads, a wrong login gets `401` (auth must ask MongoDB to say so), and `items` reaches Cloudinary.
+- **The attackers are blocked:** both attacker pods try MongoDB and `auth`.
+- **A hacked app pod is boxed in:** `discounts` tries `auth`, `auth` tries the internet, and `items` tries the Azure metadata service. That last address is how the Capital One breach (2019) got its cloud credentials.
+- **No app ServiceAccount may read Secrets:** `kubectl auth can-i` for all five.
+
+The targets are **pod IP addresses, not names**. A pod without a DNS rule cannot look up a name, so the test would then show a DNS failure instead of a blocked connection. "Blocked" means the connection attempt timed out: the packet was dropped on the way and never arrived.
+
+**Prediction, written before the first run:**
+
+| Group | Checks | Without rules | With rules |
+| --- | --- | --- | --- |
+| The app still works | 3 | PASS | PASS |
+| Attacker in `restauranty` | 2 | FAIL: gets through | PASS: blocked |
+| Attacker in `default` | 2 | FAIL: gets through | PASS: blocked |
+| Hacked app pod | 3 | FAIL: gets through | PASS: blocked |
+| ServiceAccounts and Secrets | 5 | PASS (no rights since #8) | PASS |
+| **Total** | 15 | **8 passed, 7 failed** | **15 passed** |
+
+### 23. Surprise: after a cluster restart, the backends lost MongoDB
+
+**In one line:** the first run gave one result that was not predicted. Its cause was not the network: after `az aks start`, the three backends had lost MongoDB for good, while Kubernetes showed every pod as healthy.
+
+**The first run**, with the attacker pods in place and no rules yet:
+
+```
+$ kubectl apply -f k8s/proof/attacker-pods.yaml
+pod/attacker created
+pod/attacker created
+
+$ ./scripts/test-network.sh
+Policies in restauranty: 0
+
+The app still works
+  PASS  internet -> Gateway -> client                           200
+  FAIL  internet -> Gateway -> auth -> MongoDB (wrong login)    expected 401, got 500
+  PASS  items -> Cloudinary (api.cloudinary.com:443)            open
+
+A hacked pod in the app namespace
+  FAIL  attacker -> MongoDB :27017                              expected blocked, got open
+  FAIL  attacker -> auth :3001                                  expected blocked, got open
+
+A hacked pod in another namespace
+  FAIL  attacker (default) -> MongoDB :27017                    expected blocked, got open
+  FAIL  attacker (default) -> auth :3001                        expected blocked, got open
+
+A hacked app pod
+  FAIL  discounts -> auth :3001 (backends do not call each other) expected blocked, got open
+  FAIL  auth -> internet (1.1.1.1:443, no way to send data out) expected blocked, got open
+  FAIL  items -> Azure metadata service (169.254.169.254:80)    expected blocked, got open
+
+No app ServiceAccount may read Secrets
+  PASS  ServiceAccount auth: get secrets                        no
+  PASS  ServiceAccount discounts: get secrets                   no
+  PASS  ServiceAccount items: get secrets                       no
+  PASS  ServiceAccount client: get secrets                      no
+  PASS  ServiceAccount mongodb: get secrets                     no
+
+7 passed, 8 failed
+```
+
+Every attack got through, as predicted. But the wrong login answered `500` instead of `401`, and with no rules in place, nothing could be blocking it.
+
+**Step 1: the same request by hand.**
+
+```
+$ curl -s -w '\nHTTP %{http_code}\n' -X POST https://restauranty.aks.springlaughing.dev/api/auth/login \
+    -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"wrong"}'
+{"message":"Internal server error"}
+HTTP 500
+```
+
+**Step 2: auth's log.** Auth waits 10 seconds for the database, then gives up:
+
+```
+$ kubectl logs -n restauranty -l app=auth --since=10m
+Error updating user count: MongooseError: Operation `users.countDocuments()` buffering timed out after 10000ms
+```
+
+**Step 3: every backend's log, from its start.** All six backend pods failed to find MongoDB by name:
+
+```
+$ kubectl logs -n restauranty <each auth, discounts, items pod> | grep -i mongo
+Error connecting to mongo:  MongoNetworkError: getaddrinfo ENOTFOUND mongodb
+```
+
+**Step 4: when each pod started.** All at the same moment, MongoDB included:
+
+```
+$ kubectl get pods -n restauranty -o custom-columns=NAME:.metadata.name,STARTED:.status.containerStatuses[0].state.running.startedAt
+auth-5b7d75d54-kkj72         2026-11-10T12:35:29Z
+items-5ddb9fb88d-thn9f       2026-11-10T12:35:28Z
+discounts-6bcf5f64d4-5mmbj   2026-11-10T12:35:47Z
+mongodb-0                    2026-11-10T12:35:53Z
+...
+```
+
+**Step 5: the name works now.**
+
+```
+$ kubectl exec -n restauranty deploy/auth -- node -e 'require("dns").lookup("mongodb",(e,a)=>console.log(e?e.code:a))'
+192.168.0.114
+```
+
+**What happened.**
+
+1. `az aks start` started all pods at once. Some backends were up **before** MongoDB.
+2. The name `mongodb` belongs to a headless Service. Kubernetes publishes such a name only once its pod is ready. So for those first seconds the name did not exist: `ENOTFOUND`.
+3. The backends try to connect **once**, at start. On failure, `backend/*/db/index.js` only logs the error and never tries again.
+4. A few seconds later MongoDB was ready and the name worked, but no backend asked again.
+5. The health checks only ask "does the web server answer?", not "can you reach the database?". So every pod stayed `Running` and `Ready`, while every login failed.
+
+**Why it matters.** This is an outage that nothing reported: Kubernetes saw healthy pods, and the only sign was users getting errors. The app already measures it: `mongo_connection_status` was 0 in all three backends. An alert on that metric (#14, #15) would have caught it.
+
+**Fixed for now** by restarting the backends, so they connect again:
+
+```bash
+kubectl rollout restart deployment auth discounts items -n restauranty
+```
+
+**The real fix** is in the code, so a restart is never needed: when the first connection fails, the app exits, and Kubernetes starts it again until MongoDB is there. It has its own issue, [#28](https://github.com/springlaughing/restauranty-devsecops-aks/issues/28), so the network change stays separate.
+
+### 24. Before the rules: the attacker reaches MongoDB, the password holds
+
+**In one line:** with no rules, the attacker pod reaches MongoDB over the network. It cannot log in: MongoDB's password is a second, separate wall.
+
+**Attack 1: knock on the door.** The attacker pod has only `curl`, which speaks HTTP:
+
+```
+$ MONGO=$(kubectl get pod mongodb-0 -n restauranty -o jsonpath='{.status.podIP}')
+$ kubectl exec -n restauranty attacker -- curl -s --max-time 5 http://$MONGO:27017
+It looks like you are trying to access MongoDB over HTTP on the native driver port.
+```
+
+What happened, step by step:
+
+1. `curl` opened a network connection to MongoDB's port 27017. Nothing stopped it.
+2. It sent an HTTP request, but MongoDB does not speak HTTP; it has its own protocol.
+3. MongoDB recognised the HTTP text and answered with that fixed sentence. This happens **before any login**: it is the database saying "wrong language", not "welcome".
+
+Like knocking on a door and hearing "wrong door!" from inside: the attacker now knows the door exists and someone is behind it, but has not opened it. No password was used and no data was read. The MongoDB password never left the backends' Secrets, and the attacker pod cannot read Secrets (entry 22: all five `can-i` checks say `no`).
+
+**Attack 2: try a real database command.** A second attacker, this time with MongoDB's own client, from the `default` namespace:
+
+```
+$ kubectl run mongo-attacker -n default --rm -it --restart=Never --image=mongo:8.0.34 -- \
+    mongosh --host $MONGO --quiet --eval 'db.adminCommand({listDatabases: 1})'
+MongoServerError: Command listDatabases requires authentication
+pod "mongo-attacker" deleted from default namespace
+```
+
+The request **reached** MongoDB, and MongoDB refused it. The password is the only wall still standing.
+
+**Why reaching it matters, even with a password:**
+
+| What the attacker can do with the door in reach | Why |
+| --- | --- |
+| Guess passwords | From inside the cluster, no Gateway rate limit applies |
+| Use a bug that works before login | **MongoBleed** (CVE-2025-14847, December 2025): anyone who could connect could read pieces of the server's memory, no password needed. Exploited in real attacks; fixed in 8.0.17. This cluster runs `mongo:8.0.34`, so it is safe from this one, but the next such bug will hit someone unpatched. |
+| Learn about the server | A bare connection already reveals facts that help choose an exploit |
+
+**Two walls, two jobs.** Network rules decide who may **knock**; authentication decides who may **enter**. Before #11 only the second wall existed. After #11 both must fail before anyone reaches the data. That is defence in depth.
+
+### 25. After the rules: every attack blocked, the app still works
+
+**In one line:** 15 of 15 checks pass. Every attack from entry 22 times out, and the app's own paths still work.
+
+**One variable at a time.** First the backends were restarted (entry 23) and the login checked **without** rules: `401`. So if the login broke after the rules, the rules would be the only possible cause.
+
+```
+$ kubectl rollout restart deployment auth discounts items -n restauranty
+$ curl -s -o /dev/null -w '%{http_code}\n' -X POST https://restauranty.aks.springlaughing.dev/api/auth/login \
+    -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"wrong"}'
+401
+
+$ kubectl apply -f k8s/network/policies.yaml
+networkpolicy.networking.k8s.io/default-deny created
+networkpolicy.networking.k8s.io/from-gateway created
+networkpolicy.networking.k8s.io/mongodb-from-backends created
+networkpolicy.networking.k8s.io/backends-to-mongodb-and-dns created
+networkpolicy.networking.k8s.io/items-to-internet-https created
+```
+
+**Before and after, side by side** (full outputs: `docs/evidence/11-network-before.txt`, `11-network-after.txt`):
+
+| Check | Before (0 rules) | After (5 rules) |
+| --- | --- | --- |
+| internet → Gateway → client | 200 | 200 |
+| internet → Gateway → auth → MongoDB (wrong login) | 500 (entry 23, not the network) | 401 |
+| items → Cloudinary | open | open |
+| attacker → MongoDB | **open** | blocked |
+| attacker → auth | **open** | blocked |
+| attacker (default) → MongoDB | **open** | blocked |
+| attacker (default) → auth | **open** | blocked |
+| discounts → auth | **open** | blocked |
+| auth → internet | **open** | blocked |
+| items → Azure metadata service | **open** | blocked |
+| 5 ServiceAccounts: get secrets | no | no |
+| **Result** | 7 passed, 8 failed | **15 passed, 0 failed** |
+
+```
+$ ./scripts/test-network.sh
+Policies in restauranty: 5
+
+The app still works
+  PASS  internet -> Gateway -> client                           200
+  PASS  internet -> Gateway -> auth -> MongoDB (wrong login)    401
+  PASS  items -> Cloudinary (api.cloudinary.com:443)            open
+
+A hacked pod in the app namespace
+  PASS  attacker -> MongoDB :27017                              blocked
+  PASS  attacker -> auth :3001                                  blocked
+
+A hacked pod in another namespace
+  PASS  attacker (default) -> MongoDB :27017                    blocked
+  PASS  attacker (default) -> auth :3001                        blocked
+
+A hacked app pod
+  PASS  discounts -> auth :3001 (backends do not call each other) blocked
+  PASS  auth -> internet (1.1.1.1:443, no way to send data out) blocked
+  PASS  items -> Azure metadata service (169.254.169.254:80)    blocked
+
+No app ServiceAccount may read Secrets
+  PASS  ServiceAccount auth: get secrets                        no
+  PASS  ServiceAccount discounts: get secrets                   no
+  PASS  ServiceAccount items: get secrets                       no
+  PASS  ServiceAccount client: get secrets                      no
+  PASS  ServiceAccount mongodb: get secrets                     no
+
+15 passed, 0 failed
+```
+
+**The two MongoDB attacks from entry 24, again:**
+
+```
+$ kubectl exec -n restauranty attacker -- curl -s --max-time 5 http://$MONGO:27017; echo " (exit $?)"
+command terminated with exit code 28
+ (exit 28)
+
+$ kubectl run mongo-attacker -n default --rm -it --restart=Never --image=mongo:8.0.34 -- \
+    mongosh --host $MONGO --quiet --eval 'db.adminCommand({listDatabases: 1})'
+MongoServerSelectionError: Socket 'connect' timed out after 30004ms (connectTimeoutMS: 30000)
+```
+
+| | Before | After |
+| --- | --- | --- |
+| `curl` | MongoDB answers: "It looks like you are trying to access MongoDB over HTTP..." | Exit 28: timed out, no answer |
+| `mongosh` | `requires authentication`: MongoDB got the command and refused it | `Socket 'connect' timed out`: MongoDB never saw anything |
+
+The error changes **kind**, not just text. "requires authentication" comes from MongoDB: the server received the request. A timeout comes from nowhere: the packet was dropped on the way. The attacker can no longer even knock.
+
+**The one path to the internet still works.** The test above only proves `items` can open a connection to Cloudinary. The real proof is an upload: an item created with an image in the browser, with the rules on.
+
+```
+$ kubectl logs -n restauranty -l app=items -f --since=1m | grep -v 'GET /api/items '
+POST /api/items/dietary 200 77.803 ms - 169
+GET /api/items/items 200 7.110 ms - 350
+POST /api/items/items 200 1135.593 ms - 250
+```
+
+The item was saved with `200`. It took about one second, while the other requests took milliseconds: that second is `items` uploading the file to Cloudinary before it answers. The image address is `https://res.cloudinary.com/.../restaurant/...jpg`.
+
+Showing the image is a different path: the browser loads it straight from Cloudinary, never through the cluster. So the `200` on the POST is the proof, not the picture on screen.
+
+**A false alarm on the first "after" run.** The first run gave 14 of 15: `attacker (default) -> auth :3001` reported "open". The same check against both running auth pods, by hand, timed out (exit 28). The cause was the test script, not the rules:
+
+1. The restart had just replaced the auth pods; the old one was still shutting down.
+2. The script took the first auth pod in the list, which could be the old one. A pod that is shutting down is no longer protected by the rules, so it most likely answered "connection refused".
+3. The script counted everything except a timeout as "open".
+
+From the other attacker the same address still showed "blocked": that attacker's own outbound rule (default deny) drops the packet before it leaves. The `default` attacker has no outbound rules, so its packet reached the dying pod.
+
+**Fixed in the script:** it now picks only running pods that are not shutting down, and reports anything other than "connected" or "timed out" as `error (exit N)`, never as "open" or "blocked". The second run: 15 of 15.
+
+### What #11 creates
+
+| Thing | Where | State |
+| --- | --- | --- |
+| 5 NetworkPolicies: default deny, then Gateway in, backends to MongoDB and DNS, `items` to HTTPS | `k8s/network/policies.yaml` | Applied |
+| Two attacker pods (`restauranty`, `default`) | `k8s/proof/attacker-pods.yaml` | Used for the test |
+| Test with 15 checks, PASS/FAIL | `scripts/test-network.sh` | 15 of 15 |
+| Item with image, rules on | Browser + `items` log | `POST /api/items/items 200`, image on Cloudinary |
+| Setup script applies the rules after the app | `scripts/setup-aks.sh` | Ready for the next rebuild |
+| Before/after outputs | `docs/evidence/11-network-before.txt`, `11-network-after.txt` | Saved |
+| New issue: backends never reconnect to MongoDB | [#28](https://github.com/springlaughing/restauranty-devsecops-aks/issues/28) | Open |
+
+---
+
 ## What is next
 
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
-| NetworkPolicies + attacker-pod test | #11 |
 | Gateway block on the user list, login rate limit | #10 |
+| Backends reconnect to MongoDB by themselves | #28 |
 | Pipeline with security gates | #12, #13 |
 | Monitoring, alerts, the attack demo | #14, #15 |
