@@ -1,0 +1,45 @@
+Testing https://restauranty.aks.springlaughing.dev
+
+The app is up
+  PASS  GET /  (the website)                                    200
+  PASS  GET /api/auth  (auth answers)                           200
+
+The user list is closed at the Gateway (403 = Gateway, 401 = the app)
+  PASS  GET /api/auth/users                                     403
+  PASS  GET /api/auth/USERS                                     403
+  PASS  GET /api/auth/users/000000000000000000000000            403
+  PASS  DELETE /api/auth/users/000000000000000000000000         403
+
+Reading data without a token gets 401
+  PASS  GET /api/items/items                                    401
+  PASS  GET /api/items/dietary                                  401
+  PASS  GET /api/items/orders                                   401
+  PASS  GET /api/discounts/coupons                              401
+  PASS  GET /api/discounts/campaign                             401
+
+Changing data without a token gets 401
+  PASS  POST /api/discounts/coupons  (a 100% coupon)            401
+  PASS  POST /api/discounts/campaign                            401
+  PASS  POST /api/items/items                                   401
+  PASS  PUT /api/items/items/000000000000000000000000           401
+  PASS  DELETE /api/items/items/000000000000000000000000        401
+  PASS  DELETE /api/discounts/coupons/000000000000000000000000  401
+
+Forged and broken tokens get 401
+  PASS  admin token signed with the old secret (HS256)          401
+  PASS  admin token with no signature (alg none)                401
+  PASS  garbage token                                           401
+  PASS  no token                                                401
+
+No answer contains a password field
+  PASS  signup answer has a user                                yes
+  PASS  signup answer has a password field                      no
+  PASS  login gives a token                                     yes
+  PASS  login answer has a password field                       no
+  PASS  token payload has a password field                      no
+  PASS  GET /api/auth/verify with the token has a password field no
+  PASS  GET /api/items/items with the token has a password field no
+  PASS  GET /api/discounts/coupons with the token has a password field no
+  PASS  GET /api/discounts/campaign with the token has a password field no
+
+30 passed, 0 failed

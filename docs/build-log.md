@@ -14,7 +14,7 @@
 
 So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are different things. Headings without a number, such as "What is Trivy", explain an idea; numbered entries record work that was done.
 
-**Parts 1 to 5 are from 9 November 2026, Part 6 from 10 November.**
+**Parts 1 to 5 are from 9 November 2026, Parts 6 to 9 from 10 November.**
 
 ---
 
@@ -79,6 +79,19 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [35. First deploy by the pipeline](#35-first-deploy-by-the-pipeline)
   - [36. Proof: a run from a feature branch is refused](#36-proof-a-run-from-a-feature-branch-is-refused)
   - [What #12 creates](#what-12-creates)
+- [Part 9 — security gates in the pipeline](#part-9--security-gates-in-the-pipeline)
+  - [What a security gate is](#what-a-security-gate-is)
+  - [The tools, one by one](#the-tools-one-by-one)
+  - [Pinning: why a version tag is not enough](#pinning-why-a-version-tag-is-not-enough)
+  - [37. The gates before the push](#37-the-gates-before-the-push)
+  - [38. Secrets on every push: gitleaks](#38-secrets-on-every-push-gitleaks)
+  - [39. First runs: three gates failed on their own setup](#39-first-runs-three-gates-failed-on-their-own-setup)
+  - [40. Required checks: the gates block the merge](#40-required-checks-the-gates-block-the-merge)
+  - [41. Deploy by digest, and a guard against old approvals](#41-deploy-by-digest-and-a-guard-against-old-approvals)
+  - [42. After the deploy: the API tests and ZAP](#42-after-the-deploy-the-api-tests-and-zap)
+  - [43. The nightly scan: are the running images still safe?](#43-the-nightly-scan-are-the-running-images-still-safe)
+  - [44. Dependabot: 16 pull requests on the first day](#44-dependabot-16-pull-requests-on-the-first-day)
+  - [What #13 creates](#what-13-creates)
 - [What is next](#what-is-next)
 
 ---
@@ -2478,11 +2491,553 @@ The red "failure" on this run is the expected result: here, failing is the proof
 
 ---
 
+## Part 9 — security gates in the pipeline
+
+**Goal:** the pipeline from Part 8 builds and deploys whatever is merged. Now it also checks every change for known security problems, and stops the change if it finds a serious one. After each deploy it attacks the live app with the tests from the security assessment. Issue #13, branch `13-security-gates`, pull request #33.
+
+| When | What is checked | If it finds a problem |
+| --- | --- | --- |
+| Every push, every branch | gitleaks: secrets (keys, passwords) in the git history | The check is red; the pull request cannot be merged |
+| Every pull request, every merge | Semgrep (our code), npm audit (packages), Trivy (the finished image) | Nothing is pushed or deployed; the pull request cannot be merged |
+| After every deploy | 30 attacks from the security assessment, and a ZAP scan of the website | The run is red (attacks); a report to read (ZAP) |
+| Every night | The images in production, against that day's list of known vulnerabilities | An alert in GitHub's Security tab; the run is red only for a CRITICAL that has a fix |
+| Every week | Dependabot: newer versions of packages, base images and actions | A pull request, which goes through all the gates above |
+
+### What a security gate is
+
+**In one line:** a gate is a check in the pipeline that can stop a change. A check that only reports is not a gate.
+
+| Word | Meaning |
+| --- | --- |
+| **Gate** | A step that fails the run when it finds a problem. Everything after it is skipped: nothing is pushed or deployed. |
+| **CVE** | A known, published vulnerability with an ID, such as `CVE-2026-9947`. Scanners compare package versions with lists of CVEs. |
+| **Severity** | How bad a CVE is: LOW, MEDIUM, HIGH, CRITICAL. Our gates stop on CRITICAL only. |
+| **False positive** | The tool reports a problem that is not real in this app. It must be turned off with a written reason, or the gate fails every run and people stop trusting it. |
+| **Required check** | A GitHub setting: a pull request cannot be merged until this check is green |
+
+**Why only CRITICAL.** A gate that fails too often gets switched off. HIGH and lower are not ignored: they are listed in the log, in the nightly scan and in the Security tab, and are fixed through normal updates.
+
+| Tool | Looks at | Finds | Cannot find |
+| --- | --- | --- | --- |
+| **gitleaks** | Every commit, including old ones | Keys, passwords and tokens written into files | A weak password, an open route |
+| **Semgrep** | Our own source code | Risky patterns, such as building a database query from user input | Whether a route should need a login (it does not know the app's rules) |
+| **npm audit** | `package-lock.json`: every npm package and its version | Packages with known CVEs | Problems in our own code |
+| **Trivy** | The finished image: Alpine packages and npm packages | Known CVEs in everything the image ships, and secrets left in its files | Problems in our own code |
+| **API tests** (`scripts/test-api-security.sh`) | The live app, from outside | Our own findings coming back: open routes, forged tokens, password fields | Anything not on its list |
+| **ZAP** | The live website, from outside, like a browser | Missing security headers, cookie flags, information in answers | Logic problems behind a login |
+
+No tool found any of the 18 manual findings in the security assessment (Step 8). That is why the API tests exist: they turn the manual findings into a check that runs after every deploy.
+
+### The tools, one by one
+
+**In one line:** each tool looks at a different thing: the git history, our code, the package lists, the finished image, or the running website. Together they cover the path from a commit to the live app.
+
+#### Four kinds of security testing
+
+The industry has short names for these kinds. They are useful in conversations and job ads:
+
+| Kind | Long name | Looks at | Tool here |
+| --- | --- | --- | --- |
+| **Secret scanning** | — | Files and git history, for keys and passwords | gitleaks (and GitHub's own) |
+| **SAST** | Static Application Security Testing | The source code, without running it ("static") | Semgrep |
+| **SCA** | Software Composition Analysis | The third-party packages the app is made of | npm audit, Trivy, Dependabot |
+| **DAST** | Dynamic Application Security Testing | The running app, from outside, like an attacker ("dynamic") | ZAP, the API tests |
+
+Container scanning (Trivy) is SCA applied to a whole image: the operating system's packages as well as the app's.
+
+#### Where everything runs: the map
+
+All tools run on GitHub's runners (fresh virtual machines, thrown away after each job), never on my laptop or in the cluster.
+
+| Tool | File | Job | When | On a problem |
+| --- | --- | --- | --- | --- |
+| gitleaks | `.github/workflows/secret-scan.yaml` | `secrets (gitleaks)` | Every push, every branch | Check red, merge blocked |
+| Semgrep | `.github/workflows/ci-cd.yaml` | `code scan (Semgrep)` | Every pull request and merge | Check red, merge blocked, nothing deployed |
+| npm audit | `.github/workflows/ci-cd.yaml` | `build <component>`, step `npm audit` | Every pull request and merge | Same |
+| Trivy (gate) | `.github/workflows/ci-cd.yaml` | `build <component>`, step `Trivy` | Every pull request and merge | Same |
+| Trivy (SBOM) | `.github/workflows/ci-cd.yaml` | `build <component>`, step `SBOM` | Every pull request and merge; kept on `main` | — |
+| Trivy (nightly) | `.github/workflows/nightly-scan.yaml` | `scan <component>` | Every night, 04:17 UTC | Alert in the Security tab; run red on a fixable CRITICAL |
+| API tests | `scripts/test-api-security.sh`, called from `ci-cd.yaml` | `API security tests` | After every deploy | Run red |
+| ZAP | `.github/workflows/ci-cd.yaml` | `ZAP baseline scan` | After every deploy | A report to read; never blocks |
+| Dependabot | `.github/dependabot.yml` | Runs inside GitHub, not in a workflow | Weekly; at once for security fixes | Opens a pull request |
+
+**How a tool runs: a Docker image, not an installed program.** gitleaks, Semgrep, Trivy and ZAP each come as a Docker image. The job starts the image for one command and throws it away. The pattern, piece by piece:
+
+```bash
+docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" semgrep scan ...
+```
+
+| Piece | Meaning |
+| --- | --- |
+| `docker run` | Start a container from an image |
+| `--rm` | Delete the container when the command ends |
+| `-v "$PWD:/src"` | Show the runner's current folder (the checked-out repository) inside the container as `/src` |
+| `-w /src` | Start the command in that folder |
+| `"$SEMGREP_IMAGE"` | The image, pinned by digest at the top of the workflow (`env:`): `semgrep/semgrep:1.183.0@sha256:2e45517a…` |
+| `semgrep scan ...` | The command to run inside the container |
+
+**Why Docker images and not the tools' own GitHub Actions.** A third-party action is code from someone else that runs inside my job, with my job's permissions. A pinned image runs only the tool, with only the folder I give it. After the Trivy Action was hijacked in March 2026 (see "Pinning" below), this is the safer habit.
+
+#### gitleaks: secrets in the git history
+
+**What it is.** A free, open-source scanner for secrets: API keys, passwords, tokens, private keys. It knows the exact shape of many providers' keys (AWS, Stripe, GitHub, …), and has generic rules for the rest.
+
+**How it works.** It reads every change in every commit (`git log -p`), not only today's files: a key that was deleted is still in the history, and anyone who clones the repository has it. Each line is checked against a long list of patterns, one per kind of key. A generic rule also measures **entropy**, how random a string looks: `password: hello` is not a key, `api_secret: 8fK2pQx…` probably is.
+
+**What it found here.** In the security assessment (test 8c): Cloudinary secrets in the original app's first commit (F20), which I had missed by hand. In the pipeline: a false positive, image tags that look like keys (entry 39).
+
+**Where and how it is integrated:**
+
+| | |
+| --- | --- |
+| File | `.github/workflows/secret-scan.yaml`, its own workflow, because it must also run on docs-only pushes |
+| Trigger | `on: push` (every branch), and by hand |
+| Checkout | `fetch-depth: 0`: the whole history. The default is only the last commit. |
+| Command | `docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0… git /repo --redact --no-banner -v --config /repo/.gitleaks.toml --gitleaks-ignore-path /repo/.gitleaksignore` |
+| `-u "$(id -u):$(id -g)"` | Run as the runner's own user. Otherwise git refuses to read a folder owned by another user. |
+| `--redact` | Print `REDACTED` instead of the secret: the log is public |
+| Config | `.gitleaks.toml`: all standard rules, plus one exception for image tags. `.gitleaksignore`: the three accepted old findings, by fingerprint, with the reason. |
+| On a finding | Exit code 1, the check `secrets (gitleaks)` is red, the pull request cannot be merged |
+
+**Next to it:** GitHub's own secret scanning and push protection, on for this repository. Push protection refuses a push that contains a known provider's key before it ever reaches GitHub. gitleaks adds the generic rules and the full history.
+
+#### Semgrep: risky patterns in our own code
+
+**What it is.** A code scanner, free and open source. The name means "semantic grep": like `grep`, but it understands code structure. A rule is written like the code it looks for:
+
+```yaml
+# The idea of a Semgrep rule (simplified): a database query built from user input
+pattern: $MODEL.find({ $FIELD: req.body.$X })
+```
+
+This matches every query that takes a value straight from the request body, whatever the variable names are. Plain `grep` cannot do that.
+
+**How it works.** It reads every source file, builds a tree of the code, and matches it against rules. The rules come from Semgrep's public registry: `p/default` (general security rules for many languages) and `p/secrets` (keys in code). Here: 211 rules on 112 files, about 20 seconds. It never runs the code.
+
+**What it found here.** 3 results, all the same false positive: "no CSRF protection" (test 8b, entry 37). It did not find the 18 manual findings: open routes or a public secret are not risky *patterns*; they are wrong for this app's *rules*, which Semgrep cannot know.
+
+**Where and how it is integrated:**
+
+| | |
+| --- | --- |
+| File | `.github/workflows/ci-cd.yaml`, job `code scan (Semgrep)` |
+| Trigger | Every pull request to `main`, every merge (except docs-only), by hand |
+| Command | `docker run --rm -v "$PWD:/src" -w /src "$SEMGREP_IMAGE" semgrep scan --config p/default --config p/secrets --metrics=off --error --exclude-rule "$CSRF_RULE" backend client/src` |
+| `--metrics=off` | Send no usage data to Semgrep's company |
+| `--error` | Exit code 1 if anything is found. Without it, Semgrep reports and still succeeds. |
+| `--exclude-rule` | The one false positive, by its full name, with the reason in a comment above it |
+| `backend client/src` | Our code only. `node_modules` is skipped by default (that is npm audit's and Trivy's job). |
+| On a finding | The job is red, so "all gates passed" is red: no merge, no push, no deploy |
+
+#### npm audit: packages with known vulnerabilities
+
+**What it is.** A command built into npm, nothing to install. It sends the list of installed packages and versions (from `package-lock.json`) to the npm registry, which answers with the known vulnerabilities for those versions. The data comes from the GitHub Advisory Database.
+
+**How it works.** Only versions are compared; no code is read. A backend has about 150 packages, most of them pulled in by other packages. npm audit checks all of them, not only the ones in `package.json`.
+
+**What it found here.** Backends: 0 in the packages that ship (`--omit=dev`); 2 moderate in `nodemon`, a development tool that is not in the image. Client: 36 (13 high, 0 critical), almost all in the build tools of Create React App (F19).
+
+**Where and how it is integrated:**
+
+| | |
+| --- | --- |
+| File | `.github/workflows/ci-cd.yaml`, job `build <component>` (once per component), step `npm audit`, right after `npm ci` |
+| Backends | `npm audit --omit=dev --audit-level=critical`: only the packages that ship, fail only on CRITICAL |
+| Client | `npm audit --audit-level=critical`: all packages, because the build tools write the code that runs in the browser |
+| On a finding | Exit code 1 for CRITICAL, the build job is red. Lower levels are printed in the log. |
+
+#### Trivy: everything inside the finished image
+
+**What it is.** A free, open-source scanner from the company Aqua Security. It can scan container images, folders, git repositories and Kubernetes clusters, for known vulnerabilities, secrets, wrong configuration and licences. Here it scans images.
+
+**How it works.**
+
+1. It opens the image file (`image.tar`) and lists everything installed: Alpine packages (from the package database in the image) and npm packages (from every `package.json` under `node_modules`).
+2. It downloads its vulnerability database (a few dozen MB, rebuilt every few hours). The database combines the Linux distributions' own security notices (here Alpine's), the US National Vulnerability Database (NVD), and the GitHub Advisory Database.
+3. It compares each package version with the database, and reports each CVE with its severity and the version that fixes it.
+
+**Why Trivy and npm audit both.** npm audit sees only npm packages. Trivy also sees the operating system inside the image (openssl, musl, libxslt, …), which npm audit cannot. The client's 2 HIGH are in Alpine's `libxslt`: only Trivy found them.
+
+**What it found here.** Backends: 0 HIGH, 0 CRITICAL. Client: 2 HIGH in `libxslt`, and its Alpine version (3.21) no longer gets security updates (entry 43).
+
+**Where and how it is integrated:** in three places.
+
+| Where | What | Command (shortened) |
+| --- | --- | --- |
+| `ci-cd.yaml`, job `build <component>`, step `Trivy` | Report of HIGH and CRITICAL, then the **gate** | `trivy image --input /work/image.tar --severity CRITICAL --ignore-unfixed --exit-code 1` |
+| Same job, step `SBOM` | Writes the parts list (next section) | `trivy image --input /work/image.tar --format cyclonedx --output /work/sbom.cdx.json` |
+| `nightly-scan.yaml`, job `scan <component>` | Scans the SBOM of what runs in production, every night | `trivy sbom /work/sbom/sbom.cdx.json --severity HIGH,CRITICAL --format sarif` |
+
+| Option | Meaning |
+| --- | --- |
+| `--input /work/image.tar` | Scan the saved image file: the same file the push job pushes |
+| `--severity CRITICAL` | Only CRITICAL counts for the gate |
+| `--ignore-unfixed` | Only CVEs that have a fixed version: something I can act on |
+| `--exit-code 1` | Fail the step when something is found. Without it, Trivy only reports. |
+| `-v "$HOME/.cache/trivy:/root/.cache/trivy"` | Keep the database between the report and the gate, so it is downloaded once per job |
+
+#### SBOM: the parts list of an image
+
+**What it is.** A Software Bill of Materials: a file that lists every component of a piece of software, with its version and where it comes from, like the ingredients list on food. Two standard formats exist: **CycloneDX** (from OWASP, used here) and **SPDX** (from the Linux Foundation). A US government order in 2021 (Executive Order 14028) made them common: US agencies can ask their software suppliers for one, and many companies now do the same.
+
+**Why it matters.** When a new CVE comes out ("all versions of package X before 2.3 are affected"), a company with SBOMs knows in minutes which of its images contain X before 2.3. Without them it has to pull and scan everything again.
+
+**Here:** a JSON file per image, with about 155 entries for a backend (Alpine plus npm packages) and 70 for the client (Alpine only: the client ships no npm packages, only built files).
+
+**Where and how it is integrated:** made in `ci-cd.yaml` (job `build <component>`, step `SBOM`), kept with the run as an artifact `sbom-<component>` for 90 days (step `Keep the SBOM for the nightly scan`, only on `main`). Read every night by `nightly-scan.yaml`, which finds the run behind the last deploy and downloads its SBOMs.
+
+#### OWASP ZAP: the running website, from outside
+
+**What it is.** ZAP (Zed Attack Proxy) is a free, open-source web security scanner. It started as an OWASP project and is one of the most used tools of its kind. Testers also use it by hand, as a proxy between the browser and the site.
+
+**How it works.** The **baseline scan** used here is the gentle mode:
+
+1. A spider follows every link it can find on the site, for 1 minute (18 URLs here).
+2. Passive rules read every answer: headers, cookies, comments, error messages. 68 checks in this run, such as "is the `Strict-Transport-Security` header set?"
+3. It does **not attack**: no injected input, no guessing. That is why it is safe to run against production after every deploy.
+
+The full scan (attacks) exists too. It belongs on a test copy of the app, not on production.
+
+**What it found here.** 0 FAIL, 11 WARN, 57 PASS: missing security headers, `X-Powered-By: Express`, and CORS for every website (entry 42). All three had been noted by hand in the assessment's Step 1.
+
+**Where and how it is integrated:**
+
+| | |
+| --- | --- |
+| File | `.github/workflows/ci-cd.yaml`, job `ZAP baseline scan` |
+| Trigger | After every successful deploy (`needs: deploy`), next to the API tests |
+| Command | `docker run --rm -v "$PWD/zap:/zap/wrk" "$ZAP_IMAGE" zap-baseline.py -t "$APP_URL" -m 1 -I -r zap-report.html -J zap-report.json -w zap-report.md` |
+| `-t`, `-m 1` | The target, and 1 minute of spidering |
+| `-I` | Do not fail on warnings |
+| `-r -J -w` | The report as HTML (to read), JSON (for tools), Markdown (for the summary page) |
+| `mkdir -m 777 zap` | The ZAP image runs as its own user, which must be able to write the reports into the folder |
+| Results | The run's summary page (from the Markdown report), and the artifact `zap-report` (Summary > Artifacts) |
+| On a finding | Nothing is blocked (`continue-on-error: true`). It is a report to read, not a gate. |
+
+#### The API tests: our own findings, as a check
+
+**What it is.** Not a product: a Bash script I wrote, `scripts/test-api-security.sh`, using `curl` and `openssl`. It replays the attacks from the security assessment against the live app, and expects each one to fail.
+
+**Why my own script, when tools exist.** No tool found any of the 18 manual findings: open routes, forged tokens and leaked hashes are wrong only for *this* app's rules. A test that knows the rules is the only automatic way to make sure they never come back. In software testing this is called a **regression test**: a test that guards against an old bug returning.
+
+**Where and how it is integrated:** `ci-cd.yaml`, job `API security tests`, after every deploy: `./scripts/test-api-security.sh "$APP_URL"`. No Azure sign-in, no secret: it tests from outside, like a stranger. It exits with code 1 if any of the 30 checks fails, so the run is red. It also runs by hand from a laptop: `./scripts/test-api-security.sh`.
+
+#### Dependabot: updates as pull requests
+
+**What it is.** GitHub's own update bot, free and built into GitHub. It runs on GitHub's side, not in a workflow.
+
+**How it works.** It has two jobs:
+
+| Job | Does what | Started by |
+| --- | --- | --- |
+| **Version updates** | A pull request when a newer version of a package, base image or action exists | The schedule in `.github/dependabot.yml` (here: weekly) |
+| **Security updates** | A pull request when an installed version has a known vulnerability (a Dependabot alert) | At once, when the alert appears |
+
+Each pull request is normal: it goes through every gate before it can be merged. In each pull request it lists the changes and release notes of the new version.
+
+**Where and how it is integrated:** `.github/dependabot.yml` lists what to watch: npm in the four folders, Docker base images in the four Dockerfiles, GitHub Actions. With `cooldown: 7 days` (a new version must be a week old) and grouping for small updates. Alerts and security updates were turned on in the repository settings (entry 44). It also keeps the SHA pins of the actions current: it changes the SHA and the `# v7` comment together.
+
+#### SARIF and the Security tab: one place for the results
+
+**What it is.** SARIF (Static Analysis Results Interchange Format) is a standard JSON format for the results of any scanner. GitHub reads SARIF and shows the results in the repository under **Security > Code scanning**, as alerts.
+
+**How it works.** Each alert has a rule (here a CVE), a severity, a location and a state: open or closed. When a later upload no longer contains it, GitHub closes it by itself. The **category** keeps different scans apart: here one per image (`nightly-auth`, `nightly-client`, …), so the client's alerts are not closed by the auth scan.
+
+**Where and how it is integrated:** `nightly-scan.yaml`, job `scan <component>`. Trivy writes `trivy.sarif`, then the action `github/codeql-action/upload-sarif` (pinned by SHA) sends it with `category: nightly-<component>`. This is the only job with the permission `security-events: write`, and it runs no npm code. Free for public repositories.
+
+### Pinning: why a version tag is not enough
+
+**In one line:** every tool and action in the pipeline is fixed to its exact bytes (a SHA or digest), not to a version name, because in March 2026 the version names of a security scanner were moved to malware.
+
+**The real case.** On 19 March 2026, attackers used stolen credentials of the Trivy project. They moved 76 of the 77 version tags of the Trivy GitHub Action (`aquasecurity/trivy-action`) to code that read the secrets of every pipeline that ran it, and published a poisoned Trivy release, v0.69.4, for about 3 hours. Poisoned Docker images followed on 22 and 23 March. It is tracked as CVE-2026-33634, rated critical, and is on CISA's list of vulnerabilities used in real attacks. Pipelines that named the action by commit SHA kept running the old, clean code. ([StepSecurity](https://www.stepsecurity.io/blog/trivy-compromised-a-second-time---malicious-v0-69-4-release), [Endor Labs](https://www.endorlabs.com/vulnerability/cve-2026-33634), [CVE record](https://cveawg.mitre.org/api/cve/CVE-2026-33634))
+
+| How a tool is named | Example | Can someone change what I get? |
+| --- | --- | --- |
+| A tag on an action | `trivy-action@0.28.0` | Yes. A tag is a label; the owner, or a thief, can move it |
+| A tag on an image | `aquasec/trivy:0.76.1` | Yes, tags can be overwritten |
+| A commit SHA or image digest | `aquasec/trivy:0.76.1@sha256:790fd66d…` | **No.** It is a hash of the contents. Other contents give another hash, and Docker refuses them |
+
+What the pipeline does:
+
+- **Actions pinned by commit SHA**, with the version as a comment: `actions/checkout@3d3c42e5… # v7`
+- **Tools run as Docker images pinned by digest:** gitleaks, Semgrep, Trivy, ZAP. No third-party action runs a scanner.
+- **Versions at least a week old.** Poisoned releases are usually found within hours or days.
+- **Dependabot moves the pins**, so pinning does not mean never updating (entry 44).
+
+### 37. The gates before the push
+
+**In one line:** Semgrep, npm audit and Trivy run on every pull request and every merge; one summary check, "all gates passed", decides whether anything may be pushed.
+
+The jobs of `.github/workflows/ci-cd.yaml` now:
+
+```
+pull request:   code scan (Semgrep)  ─┐
+                build auth            ├─►  all gates passed
+                build discounts       │
+                build items           │
+                build client         ─┘
+
+merge to main:  the same, then  push images  ─►  deploy to AKS (my approval)  ─►  API security tests
+                                                                               └►  ZAP baseline scan
+```
+
+What each build job does, in order:
+
+| Step | What it does | Gate? |
+| --- | --- | --- |
+| Install | `npm ci --ignore-scripts` | — |
+| npm audit | Backends: `npm audit --omit=dev --audit-level=critical` (only what ships). Client: all packages, because the build tools make the code that runs in the browser | Fails on CRITICAL |
+| Test | Client: its component test. Backends: syntax check | Fails on error |
+| Build image | `docker build`, then `docker save -o image.tar` | — |
+| Trivy | A report of HIGH and CRITICAL, then the gate | Fails on CRITICAL that has a fix |
+| SBOM | The image's parts list, kept for the nightly scan (entry 43) | — |
+
+**Four decisions in this job:**
+
+| Decision | Why |
+| --- | --- |
+| `--ignore-scripts` (also in the four Dockerfiles) | An npm package may contain a script that runs the moment it is installed. That is how most npm attacks start. Here only `fsevents` (macOS only) and `core-js` (prints a message) have one; neither is needed. |
+| The build job has no `id-token` permission | The build job runs code from hundreds of npm packages. Without `id-token` it cannot ask GitHub for a token, so that code can never sign in to Azure. A separate job, `push images`, signs in and pushes. It runs no npm code: it has no checkout at all. |
+| Trivy scans `image.tar`, and the push job pushes that same file | What was scanned is exactly what ships. Before, nothing guaranteed it. |
+| `--ignore-unfixed` on the Trivy gate | A CRITICAL with no fix anywhere would block every deploy, with nothing I can do. It still shows in the report. |
+
+**Semgrep** runs on `backend/` and `client/src` with its standard rules and its rules for secrets. One rule is turned off, with the reason in the workflow: `express-check-csurf-middleware-usage` ("no CSRF protection"). CSRF needs a login kept in a cookie, which the browser sends by itself. This app keeps the token in Local Storage and puts it in the `Authorization` header with its own code, which another website cannot do (security assessment, test 8b). If the login ever moves to a cookie, the rule must come back.
+
+**"all gates passed"** is one small job that is green only if Semgrep and all four builds are green. It is the check that branch protection requires (entry 40). If a job is renamed or added later, the required check keeps its name.
+
+Results on the pull request:
+
+| Gate | auth | discounts | items | client |
+| --- | --- | --- | --- | --- |
+| npm audit, CRITICAL | 0 | 0 | 0 | 0 (13 HIGH in build tools, F19) |
+| Trivy, CRITICAL | 0 | 0 | 0 | 0 (**2 HIGH**, see entry 43) |
+| Semgrep | 0 findings in all code, with the CSRF rule off |
+
+### 38. Secrets on every push: gitleaks
+
+**In one line:** gitleaks reads every commit on every push, to every branch; the three old Cloudinary secrets are accepted by name, everything else fails the check.
+
+It is a separate workflow, `.github/workflows/secret-scan.yaml`, because it runs on more than the pipeline does: also on pushes that change only docs. A key pasted into a document is still a leaked key.
+
+```bash
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/repo" \
+  zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0… \
+  git /repo --redact --no-banner -v \
+    --config /repo/.gitleaks.toml --gitleaks-ignore-path /repo/.gitleaksignore
+```
+
+`--redact` hides the secret values in the log, which is public.
+
+| File | What it holds |
+| --- | --- |
+| `.gitleaksignore` | Three accepted findings, by fingerprint (`commit:file:rule:line`): the Cloudinary secrets in the original app's first commit (F20). They belong to the original authors' account; not used, not tried. Rewriting my history would not remove them: the original repository and its forks keep them. |
+| `.gitleaks.toml` | All standard rules, plus one narrow exception for image tags (entry 39) |
+
+GitHub's own secret scanning and push protection are also on. They know the exact key formats of many providers; gitleaks also catches generic ones, like the Cloudinary secret.
+
+### 39. First runs: three gates failed on their own setup
+
+**In one line:** the first runs failed three times, never because of the app: each time the tool's setup was wrong. A gate is only proven once it has run for real.
+
+| Run | What failed | Why | Fix |
+| --- | --- | --- | --- |
+| 1 | Semgrep: the same 3 CSRF findings as in the assessment | The rule was turned off by its short name. Rules from Semgrep's registry repeat their name at the end: `…express-check-csurf-middleware-usage.express-check-csurf-middleware-usage`. `--exclude-rule` needs the full name. | The full name, in a variable with a comment |
+| 1 | gitleaks: 2 findings in `docs/build-log.md` | Image tags such as `…azurecr.io/auth:<40-character commit ID>`. The word `auth` followed by a long random-looking string looks like `auth: <API key>` to the rule `generic-api-key`. False positive. | An exception in `.gitleaks.toml`, only for this shape (next row) |
+| 2 | gitleaks: 1 of the 2 still found | The second shape is a `kubectl get pods` line, and the exception said "line starts with `auth-`" (`^auth-`). But gitleaks reads the history as git diffs, where every added line starts with `+`. The line starts with `+auth-`. | No start-of-line anchor (`\bauth-…`) |
+| 3 | — | All gates green | — |
+
+**Why an exception, not just the two fingerprints.** A fingerprint accepts one line in one commit. The next build-log entry that shows an image tag would fail again. The exception accepts exactly two shapes, an image reference and a pods line, so a real secret after `auth:` elsewhere is still caught.
+
+### 40. Required checks: the gates block the merge
+
+**In one line:** before this, a red gate stopped the deploy but not the merge. Now a pull request cannot reach `main` unless both checks are green, and that applies to me as admin too.
+
+GitHub, Settings > Branches > rule for `main`:
+
+| Setting | State | Why |
+| --- | --- | --- |
+| Require a pull request before merging | On (since #12) | Nothing reaches `main` without a pull request |
+| Require status checks to pass: `all gates passed`, `secrets (gitleaks)` | **On** | A red gate blocks the merge button |
+| Require branches to be up to date before merging | **On** | The gates test the pull request on top of the current `main`, not an old one |
+| Do not allow bypassing the above settings | **On** | Without it, I as admin get a "merge anyway" button. Changing this setting is recorded in the repository's audit log. |
+| Require approvals | Off | I work alone, and GitHub does not let me approve my own pull request. My approval is the deploy approval. |
+
+```
+$ gh api repos/springlaughing/restauranty-devsecops-aks/branches/main/protection \
+    --jq '{checks: .required_status_checks.contexts, strict: .required_status_checks.strict, enforce_admins: .enforce_admins.enabled}'
+{"checks":["all gates passed","secrets (gitleaks)"],"enforce_admins":true,"strict":true}
+```
+
+**Why pull requests always run every gate.** A push to `main` that changes only `docs/`, `notes/` or `*.md` files builds and deploys nothing (`paths-ignore`). Pull requests have no such filter. If they had one, a docs-only pull request would wait forever for a required check that never starts.
+
+### 41. Deploy by digest, and a guard against old approvals
+
+**In one line:** the deploy now names each image by its digest, the hash of its exact contents, and refuses to deploy if newer code reached `main` while it waited for my approval.
+
+**By digest.** The push job reads each image's digest back from the registry and hands it to the deploy job. In the run's copy of the manifests, each image becomes `name:tag@sha256:digest`. Kubernetes pulls by the digest; the tag is only there for people.
+
+From the first run on `main` (commit `b60e19a`, run 42895218455):
+
+```
+k8s/app/auth.yaml:122:      image: acrevgeniarestauranty.azurecr.io/auth:b60e19a19a4c76e10507ef88719d67e7d0b8a539@sha256:b256329730d1a05013ae488f590f82e08adae0cbe8036f55a437b76305f45c3c
+k8s/app/client.yaml:65:     image: acrevgeniarestauranty.azurecr.io/client:b60e19a19a4c76e10507ef88719d67e7d0b8a539@sha256:332b803b47315844f891799edba81989fcba5857e37e6ac98f31d6155e4cd134
+k8s/app/discounts.yaml:122: image: acrevgeniarestauranty.azurecr.io/discounts:b60e19a19a4c76e10507ef88719d67e7d0b8a539@sha256:65864a1c492c0d3881ca5b197e7b22191332c318b35d339757024137cec9346a
+k8s/app/items.yaml:131:     image: acrevgeniarestauranty.azurecr.io/items:b60e19a19a4c76e10507ef88719d67e7d0b8a539@sha256:efe9cc3453f686cf51dd6db8d82acbb3c5b7d7dfc9236d716bbe76daa920755e
+```
+
+| | By tag (#12) | By digest (#13) |
+| --- | --- | --- |
+| Someone with push rights overwrites `auth:b60e19a…` in the registry | The next pod start runs the new, unscanned image | The cluster still runs the scanned image. The new one has another digest. |
+| Which image runs, exactly? | Whatever the tag points to today | The one Trivy scanned, provably |
+
+**The guard.** An approval can wait for hours. If newer code reached `main` in the meantime and I approve the older run, the older code goes live: a rollback nobody asked for. The first step of the deploy job compares this run's commit with the current `main`, ignoring docs:
+
+```bash
+git fetch --depth=1 origin main
+newer=$(git diff --name-only HEAD FETCH_HEAD -- . ':(exclude)docs' ':(exclude)notes' ':(exclude)*.md')
+```
+
+If `newer` is not empty, the job stops with an error and names the files. From the first run:
+
+```
+main has no newer code: OK to deploy b60e19a19a4c76e10507ef88719d67e7d0b8a539
+```
+
+Docs commits are ignored on purpose: they change nothing that is deployed, and they start no run of their own (entry 40), so blocking on them would block every deploy that waits over a docs commit.
+
+### 42. After the deploy: the API tests and ZAP
+
+**In one line:** after the deploy, 30 attacks from the security assessment all failed as they should (30 of 30 PASS), and ZAP found no serious problem but 11 warnings, mostly missing security headers.
+
+**API tests.** `scripts/test-api-security.sh` runs in the job `API security tests`, with no Azure sign-in: it tests from outside, like a stranger. I ran it by hand first, then the pipeline ran it after the deploy. Both: `30 passed, 0 failed`. Full output: [evidence/13-api-security-tests.txt](evidence/13-api-security-tests.txt).
+
+| Group | Checks | Finding it guards |
+| --- | --- | --- |
+| The user list is closed at the Gateway | 4 × 403, including `USERS` and `DELETE` | F11, F14, F15 (#10) |
+| Reading data without a token | 5 × 401 | F12 (#9) |
+| Changing data without a token, such as a 100% coupon | 6 × 401 | F13 (#9) |
+| A forged admin token: signed with the old public secret (HS256), and with no signature at all (`alg: none`) | 4 × 401 | F8, F9 (#4) |
+| No `password` field in signup, login, the token, and four answers with a token | 9 × no | F11, F14, F15 (#21) |
+
+The forged tokens are built with `openssl` inside the script, so the test needs no Node. For the last group it signs up one test user with a random email and a random password that is never stored or printed. One test user per run stays in the database: there is no public route to delete users, on purpose.
+
+**ZAP baseline.** OWASP ZAP crawls the website for one minute and reports what it sees in the answers, without attacking. It does not block the run: the report is for me to read. It is saved with the run (artifact `zap-report`) and shown on the run's summary page. Summary: [evidence/13-zap-baseline-summary.txt](evidence/13-zap-baseline-summary.txt).
+
+```
+FAIL-NEW: 0   WARN-NEW: 11   PASS: 57
+```
+
+| ZAP warning | What it means | Known before? |
+| --- | --- | --- |
+| Strict-Transport-Security, Content-Security-Policy, X-Content-Type-Options, anti-clickjacking (X-Frame-Options), Permissions-Policy, Cross-Origin-Embedder-Policy not set | The answers carry none of the headers that tell the browser to add protection | Yes: security assessment, Step 1, "Other things I noticed" |
+| `X-Powered-By` | The API answers say `Express` | Yes, Step 1 |
+| Cross-Domain Misconfiguration | CORS allows every website (`Access-Control-Allow-Origin: *`) | Yes, Step 1 |
+| Cache-control, non-storable content, modern web application | Information only: how pages are cached, and that the site is a JavaScript app | — |
+
+ZAP confirmed by itself what I had noted by hand in Step 1, and found nothing new. The headers are one fix in one place (the Gateway or the client's nginx). Not this week; listed in "What is next".
+
+### 43. The nightly scan: are the running images still safe?
+
+**In one line:** every night, the parts lists of the images in production are scanned again against that day's vulnerabilities; the first run found the 2 HIGH in the client, which now wait in GitHub's Security tab.
+
+**Why.** The gates check an image once, when it is built. New CVEs are published every day. An image that passed last week can have a CRITICAL today, without any change on my side. A gate checks a change; this checks the state.
+
+**SBOM.** A Software Bill of Materials is the parts list of an image: every Alpine and npm package, with its version (format: CycloneDX). The build job writes one per image and keeps it with the run for 90 days, the longest GitHub allows.
+
+**How it works** (`.github/workflows/nightly-scan.yaml`, every day at 04:17 UTC, or by hand):
+
+| Job | What it does |
+| --- | --- |
+| find what runs in production | Asks GitHub for the last successful deploy to `production`, and which ci-cd run built it |
+| scan auth / discounts / items / client | Downloads that run's SBOM and scans it with Trivy. HIGH and CRITICAL go to the Security tab and the run's summary page. Fails only on a CRITICAL that has a fix. |
+
+**No Azure access.** The job never pulls an image: it needs only the SBOMs, which are stored with GitHub. It is still the image that runs: the SBOM was made from the exact file that was pushed, and the cluster runs that exact digest (entry 41). Its limit: an SBOM lists packages only. A config mistake or a secret inside the image is checked once, at build time.
+
+**Where the results go.** A message only when someone must act:
+
+| Finding | Where |
+| --- | --- |
+| HIGH and CRITICAL | GitHub, Security > Code scanning: one alert per CVE, one category per image. An alert closes by itself when a newer deploy no longer has it. |
+| CRITICAL with a fix | The run fails, and GitHub emails me. That should be rare, so the email gets read. |
+| Everything | A table per image on the run's summary page |
+
+**First run** (by hand, run 42896994107): green, and two alerts in the Security tab.
+
+```
+Production runs commit b60e19a19a4c76e10507ef88719d67e7d0b8a539, built by run 42895218455
+
+### client (commit b60e19a): HIGH and CRITICAL today
+│ /work/sbom/sbom.cdx.json (alpine 3.21.3) │ alpine │        2        │
+Total: 2 (HIGH: 2, CRITICAL: 0)
+│ libxslt │ CVE-2026-87636 │ HIGH │ fixed │ 1.1.42-r2 │ 1.1.42-r3 │ Type confusion in XML │
+│         │ CVE-2026-9947  │      │       │           │           │ Use after free in XML │
+
+$ gh api "repos/springlaughing/restauranty-devsecops-aks/code-scanning/alerts?state=open" \
+    --jq '.[] | "\(.rule.security_severity_level)\t\(.rule.id)\t\(.most_recent_instance.category)"'
+high    CVE-2026-9947    nightly-client
+high    CVE-2026-87636   nightly-client
+```
+
+The three backends: 0 HIGH, 0 CRITICAL.
+
+**What it means.** The client's base image, `nginxinc/nginx-unprivileged:1.27-alpine`, is built on **Alpine 3.21, which no longer gets security updates** (Trivy: "This OS version is no longer supported by the distribution"). The Dockerfile's `apk upgrade` cannot install a fix that Alpine 3.21 no longer publishes. The fix is a newer base image. Dependabot has already proposed it (pull request #39: 1.27 → 1.31-alpine). **Left open on purpose for the demo:** merge #39 → the gates pass → deploy → nightly scan → both alerts close by themselves.
+
+**Not a dashboard in Grafana, yet.** The Security tab is the work list: which CVE, where, what fixes it, open or closed. A Grafana panel ("vulnerabilities in the running cluster") would come from a scanner inside the cluster (Trivy Operator), read by Prometheus. Sending GitHub's results into the cluster would be the wrong direction: it needs credentials into the cluster. Planned with monitoring (#14), if time allows.
+
+### 44. Dependabot: 16 pull requests on the first day
+
+**In one line:** turning Dependabot on opened 16 pull requests within minutes; 1 is merged, 2 are kept, and 13 major upgrades are postponed with a rule the bot remembers.
+
+`.github/dependabot.yml` checks weekly: npm packages in the four folders, the base images in the four Dockerfiles, and the GitHub Actions. New versions must be 7 days old (`cooldown`); security fixes for known CVEs do not wait. Patch and minor updates come grouped; major updates one by one, because they can break things. Dependabot alerts and security updates were turned on in the repository settings:
+
+```bash
+gh api -X PUT repos/springlaughing/restauranty-devsecops-aks/vulnerability-alerts
+gh api -X PUT repos/springlaughing/restauranty-devsecops-aks/automated-security-fixes
+```
+
+Adding the file starts a first full check right away. The three backends share the same packages, so each major upgrade came three times:
+
+| Pull requests | Update | Decision |
+| --- | --- | --- |
+| #34 | `upload-sarif` action 4.39.1 → 4.39.2 | Merge: a patch |
+| #39 | Client base image nginx-unprivileged 1.27 → 1.31-alpine | Keep for the demo (entry 43) |
+| #40 | react-router 6 → 7 | Keep. Fixes F19's 2 moderate CVEs in the browser code, but a major upgrade. After Friday. |
+| #35–38 | Node 22 → 25 (4 Dockerfiles) | Postpone. Odd Node versions are short-lived and never get long-term support (LTS); 22 is an LTS version. |
+| #41, 44, 49 | mongoose 8 → 9 | Postpone: database API changes |
+| #42, 45, 48 | express 4 → 5 | Postpone: express 5 changes how paths are matched. The Gateway's block on `/api/auth/users` in any letter case is built around how express 4 matches paths. |
+| #43, 46, 47 | dotenv 16 → 18 | Postpone: not used in production (Kubernetes sets the environment) |
+
+The 13 postponed ones got the comment `@dependabot ignore this major version`. The bot closes the pull request and remembers: that major version is not proposed again. Updates inside the current major versions, and security fixes, still come. A plain close would bring the same pull requests back the next week.
+
+**A major update is a migration, not an update.** Patches are merged when the gates are green. Majors are planned as their own task, with the security tests run again afterwards.
+
+### What #13 creates
+
+| Thing | Where | State |
+| --- | --- | --- |
+| Gates: Semgrep, npm audit, Trivy, "all gates passed" | `.github/workflows/ci-cd.yaml` | Running |
+| Build job without `id-token`; separate push job | `.github/workflows/ci-cd.yaml` | Running |
+| `npm ci --ignore-scripts` | Workflow and the four Dockerfiles | Running |
+| Deploy by digest; guard against old approvals | `.github/workflows/ci-cd.yaml` | First deploy done (commit `b60e19a`) |
+| API security tests after each deploy | `scripts/test-api-security.sh` | 30 of 30 PASS |
+| ZAP baseline after each deploy | `.github/workflows/ci-cd.yaml` | 0 FAIL, 11 WARN |
+| Secret scan on every push | `.github/workflows/secret-scan.yaml`, `.gitleaks.toml`, `.gitleaksignore` | Running |
+| SBOM per image; nightly scan; Security tab | `.github/workflows/ci-cd.yaml`, `.github/workflows/nightly-scan.yaml` | First run done: 2 HIGH (client) |
+| Dependabot: version updates, alerts, security updates | `.github/dependabot.yml`, repository settings | On |
+| Required checks, no bypass | Branch protection for `main` | Set |
+| All actions pinned by SHA, all tools by digest | Workflows | Done |
+
+**Still open in #13:** a Trivy block shown from a test branch: a pull request with an old base image that has a CRITICAL, which the gate must stop, and which cannot be merged.
+
+---
+
 ## What is next
 
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
 | Backends reconnect to MongoDB by themselves | #28 |
-| Pipeline security gates: Trivy, Semgrep, npm audit, tests after the deploy | #13 |
-| Monitoring, alerts, the attack demo | #14, #15 |
+| A Trivy block shown from a test branch | #13 |
+| Monitoring, alerts, the attack demo; a Grafana panel for vulnerabilities (Trivy Operator), if time allows | #14, #15 |
+| Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
+| Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
