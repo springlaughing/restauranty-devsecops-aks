@@ -45,8 +45,13 @@ variable "dns_hostnames" {
   default     = ["restauranty", "grafana"]
 }
 
-variable "github_repo" {
-  description = "GitHub repository (owner/name) whose Actions may sign in as the pipeline identities."
+# GitHub puts the numeric ids of the owner and the repo into the subject
+# ("immutable subject"). With names only, someone who later took over the name
+# springlaughing could create a repo with the same name, and Azure would trust
+# their jobs. The ids never move to another account.
+# Check it with: gh api repos/springlaughing/restauranty-devsecops-aks/actions/oidc/customization/sub
+variable "github_subject_prefix" {
+  description = "Start of the OIDC subject GitHub sends for this repo: repo:<owner>@<owner id>/<repo>@<repo id>."
   type        = string
-  default     = "springlaughing/restauranty-devsecops-aks"
+  default     = "repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318"
 }

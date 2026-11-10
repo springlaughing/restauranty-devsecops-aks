@@ -27,7 +27,7 @@ resource "azurerm_federated_identity_credential" "pipeline_main" {
   user_assigned_identity_id = azurerm_user_assigned_identity.pipeline.id
   issuer                    = local.github_issuer
   audience                  = local.github_audience
-  subject                   = "repo:${var.github_repo}:ref:refs/heads/main"
+  subject                   = "${var.github_subject_prefix}:ref:refs/heads/main"
 }
 
 # Deploy: a separate identity. Its only right is on the cluster
@@ -47,5 +47,5 @@ resource "azurerm_federated_identity_credential" "deploy_production" {
   user_assigned_identity_id = azurerm_user_assigned_identity.deploy.id
   issuer                    = local.github_issuer
   audience                  = local.github_audience
-  subject                   = "repo:${var.github_repo}:environment:production"
+  subject                   = "${var.github_subject_prefix}:environment:production"
 }
