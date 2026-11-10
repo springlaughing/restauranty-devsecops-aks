@@ -1,0 +1,128 @@
+# Nightly scan (#13): are the images running in production still safe?
+#
+# The gates in ci-cd.yaml check an image once, when it is built. New
+# vulnerabilities are published every day, so an image that passed last
+# week can have a CRITICAL today. This workflow checks again every night,
+# without a code change.
+#
+# How it works, with no Azure sign-in and no image pull:
+#   1. find: which commit is in production (the last successful deploy to
+#      the environment "production"), and which ci-cd run built it.
+#   2. scan: download that run's SBOMs (the parts list of each image, made
+#      at build time) and scan them with Trivy against today's vulnerability list.
+#
+# Where the results go (no message unless someone must act):
+#   - HIGH and CRITICAL: GitHub's Security tab (Security > Code scanning),
+#     one alert per vulnerability. An alert closes by itself when a newer
+#     deploy no longer has it.
+#   - A CRITICAL that has a fix: the run fails (red). GitHub emails me about
+#     a failed run. This should be rare, so the email gets read.
+#   - Every night: a table per image in the run's summary page.
+#
+# Fixes come from Dependabot pull requests, which pass through the gates.
+# GitHub turns off scheduled workflows in public repositories after 60 days
+# without activity in the repository.
+
+name: nightly-scan
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # every day 04:17 UTC; not on the full hour, when GitHub is busiest
+  workflow_dispatch:       # run by hand (Actions > nightly-scan > Run workflow)
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+
+jobs:
+  find:
+    name: find what runs in production
+    runs-on: ubuntu-latest
+    permissions:
+      deployments: read   # the deploy history of the environment "production"
+      actions: read       # the ci-cd runs and their artifacts
+    outputs:
+      sha: ${{ steps.find.outputs.sha }}
+      run: ${{ steps.find.outputs.run }}
+    steps:
+      # When a deploy succeeds, GitHub marks the older ones "inactive". So the
+      # newest deployment with the state "success" is what runs now.
+      - name: Find the last successful deploy and the run that built it
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          sha=""
+          while read -r id commit; do
+            state=$(gh api "repos/$REPO/deployments/$id/statuses?per_page=1" --jq '.[0].state')
+            if [ "$state" = success ]; then sha=$commit; break; fi
+          done < <(gh api "repos/$REPO/deployments?environment=production&per_page=30" --jq '.[] | "\(.id) \(.sha)"')
+          [ -n "$sha" ] || { echo "::error::No successful deploy to production found."; exit 1; }
+
+          run=""
+          for r in $(gh run list -R "$REPO" --workflow ci-cd.yaml --commit "$sha" --json databaseId --jq '.[].databaseId'); do
+            if gh api "repos/$REPO/actions/runs/$r/artifacts" \
+                 --jq '.artifacts[] | select(.expired == false) | .name' | grep -q '^sbom-'; then
+              run=$r; break
+            fi
+          done
+          [ -n "$run" ] || { echo "::error::The run that deployed $sha kept no SBOMs (built before SBOMs existed, or more than 90 days ago). Run ci-cd on main to rebuild."; exit 1; }
+
+          echo "Production runs commit $sha, built by run $run"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  scan:
+    name: scan ${{ matrix.component }}
+    needs: find
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read            # to download the SBOM from the ci-cd run
+      security-events: write   # to put the findings in the Security tab
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [auth, discounts, items, client]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom-${{ matrix.component }}
+          run-id: ${{ needs.find.outputs.run }}
+          github-token: ${{ github.token }}
+          path: sbom
+
+      - name: Scan the SBOM
+        env:
+          SHA: ${{ needs.find.outputs.sha }}
+        run: |
+          trivy() {
+            docker run --rm -v "$PWD:/work" "$TRIVY_IMAGE" sbom /work/sbom/sbom.cdx.json --no-progress "$@"
+          }
+          trivy --severity HIGH,CRITICAL --format sarif --output /work/trivy.sarif
+          {
+            echo "### ${{ matrix.component }} (commit ${SHA:0:7}): HIGH and CRITICAL today"
+            echo '```'
+            trivy --severity HIGH,CRITICAL
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # One category per image, so each image's alerts open and close on their own
+      - name: Send the findings to the Security tab
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy.sarif
+          category: nightly-${{ matrix.component }}
+
+      # The same rule as the gate in ci-cd.yaml: a CRITICAL that has a fix.
+      - name: Fail on a CRITICAL that has a fix
+        run: |
+          docker run --rm -v "$PWD:/work" "$TRIVY_IMAGE" sbom /work/sbom/sbom.cdx.json --no-progress \
+            --severity CRITICAL --ignore-unfixed --exit-code 1
