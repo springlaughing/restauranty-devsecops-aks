@@ -1,0 +1,39 @@
+The Trivy gate stopping a CRITICAL, 10 November 2026.
+Pull request #51 (draft, branch demo-trivy-block, closed without merging), run 42899558881, job "build auth".
+
+The change, in backend/auth/Dockerfile (build stage, after npm ci):
+  RUN npm install --no-save --ignore-scripts minimist@1.2.5
+minimist 1.2.5 is installed into the image, but not written into package-lock.json.
+
+Step "npm audit" (reads package-lock.json):  success
+  found 0 vulnerabilities
+
+Step "Build image":  success
+
+Step "Trivy" (reads the image), the gate: --severity CRITICAL --ignore-unfixed --exit-code 1
+  Node.js (node-pkg)
+  ==================
+  Total: 1 (CRITICAL: 1)
+
+  │ Library                 │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │ Title                       │
+  │ minimist (package.json) │ CVE-2021-44906 │ CRITICAL │ fixed  │ 1.2.5             │ 1.2.6, 0.2.4  │ minimist: prototype pollution │
+
+  ##[error]Process completed with exit code 1.
+
+Jobs:
+  failure  build auth          (step Trivy)
+  failure  all gates passed    (required check)
+  skipped  push images, deploy to AKS, API security tests, ZAP baseline scan
+
+Pull request merge state: BLOCKED
+
+
+Earlier attempt on the same branch, run 42899120551: the shipped stage on node:14-alpine
+(Node 14 is out of support since 2023; its image runs Alpine 3.17, also out of support).
+
+  Detected OS  family="alpine" version="3.17.3"
+  WARN  This OS version is no longer supported by the distribution
+  Total: 10 (HIGH: 10, CRITICAL: 0)      libcrypto3, libssl3 (openssl), musl, musl-utils
+
+  Trivy gate: success. All gates passed.
+  No entry for the Node.js 14 program itself in Trivy's list.
