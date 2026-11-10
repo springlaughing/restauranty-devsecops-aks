@@ -15,7 +15,7 @@ RUN npm run build
 
 # --- Stage 2: serve the static files with a non-root nginx
 # nginx-unprivileged runs as a non-root user and listens on 8080.
-FROM nginxinc/nginx-unprivileged:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.31-alpine
 
 # Patch the OS packages the base image ships outdated (libssl, libcrypto,
 # brotli). Done as root, then back to the non-root user the base image uses.
