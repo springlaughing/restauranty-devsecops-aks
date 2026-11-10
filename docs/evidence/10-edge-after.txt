@@ -1,0 +1,24 @@
+Edge rules: 3 policies
+
+The app still works
+  PASS  GET /  (the website)                             200
+  PASS  GET /api/auth  (auth is up)                      200
+  PASS  GET /api/items/items, no token  (reaches the app) 401
+  PASS  POST /api/auth/login, wrong password             401
+
+The user list is closed at the Gateway (403 = Gateway, 401 = the app)
+  PASS  GET /api/auth/users                              403
+  PASS  GET /api/auth/USERS                              403
+  PASS  GET /api/auth/Users                              403
+  PASS  GET /api/auth/users/                             403
+  PASS  GET /api/auth/users/000000000000000000000000     403
+
+Password guessing: 20 wrong logins in a row
+        answers: 5 x 401, 15 x 429
+  PASS  some guesses refused with 429                    yes
+
+Flood: 300 requests at once from one address
+        answers: 119 x 200, 181 x 429
+  PASS  some requests refused with 429                   yes
+
+11 passed, 0 failed
