@@ -4,9 +4,12 @@ FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+# DEMO ONLY: a package with a known CRITICAL (CVE-2021-44906), installed
+# outside package-lock.json, so npm audit cannot see it. Trivy must.
+RUN npm install --no-save --ignore-scripts minimist@1.2.5
 
 # --- Stage 2: the image that ships: Node, the app, prod dependencies
-FROM node:14-alpine
+FROM node:22-alpine
 WORKDIR /app
 
 # Tells the app and its libraries to run in production mode
