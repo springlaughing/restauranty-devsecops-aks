@@ -90,8 +90,8 @@ resource "azurerm_public_ip" "gateway" {
 
 # ---------------------------------------------------------------------------
 # Pipeline identity: GitHub Actions signs in as this, with OIDC and no stored
-# password. The federated credential that ties it to the repo is added later,
-# once the exact subject is known (#12). Here it gets the right to push images.
+# password. The federated credential that ties it to the repo is in
+# github.tf (#12). Here it gets the right to push images.
 # ---------------------------------------------------------------------------
 resource "azurerm_user_assigned_identity" "pipeline" {
   name                = "id-${local.name_suffix}-pipeline"
