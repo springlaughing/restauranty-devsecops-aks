@@ -1,0 +1,133 @@
+# Network rules for the restauranty namespace (#11, threat model TB2/TB3).
+#
+# The idea: nothing may talk to anything, then each path the app really uses
+# is opened one by one. If a pod is taken over, it can reach only what its
+# owner could reach already, and nothing more.
+#
+# The paths the app really uses:
+#
+#   internet -> Gateway -> client, auth, discounts, items   (port "http")
+#   auth, discounts, items -> MongoDB                      (27017)
+#   auth, discounts, items -> cluster DNS                  (53)
+#   items -> Cloudinary on the internet                    (443)
+#
+# Everything else is refused: the client cannot reach MongoDB, MongoDB cannot
+# open any connection, a new pod in this namespace reaches nothing, and pods
+# in other namespaces cannot reach the app except through the Gateway.
+#
+# Cilium enforces these rules (AKS network_policy = "cilium"). Without a
+# policy engine, Kubernetes accepts NetworkPolicies and silently ignores them.
+#
+# Kubelet health checks come from the node itself; Cilium always allows them.
+# Prometheus scraping /metrics is opened in #14, together with the monitoring
+# namespace.
+
+# 1. Default deny: every pod in the namespace, both directions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: restauranty
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# 2. The Gateway reaches the four app components, on their "http" port only.
+#    The Gateway's NGINX pods live in the gateway namespace and carry the
+#    name of their Gateway as a label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: from-gateway
+  namespace: restauranty
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [client, auth, discounts, items] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: gateway
+          podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: restauranty
+      ports:
+        - port: http     # each pod's own named port: 8080, 3001, 3002 or 3003
+---
+# 3. Only the three backends reach MongoDB. The client is a static website
+#    and has no reason to, and MongoDB itself opens no connections.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mongodb-from-backends
+  namespace: restauranty
+spec:
+  podSelector:
+    matchLabels:
+      app: mongodb
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - { key: app, operator: In, values: [auth, discounts, items] }
+      ports:
+        - port: 27017
+---
+# 4. What the backends may call: MongoDB, and DNS to find it by name.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backends-to-mongodb-and-dns
+  namespace: restauranty
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [auth, discounts, items] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: mongodb
+      ports:
+        - port: 27017
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+---
+# 5. items uploads images to Cloudinary: HTTPS to the internet, but not to
+#    private addresses (other pods, nodes, the Azure network).
+#    A plain NetworkPolicy cannot name a host (api.cloudinary.com), only IP
+#    ranges. Limiting to one domain needs Cilium's FQDN rules, which on AKS
+#    come with Advanced Container Networking Services: a known gap.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: items-to-internet-https
+  namespace: restauranty
+spec:
+  podSelector:
+    matchLabels:
+      app: items
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16   # includes the Azure metadata service (169.254.169.254)
+      ports:
+        - port: 443
