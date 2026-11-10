@@ -91,6 +91,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [42. After the deploy: the API tests and ZAP](#42-after-the-deploy-the-api-tests-and-zap)
   - [43. The nightly scan: are the running images still safe?](#43-the-nightly-scan-are-the-running-images-still-safe)
   - [44. Dependabot: 16 pull requests on the first day](#44-dependabot-16-pull-requests-on-the-first-day)
+  - [45. Proof: the Trivy gate stops a CRITICAL, and the merge is blocked](#45-proof-the-trivy-gate-stops-a-critical-and-the-merge-is-blocked)
   - [What #13 creates](#what-13-creates)
 - [What is next](#what-is-next)
 
@@ -3011,6 +3012,60 @@ The 13 postponed ones got the comment `@dependabot ignore this major version`. T
 
 **A major update is a migration, not an update.** Patches are merged when the gates are green. Majors are planned as their own task, with the security tests run again afterwards.
 
+### 45. Proof: the Trivy gate stops a CRITICAL, and the merge is blocked
+
+**In one line:** a test pull request put a package with a known CRITICAL into the auth image; npm audit did not see it, Trivy did, and the pull request could not be merged.
+
+**Why this test.** Until now the Trivy gate had only ever passed. A gate that has never stopped anything is not proven. Same idea as the attacker pod in Part 6: do not only say the control exists, try to get past it.
+
+**The test.** A throwaway branch `demo-trivy-block` and a draft pull request (#51), never meant to be merged. A pull request never pushes or deploys, so the test is safe for production.
+
+It took three tries. The first two were useful too:
+
+| Try | Change in `backend/auth/Dockerfile` | Result | What it taught |
+| --- | --- | --- | --- |
+| 1 | Both stages on `node:14-alpine` | Red, but in **Build image**: Node 14's old npm cannot read today's `package-lock.json`. Trivy never ran. | Red is not enough: check *which* step is red. This was a broken build, not the security gate. |
+| 2 | Only the shipped stage on `node:14-alpine` | **Green.** Alpine 3.17 (out of support), 10 HIGH in openssl and musl, 0 CRITICAL | The gate stops only fixable CRITICALs. An image two years out of support got through. And Trivy listed no entry for the Node.js 14 program itself (below). |
+| 3 | Back on Node 22, plus `RUN npm install --no-save --ignore-scripts minimist@1.2.5` | **Red in Trivy.** Blocked. | The proof |
+
+**Try 3, step by step** (run 42899558881, job `build auth`):
+
+| Step | Result | Why |
+| --- | --- | --- |
+| npm audit | Green: `found 0 vulnerabilities` | It reads `package-lock.json`. `--no-save` installs minimist without writing it into the lock file. |
+| Build image | Green | — |
+| **Trivy** | **Red: `Total: 1 (CRITICAL: 1)`** | It reads what is really in the image, including `node_modules/minimist/package.json` |
+| all gates passed | **Red**, marked `Required` | The required check from entry 40 |
+| push, deploy, API tests, ZAP | Skipped | Nothing left the pull request |
+
+```
+Node.js (node-pkg)
+Total: 1 (CRITICAL: 1)
+│ minimist (package.json) │ CVE-2021-44906 │ CRITICAL │ fixed │ 1.2.5 │ 1.2.6, 0.2.4 │ minimist: prototype pollution │
+##[error]Process completed with exit code 1.
+```
+
+The Trivy step in the run:
+
+![The Trivy step fails on minimist 1.2.5, CVE-2021-44906, CRITICAL](evidence/13-trivy-block-log.png)
+
+The pull request:
+
+![Pull request 51: "all gates passed" failing and marked Required, merge button disabled](evidence/13-trivy-block-pr.png)
+
+The pull request is also a draft, which on its own disables the merge button. The `Required` label on the red check is what blocks a pull request that is not a draft: GitHub's merge state was `BLOCKED`. Full output: [evidence/13-trivy-block.txt](evidence/13-trivy-block.txt). Pull request #51 was closed without merging, and the branch deleted.
+
+**What CVE-2021-44906 is.** minimist reads command-line options. Version 1.2.5 lets crafted input change `Object.prototype`, the object every JavaScript object inherits from ("prototype pollution"). That can change how the whole program behaves. Fixed in 1.2.6.
+
+**What the three tries show:**
+
+| Lesson | Meaning for this project |
+| --- | --- |
+| **npm audit trusts the lock file; Trivy checks the image.** | Anything added in a Dockerfile, by a script, or copied in by hand is invisible to npm audit. That is why both run. |
+| **"CRITICAL only" lets an out-of-support base image through.** | Many teams add a second rule: fail on an end-of-life operating system or runtime, whatever its CVE count. Trivy already prints the warning (`This OS version is no longer supported`). Listed in "What is next". |
+| **A scanner sees only what it knows how to find.** | Trivy listed Alpine's packages and the npm packages, but no entry for the Node.js program in the Node 14 image: the official image installs Node from a download, not as an Alpine package. A clean scan means "nothing known in what it could see". |
+| **Check which step is red.** | Try 1 was red for the wrong reason. A demo that "fails" must fail in the control it is meant to prove. |
+
 ### What #13 creates
 
 | Thing | Where | State |
@@ -3026,8 +3081,7 @@ The 13 postponed ones got the comment `@dependabot ignore this major version`. T
 | Dependabot: version updates, alerts, security updates | `.github/dependabot.yml`, repository settings | On |
 | Required checks, no bypass | Branch protection for `main` | Set |
 | All actions pinned by SHA, all tools by digest | Workflows | Done |
-
-**Still open in #13:** a Trivy block shown from a test branch: a pull request with an old base image that has a CRITICAL, which the gate must stop, and which cannot be merged.
+| Proof that the Trivy gate blocks a CRITICAL and the merge | Pull request #51, closed without merging | Done (entry 45) |
 
 ---
 
@@ -3037,7 +3091,7 @@ The 13 postponed ones got the comment `@dependabot ignore this major version`. T
 | --- | --- |
 | docker-compose for local dev | #1 |
 | Backends reconnect to MongoDB by themselves | #28 |
-| A Trivy block shown from a test branch | #13 |
+| Fail the build on an end-of-life base image or runtime, whatever its CVE count (entry 45) | — |
 | Monitoring, alerts, the attack demo; a Grafana panel for vulnerabilities (Trivy Operator), if time allows | #14, #15 |
 | Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
 | Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
