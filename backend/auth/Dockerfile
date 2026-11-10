@@ -6,7 +6,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # --- Stage 2: the image that ships: Node, the app, prod dependencies
-FROM node:22-alpine
+FROM node:14-alpine
 WORKDIR /app
 
 # Tells the app and its libraries to run in production mode
