@@ -74,6 +74,8 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [31. GitHub: the approval gate and branch protection](#31-github-the-approval-gate-and-branch-protection)
   - [32. The workflow, part by part](#32-the-workflow-part-by-part)
   - [33. First run: the pull request](#33-first-run-the-pull-request)
+  - [34. First run on main: Entra ID refused the sign-in](#34-first-run-on-main-entra-id-refused-the-sign-in)
+  - [35. First deploy by the pipeline](#35-first-deploy-by-the-pipeline)
   - [What #12 creates](#what-12-creates)
 - [What is next](#what-is-next)
 
@@ -1701,7 +1703,7 @@ Full outputs: `docs/evidence/10-edge-before.txt`, `10-edge-after.txt`.
 ```
  1. job ──"I need a token"──> GitHub                     (needs permission id-token: write)
  2. GitHub ──signed token──> job                         issuer   = token.actions.githubusercontent.com
-                                                         subject  = repo:springlaughing/restauranty-devsecops-aks:environment:production
+                                                         subject  = repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:environment:production
                                                          audience = api://AzureADTokenExchange
  3. job ──token + "I want to be identity f4f5b9dd-…"──> Entra ID
  4. Entra ID checks: signed by GitHub? Issuer, subject and audience equal to a federated
@@ -1729,8 +1731,8 @@ Full outputs: `docs/evidence/10-edge-before.txt`, `10-edge-after.txt`.
 
 | Identity | May do in Azure | Trusted for jobs with subject | When it is used |
 | --- | --- | --- | --- |
-| `id-evgenia-restauranty-pipeline` (existed since entry 10) | Push images to the registry (role AcrPush) | `repo:…:ref:refs/heads/main`: the `main` branch | Every merge, automatically |
-| `id-evgenia-restauranty-deploy` (new) | Fetch this one cluster's credentials (role "Azure Kubernetes Service Cluster User Role") | `repo:…:environment:production` | Only after I approve the deploy |
+| `id-evgenia-restauranty-pipeline` (existed since entry 10) | Push images to the registry (role AcrPush) | `repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:ref:refs/heads/main`: the `main` branch | Every merge, automatically |
+| `id-evgenia-restauranty-deploy` (new) | Fetch this one cluster's credentials (role "Azure Kubernetes Service Cluster User Role") | `repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:environment:production` | Only after I approve the deploy |
 
 **Why two and not one.** The build job runs `npm ci`, which installs hundreds of packages from the internet. Any of them could be poisoned (event-stream, 2018). If the build job had the deploy identity, a poisoned package could reach the cluster. With two identities, the build job can at most push an image. The deploy identity exists only inside the approved deploy job.
 
@@ -1748,7 +1750,7 @@ resource "azurerm_federated_identity_credential" "pipeline_main" {
   user_assigned_identity_id = azurerm_user_assigned_identity.pipeline.id
   issuer                    = local.github_issuer
   audience                  = local.github_audience
-  subject                   = "repo:${var.github_repo}:ref:refs/heads/main"
+  subject                   = "${var.github_subject_prefix}:ref:refs/heads/main"
 }
 
 # Deploy: a separate identity. Its only right is on the cluster.
@@ -1765,7 +1767,7 @@ resource "azurerm_federated_identity_credential" "deploy_production" {
   user_assigned_identity_id = azurerm_user_assigned_identity.deploy.id
   issuer                    = local.github_issuer
   audience                  = local.github_audience
-  subject                   = "repo:${var.github_repo}:environment:production"
+  subject                   = "${var.github_subject_prefix}:environment:production"
 }
 ```
 
@@ -1775,7 +1777,7 @@ resource "azurerm_federated_identity_credential" "deploy_production" {
 | `pipeline_main` | The rule on the existing push identity: accept a GitHub token only for the `main` branch of this repo |
 | `azurerm_user_assigned_identity.deploy` | The new deploy identity, in the persistent resource group, next to the push identity |
 | `deploy_production` | The rule on the deploy identity: accept a GitHub token only for jobs in the environment `production` |
-| `${var.github_repo}` | `springlaughing/restauranty-devsecops-aks`, from a new variable |
+| `${var.github_subject_prefix}` | `repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318`: the start of the subject GitHub sends for this repo, from a new variable. The numbers are the ids of my GitHub account and of the repo (entry 34 explains why they are there). |
 
 **New file `terraform/cluster-access/pipeline.tf`:**
 
@@ -1807,7 +1809,7 @@ resource "azurerm_role_assignment" "deploy_cluster_user" {
 
 | File | Change |
 | --- | --- |
-| `terraform/persistent/variables.tf` | New variable `github_repo` = `springlaughing/restauranty-devsecops-aks` |
+| `terraform/persistent/variables.tf` | New variable `github_subject_prefix` = `repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318` (first `github_repo` with names only; changed in entry 34) |
 | `terraform/persistent/outputs.tf` | New output `deploy_client_id`, the id the workflow needs |
 | `terraform/persistent/main.tf` | Comment only: the push identity's GitHub rule is now in `github.tf` |
 
@@ -1995,9 +1997,9 @@ env:
 **Job 1, `build`: the steps:**
 
 ```yaml
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -2035,7 +2037,7 @@ env:
 ```yaml
       - name: Sign in to Azure as the pipeline identity
         if: github.event_name != 'pull_request'
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ env.PIPELINE_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
@@ -2084,10 +2086,10 @@ env:
 **Job 2, `deploy`: the steps:**
 
 ```yaml
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Sign in to Azure as the deploy identity
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ env.DEPLOY_CLIENT_ID }}
           tenant-id: ${{ env.AZURE_TENANT_ID }}
@@ -2146,6 +2148,144 @@ skipped   deploy to AKS
 | client takes longest (68 s) | It is the only one with a real test, and the React build is the heaviest |
 | `deploy` `skipped` | A pull request never deploys. It never signed in to Azure either: those steps were skipped too |
 
+### 34. First run on main: Entra ID refused the sign-in
+
+**In one line:** after the merge, all three build jobs that reached the sign-in were refused by Entra ID. GitHub sends a different subject than the rule expected. The protection worked; the rule was wrong.
+
+**What the run showed** (from the run's page in GitHub):
+
+```
+build auth
+AADSTS700213: No matching federated identity record found for presented assertion subject
+'repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:ref:refs/heads/main'.
+Check your federated identity credential Subject, Audience and Issuer against the presented assertion.
+```
+
+`AADSTS700213` is Entra ID's code for "no federated credential matches this token". The images were built but not pushed, and the deploy did not start.
+
+**The difference:**
+
+| | Subject |
+| --- | --- |
+| The rule in Terraform | `repo:springlaughing/restauranty-devsecops-aks:ref:refs/heads/main` |
+| What GitHub sent | `repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:ref:refs/heads/main` |
+
+GitHub adds the numeric **id** of the account (`31309521`) and of the repo (`1450795318`). This is called the **immutable subject**: a name can change owner, an id cannot.
+
+**Why that matters.** With names only, the rule trusts "whoever owns a repo called `springlaughing/restauranty-devsecops-aks`". If I renamed or deleted my account, someone else could register `springlaughing`, create a repo with the same name, and Azure would accept their jobs as mine. This is sometimes called **repo-jacking**. The ids belong to my account and this repo forever, so a look-alike gets different numbers and is refused.
+
+**How I checked it.** GitHub's API shows the exact prefix it uses for this repo:
+
+```
+$ gh api repos/springlaughing/restauranty-devsecops-aks/actions/oidc/customization/sub
+{"use_default":true,"use_immutable_subject":true,
+ "sub_claim_prefix":"repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318"}
+```
+
+**The fix** (branch `12-oidc-subject`): the variable `github_repo` became `github_subject_prefix`, which holds that exact prefix. Both rules use it:
+
+```hcl
+variable "github_subject_prefix" {
+  description = "Start of the OIDC subject GitHub sends for this repo: repo:<owner>@<owner id>/<repo>@<repo id>."
+  type        = string
+  default     = "repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318"
+}
+
+subject = "${var.github_subject_prefix}:ref:refs/heads/main"         # push identity
+subject = "${var.github_subject_prefix}:environment:production"      # deploy identity
+```
+
+The plan changes only the two subjects, in place, and creates or deletes nothing:
+
+```
+$ terraform plan -out persistent.tfplan
+  ~ subject = "repo:springlaughing/restauranty-devsecops-aks:environment:production"
+           -> "repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:environment:production"
+  ~ subject = "repo:springlaughing/restauranty-devsecops-aks:ref:refs/heads/main"
+           -> "repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:ref:refs/heads/main"
+Plan: 0 to add, 2 to change, 0 to destroy.
+```
+
+**Lesson:** a refusal is the security working. The first run on `main` proved that Entra ID accepts only an exact subject: a near miss is refused like a stranger.
+
+**Also fixed: a warning about Node.js 20.** The same run warned that `actions/checkout@v4`, `actions/setup-node@v4` and `azure/login@v2` are built for Node.js 20, which GitHub is phasing out. The workflow now uses `actions/checkout@v7`, `actions/setup-node@v7` and `azure/login@v3`, which run on Node.js 24. Before changing, I checked in each new version's `action.yml` that it runs on Node 24 and still has every input the workflow uses (`node-version`, `cache`, `cache-dependency-path`, `client-id`, `tenant-id`, `subscription-id`).
+
+### 35. First deploy by the pipeline
+
+**In one line:** after the subject fix, "Re-run failed jobs" on the same run pushed the four images and, after my approval, deployed them. The app now runs images built by the pipeline, not on my laptop.
+
+**Why re-run instead of a new commit.** The re-run uses the same commit and builds the same images. The only thing that changed between the two attempts is the rule in Azure. So if it works now, the rule was the only cause.
+
+```
+$ gh run view 42884263301 --json headSha,attempt,jobs --jq '...'
+commit ff7a2e0, attempt 2
+success   build items
+success   build client
+success   build auth
+success   build discounts
+success   deploy to AKS
+```
+
+**The deploy job's log, shortened:**
+
+```
+k8s/app/auth.yaml:122:      image: acrevgeniarestauranty.azurecr.io/auth:ff7a2e0019d48f0fe92329fffb4152681afd2f69
+k8s/app/client.yaml:65:     image: acrevgeniarestauranty.azurecr.io/client:ff7a2e0019d48f0fe92329fffb4152681afd2f69
+k8s/app/discounts.yaml:122: image: acrevgeniarestauranty.azurecr.io/discounts:ff7a2e0019d48f0fe92329fffb4152681afd2f69
+k8s/app/items.yaml:131:     image: acrevgeniarestauranty.azurecr.io/items:ff7a2e0019d48f0fe92329fffb4152681afd2f69
+k8s/app/mongodb.yaml:134:   image: mongo:8.0.34
+deployment.apps/auth configured
+...
+deployment "auth" successfully rolled out
+deployment "discounts" successfully rolled out
+deployment "items" successfully rolled out
+deployment "client" successfully rolled out
+website 200
+"Auth Server UP!"
+```
+
+| Line | What it shows |
+| --- | --- |
+| `image: …:ff7a2e0…` | The `sed` step pointed the four app images at this commit's images. MongoDB's image stayed as it was. |
+| `configured` | `kubectl` found a difference and updated the object. For the Deployments that is the new image. For objects whose file did not change, it only updates `kubectl`'s own notes on the object. |
+| `successfully rolled out` | Each Deployment's new pods started and are ready |
+| `website 200`, `"Auth Server UP!"` | The smoke test: the site and auth answer through the Gateway |
+
+**What runs in the cluster now:**
+
+```
+$ kubectl get pods -n restauranty -o custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[0].image,STARTED:.status.startTime
+auth-674d47786b-lrtpx        auth:ff7a2e0019d48f0fe92329fffb4152681afd2f69        2026-11-10T19:27:51Z
+client-b9b54c75f-qvlk2       client:ff7a2e0019d48f0fe92329fffb4152681afd2f69      2026-11-10T19:27:37Z
+discounts-568d5fd7d4-pbmsz   discounts:ff7a2e0019d48f0fe92329fffb4152681afd2f69   2026-11-10T19:27:45Z
+items-8646b745b6-kgx4c       items:ff7a2e0019d48f0fe92329fffb4152681afd2f69       2026-11-10T19:27:40Z
+mongodb-0                    mongo:8.0.34                                         2026-11-10T12:34:24Z
+...
+```
+
+MongoDB was not restarted: its pod is from the morning, and its history still has one revision. Only the four app components changed.
+
+**Nothing broke.** The network test from #11 on the new images:
+
+```
+$ ./scripts/test-network.sh
+...
+15 passed, 0 failed
+```
+
+The login still reaches MongoDB, every attack is still blocked, and no app ServiceAccount can read Secrets.
+
+**What this proves for #12:**
+
+| Goal from the issue | Proof |
+| --- | --- |
+| An identity with a federated credential for `main` only | Entra refused the first attempt (entry 34) and accepted only the exact subject |
+| AcrPush, images tagged with the commit | Four images `…:ff7a2e0…` in the registry, pushed by the pipeline |
+| Build, test, push, deploy | All five jobs `success` |
+| No secrets stored in GitHub | The workflow holds only ids; the repo has no Actions secrets |
+| Role scoped to my resource group and AKS | Push identity: the registry only. Deploy identity: this cluster only |
+| Branch protection on `main` | Read back in entry 31 |
+
 ### What #12 creates
 
 | Thing | Where | State |
@@ -2155,7 +2295,7 @@ skipped   deploy to AKS
 | Deploy identity's role on the cluster | `terraform/cluster-access/pipeline.tf` | Applied |
 | Environment `production` with me as required reviewer, `main` only | GitHub settings | Set |
 | Branch protection: pull request required for `main` | GitHub settings | Set |
-| Workflow: build, test, push, deploy after approval, smoke test | `.github/workflows/ci-cd.yaml` | First run passed (pull request) |
+| Workflow: build, test, push, deploy after approval, smoke test | `.github/workflows/ci-cd.yaml` | First deploy done (commit `ff7a2e0`) |
 
 ---
 
