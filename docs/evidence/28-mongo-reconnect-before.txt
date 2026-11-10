@@ -1,0 +1,49 @@
+#28 before the fix: MongoDB off, backends restarted, MongoDB on again (10 November 2026).
+Images from commit 002cf7f (no fix yet).
+
+$ kubectl scale statefulset mongodb -n restauranty --replicas=0
+statefulset.apps/mongodb scaled
+$ kubectl wait --for=delete pod/mongodb-0 -n restauranty --timeout=2m
+$ kubectl rollout restart deployment auth discounts items -n restauranty
+deployment.apps/auth restarted
+deployment.apps/discounts restarted
+deployment.apps/items restarted
+$ sleep 60
+$ kubectl scale statefulset mongodb -n restauranty --replicas=1
+statefulset.apps/mongodb scaled
+$ kubectl rollout status statefulset mongodb -n restauranty
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ sleep 60
+
+$ kubectl get pods -n restauranty
+NAME                        READY   STATUS    RESTARTS   AGE
+attacker                    1/1     Running   0          8h
+auth-574f9f89cb-6chl9       1/1     Running   0          2m22s
+auth-574f9f89cb-cwwpt       1/1     Running   0          2m39s
+client-844667fdc8-58q4j     1/1     Running   0          42m
+client-844667fdc8-5d97v     1/1     Running   0          42m
+discounts-df589b89b-7ffb6   1/1     Running   0          2m22s
+discounts-df589b89b-g847w   1/1     Running   0          2m39s
+items-6f48d69bcf-5cqx9      1/1     Running   0          2m23s
+items-6f48d69bcf-q5dml      1/1     Running   0          2m39s
+mongodb-0                   1/1     Running   0          90s
+
+$ kubectl logs deployment/auth -n restauranty | grep -i mongo
+Found 2 pods, using pod/auth-574f9f89cb-cwwpt
+Error updating user count: MongooseError: Operation `users.countDocuments()` buffering timed out after 10000ms
+    at Timeout.<anonymous> (/app/node_modules/mongoose/lib/drivers/node-mongodb-native/collection.js:187:23)
+MongoDB disconnected
+Error connecting to mongo:  MongooseServerSelectionError: getaddrinfo ENOTFOUND mongodb
+    at _handleConnectionErrors (/app/node_modules/mongoose/lib/connection.js:1169:11)
+    at NativeConnection.openUri (/app/node_modules/mongoose/lib/connection.js:1100:11) {
+    servers: Map(1) { 'mongodb:27017' => [ServerDescription] },
+    servers: Map(1) { 'mongodb:27017' => [ServerDescription] },
+Error updating user count: MongooseError: Operation `users.countDocuments()` buffering timed out after 10000ms
+    at Timeout.<anonymous> (/app/node_modules/mongoose/lib/drivers/node-mongodb-native/collection.js:187:23)
+Error updating user count: MongooseError: Operation `users.countDocuments()` buffering timed out after 10000ms
+    at Timeout.<anonymous> (/app/node_modules/mongoose/lib/drivers/node-mongodb-native/collection.js:187:23)
+
+$ curl -s -w '  HTTP %{http_code}\n' -X POST https://restauranty.aks.springlaughing.dev/api/auth/login \
+    -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"wrong"}'
+{"message":"Internal server error"}  HTTP 500

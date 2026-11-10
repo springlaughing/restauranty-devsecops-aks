@@ -14,7 +14,7 @@
 
 So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are different things. Headings without a number, such as "What is Trivy", explain an idea; numbered entries record work that was done.
 
-**Parts 1 to 5 are from 9 November 2026, Parts 6 to 9 from 10 November.**
+**Parts 1 to 5 are from 9 November 2026, Parts 6 to 10 from 10 November.**
 
 ---
 
@@ -93,6 +93,9 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [44. Dependabot: 16 pull requests on the first day](#44-dependabot-16-pull-requests-on-the-first-day)
   - [45. Proof: the Trivy gate stops a CRITICAL, and the merge is blocked](#45-proof-the-trivy-gate-stops-a-critical-and-the-merge-is-blocked)
   - [What #13 creates](#what-13-creates)
+- [Part 10 — backends recover by themselves after a cluster restart](#part-10--backends-recover-by-themselves-after-a-cluster-restart)
+  - [46. Fix: a backend that cannot reach MongoDB at start exits, and Kubernetes restarts it](#46-fix-a-backend-that-cannot-reach-mongodb-at-start-exits-and-kubernetes-restarts-it)
+  - [What #28 changes](#what-28-changes)
 - [What is next](#what-is-next)
 
 ---
@@ -995,7 +998,7 @@ $ kubectl exec -n restauranty deploy/auth -- node -e 'require("dns").lookup("mon
 kubectl rollout restart deployment auth discounts items -n restauranty
 ```
 
-**The real fix** is in the code, so a restart is never needed: when the first connection fails, the app exits, and Kubernetes starts it again until MongoDB is there. It has its own issue, [#28](https://github.com/springlaughing/restauranty-devsecops-aks/issues/28), so the network change stays separate.
+**The real fix** is in the code, so a restart is never needed: when the first connection fails, the app exits, and Kubernetes starts it again until MongoDB is there. It has its own issue, [#28](https://github.com/springlaughing/restauranty-devsecops-aks/issues/28), so the network change stays separate. (Done the same day: entry 46.)
 
 ### 24. Before the rules: the attacker reaches MongoDB, the password holds
 
@@ -1159,7 +1162,7 @@ From the other attacker the same address still showed "blocked": that attacker's
 | Item with image, rules on | Browser + `items` log | `POST /api/items/items 200`, image on Cloudinary |
 | Setup script applies the rules after the app | `scripts/setup-aks.sh` | Ready for the next rebuild |
 | Before/after outputs | `docs/evidence/11-network-before.txt`, `11-network-after.txt` | Saved |
-| New issue: backends never reconnect to MongoDB | [#28](https://github.com/springlaughing/restauranty-devsecops-aks/issues/28) | Open |
+| New issue: backends never reconnect to MongoDB | [#28](https://github.com/springlaughing/restauranty-devsecops-aks/issues/28) | Fixed later, entry 46 |
 
 ---
 
@@ -3085,12 +3088,123 @@ The pull request is also a draft, which on its own disables the merge button. Th
 
 ---
 
+## Part 10 — backends recover by themselves after a cluster restart
+
+**Goal:** after `az aks start`, the app works again without anyone restarting pods by hand. Issue #28, branch `28-mongo-reconnect`, pull request #53.
+
+### 46. Fix: a backend that cannot reach MongoDB at start exits, and Kubernetes restarts it
+
+**In one line:** a backend whose first connection to MongoDB fails now exits instead of running on without a database; Kubernetes restarts it until MongoDB is there. Proved with the same test before and after.
+
+**The problem** (found in entry 23). After `az aks start`, the backends can start before MongoDB. Their first connection fails (`ENOTFOUND mongodb`: the name has no address yet). Mongoose, the library the backends use to talk to MongoDB, does not try a first connection again. So the backend stays up without a database:
+
+| What Kubernetes checks | What it saw | What users got |
+| --- | --- | --- |
+| Is the process running? | Yes | — |
+| Does the health route answer (`/api/auth`, `/api/discounts`, …)? | Yes: it does not use the database | — |
+| — | "Healthy", so nothing to do | Every login and every data request: **500** |
+
+Until now the workaround was a manual restart after every cluster start: `kubectl rollout restart deployment auth discounts items -n restauranty`.
+
+**The fix: "let it crash".** In `backend/*/db/index.js`, the same change in all three backends:
+
+```js
+  .catch((err) => {
+    // ... (comment explaining #28)
+    console.error(`Error connecting to mongo: ${err.message}. Exiting, so the container restarts.`);
+    process.exit(1);
+  });
+```
+
+When the first connection fails, the backend writes one line to its log and exits with code 1 (an error). Kubernetes sees the container stop and starts it again. The new one tries again. Kubernetes waits longer before each restart (10 s, 20 s, 40 s, … up to 5 minutes), so a long MongoDB outage does not cause a storm of restarts.
+
+**Only the first connection.** A connection lost later, while the backend is running, is a different case: Mongoose reconnects by itself (the `disconnected` and `reconnected` events in the same file). That part was already fine and is unchanged.
+
+**Why not check MongoDB in the health check instead?** The liveness probe decides when Kubernetes kills a container. If it checked MongoDB, a short MongoDB hiccup would make every backend fail at the same moment, and Kubernetes would kill all of them together: a small database problem would become a full outage. Exiting only when the first connection fails avoids that.
+
+**Tested locally first:** the module, pointed at a MongoDB that does not exist, exits with code 1:
+
+```
+$ MONGODB_URI='mongodb://127.0.0.1:1/Restauranty?serverSelectionTimeoutMS=2000' \
+    timeout 20 node -e 'require("./db"); setInterval(() => {}, 1000)'; echo "exit code: $?"
+MongoDB disconnected
+Error connecting to mongo: connect ECONNREFUSED 127.0.0.1:1. Exiting, so the container restarts.
+exit code: 1
+```
+
+(`setInterval` keeps a normal process alive; without the fix, `timeout` would have stopped it after 20 seconds with code 124.)
+
+**The test on AKS.** Instead of waiting for the race after a cluster start, it is forced: MongoDB off, backends restarted, MongoDB on again.
+
+**Hypothesis:** without the fix, the backends stay broken after MongoDB is back. With the fix, they restart by themselves and work.
+
+```bash
+kubectl scale statefulset mongodb -n restauranty --replicas=0          # 1. MongoDB off
+kubectl wait --for=delete pod/mongodb-0 -n restauranty --timeout=2m
+kubectl rollout restart deployment auth discounts items -n restauranty # 2. backends start without MongoDB
+sleep 60                                                               #    the first connection gives up after 30 s
+kubectl scale statefulset mongodb -n restauranty --replicas=1          # 3. MongoDB on again
+kubectl rollout status statefulset mongodb -n restauranty
+sleep 60
+kubectl get pods -n restauranty                                        # 4. observe
+kubectl logs deployment/auth -n restauranty | grep -i mongo
+curl -s -w '  HTTP %{http_code}\n' -X POST https://restauranty.aks.springlaughing.dev/api/auth/login \
+  -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"wrong"}'
+```
+
+**Results** (full outputs: [evidence/28-mongo-reconnect-before.txt](evidence/28-mongo-reconnect-before.txt), [evidence/28-mongo-reconnect-after.txt](evidence/28-mongo-reconnect-after.txt)):
+
+| | Before (commit `002cf7f`) | After (commit `d6b1185`) |
+| --- | --- | --- |
+| Backend pods | `1/1 Running`, **0 restarts** | `1/1 Running`, **2 restarts** each |
+| auth's log | `Error connecting to mongo: … ENOTFOUND mongodb`, then only `buffering timed out after 10000ms`, again and again | `… buffering timed out …` once, then **`Connected to Mongo! Database name: "restauranty"`** |
+| Wrong login, 60 s after MongoDB is back | `{"message":"Internal server error"}` **HTTP 500** | `{"message":"Email or Password Incorrect"}` **HTTP 401**: the right answer |
+| Manual restart needed | Yes | **No** |
+
+Before:
+
+```
+NAME                        READY   STATUS    RESTARTS   AGE
+auth-574f9f89cb-6chl9       1/1     Running   0          2m22s
+auth-574f9f89cb-cwwpt       1/1     Running   0          2m39s
+discounts-df589b89b-7ffb6   1/1     Running   0          2m22s
+...
+{"message":"Internal server error"}  HTTP 500
+```
+
+After:
+
+```
+NAME                         READY   STATUS    RESTARTS      AGE
+auth-9cc8f67d6-jblz8         1/1     Running   2 (75s ago)   2m25s
+auth-9cc8f67d6-w9nww         1/1     Running   2 (67s ago)   2m10s
+discounts-54784b8d64-6qfgr   1/1     Running   2 (67s ago)   2m11s
+...
+Connected to Mongo! Database name: "restauranty"
+{"message":"Email or Password Incorrect"}  HTTP 401
+```
+
+The 2 restarts are the fix at work: each one is a backend that found no MongoDB and exited. To read the message of a crashed container, add `--previous` to `kubectl logs`: plain `kubectl logs` shows only the current container, which connected fine.
+
+**The lesson.** The bug lived in the gap between "alive" and "working": the health check asked "does the web server answer?", not "can it do its job?". A broken process that keeps running hides the problem; one that exits makes it visible to Kubernetes, which already knows how to retry. This is the same idea as the chaos tests in the earlier vote-app project: break one part on purpose, and check that the system heals without a person.
+
+**Still open:** an alert when `mongo_connection_status` is 0 for a few minutes (with #15). That catches the cases a restart cannot fix, such as MongoDB itself staying down.
+
+### What #28 changes
+
+| Thing | Where | State |
+| --- | --- | --- |
+| Exit when the first MongoDB connection fails | `backend/{auth,discounts,items}/db/index.js` | Deployed (commit `d6b1185`) |
+| Before/after test outputs | `docs/evidence/28-mongo-reconnect-before.txt`, `28-mongo-reconnect-after.txt` | Saved |
+| Manual `rollout restart` after `az aks start` | — | No longer needed |
+
+---
+
 ## What is next
 
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
-| Backends reconnect to MongoDB by themselves | #28 |
 | Fail the build on an end-of-life base image or runtime, whatever its CVE count (entry 45) | — |
 | Monitoring, alerts, the attack demo; a Grafana panel for vulnerabilities (Trivy Operator), if time allows | #14, #15 |
 | Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
