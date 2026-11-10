@@ -76,6 +76,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [33. First run: the pull request](#33-first-run-the-pull-request)
   - [34. First run on main: Entra ID refused the sign-in](#34-first-run-on-main-entra-id-refused-the-sign-in)
   - [35. First deploy by the pipeline](#35-first-deploy-by-the-pipeline)
+  - [36. Proof: a run from a feature branch is refused](#36-proof-a-run-from-a-feature-branch-is-refused)
   - [What #12 creates](#what-12-creates)
 - [What is next](#what-is-next)
 
@@ -2282,9 +2283,51 @@ The login still reaches MongoDB, every attack is still blocked, and no app Servi
 | An identity with a federated credential for `main` only | Entra refused the first attempt (entry 34) and accepted only the exact subject |
 | AcrPush, images tagged with the commit | Four images `…:ff7a2e0…` in the registry, pushed by the pipeline |
 | Build, test, push, deploy | All five jobs `success` |
-| No secrets stored in GitHub | The workflow holds only ids; the repo has no Actions secrets |
+| No secrets stored in GitHub | The workflow holds only ids; the repo has no Actions secrets (`gh api …/actions/secrets` → `total_count: 0`) |
+| A run from a feature branch is refused by Entra | Entry 36 |
 | Role scoped to my resource group and AKS | Push identity: the registry only. Deploy identity: this cluster only |
 | Branch protection on `main` | Read back in entry 31 |
+
+### 36. Proof: a run from a feature branch is refused
+
+**In one line:** the same workflow, started by hand on the branch `12-oidc-subject`, built and tested everything, then Entra ID refused its sign-in. A branch other than `main` cannot push an image or reach the cluster.
+
+**Why this test.** A pull request never tries to sign in (entry 32), so it proves nothing about Azure. "Run workflow" on a feature branch does try. This is what an attacker who can push a branch, but not merge to `main`, would get.
+
+```
+$ gh workflow run ci-cd.yaml --ref 12-oidc-subject
+$ gh run view 42886007123 --json jobs --jq '.jobs[] | "\(.conclusion)\t\(.name)"'
+failure   build items
+failure   build client
+failure   build discounts
+failure   build auth
+skipped   deploy to AKS
+
+$ gh run view 42886007123 --log-failed | grep AADSTS
+AADSTS700213: No matching federated identity record found for presented assertion subject
+'repo:springlaughing@31309521/restauranty-devsecops-aks@1450795318:ref:refs/heads/12-oidc-subject'
+```
+
+The steps of one build job:
+
+```
+success   Run actions/checkout@v7
+success   Run actions/setup-node@v7
+success   Install dependencies
+success   Test
+success   Build image
+failure   Sign in to Azure as the pipeline identity
+skipped   Push image
+```
+
+| Result | What it shows |
+| --- | --- |
+| Install, test, build: `success` | Anyone may build and test on any branch, with the new action versions too |
+| Sign-in: `failure`, subject `…:ref:refs/heads/12-oidc-subject` | Entra ID trusts the push identity only for `refs/heads/main`. Any other branch is refused. |
+| Push: `skipped` | No image from a feature branch reaches the registry |
+| Deploy: `skipped` | The deploy job runs only for `main` and only in the environment `production` |
+
+The red "failure" on this run is the expected result: here, failing is the proof.
 
 ### What #12 creates
 
