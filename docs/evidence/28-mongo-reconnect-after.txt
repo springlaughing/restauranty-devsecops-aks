@@ -1,0 +1,41 @@
+#28 after the fix: the same test (10 November 2026).
+Images from commit d6b1185 (pull request #53): a backend exits when its first MongoDB connection fails.
+
+$ kubectl scale statefulset mongodb -n restauranty --replicas=0
+statefulset.apps/mongodb scaled
+$ kubectl wait --for=delete pod/mongodb-0 -n restauranty --timeout=2m
+pod/mongodb-0 condition met
+$ kubectl rollout restart deployment auth discounts items -n restauranty
+deployment.apps/auth restarted
+deployment.apps/discounts restarted
+deployment.apps/items restarted
+$ sleep 60
+$ kubectl scale statefulset mongodb -n restauranty --replicas=1
+statefulset.apps/mongodb scaled
+$ kubectl rollout status statefulset mongodb -n restauranty
+Waiting for 1 pods to be ready...
+partitioned roll out complete: 1 new pods have been updated...
+$ sleep 60
+
+$ kubectl get pods -n restauranty
+NAME                         READY   STATUS    RESTARTS      AGE
+attacker                     1/1     Running   0             9h
+auth-9cc8f67d6-jblz8         1/1     Running   2 (75s ago)   2m25s
+auth-9cc8f67d6-w9nww         1/1     Running   2 (67s ago)   2m10s
+client-5976bbc778-8gq7k      1/1     Running   0             39m
+client-5976bbc778-bn2f7      1/1     Running   0             39m
+discounts-54784b8d64-6qfgr   1/1     Running   2 (67s ago)   2m11s
+discounts-54784b8d64-h6s58   1/1     Running   2 (79s ago)   2m25s
+items-7d66c5464b-956bx       1/1     Running   2 (74s ago)   2m25s
+items-7d66c5464b-frnf8       1/1     Running   2 (65s ago)   2m9s
+mongodb-0                    1/1     Running   0             84s
+
+$ kubectl logs deployment/auth -n restauranty | grep -i mongo
+Found 2 pods, using pod/auth-9cc8f67d6-jblz8
+Error updating user count: MongooseError: Operation `users.countDocuments()` buffering timed out after 10000ms
+    at Timeout.<anonymous> (/app/node_modules/mongoose/lib/drivers/node-mongodb-native/collection.js:187:23)
+Connected to Mongo! Database name: "restauranty"
+
+$ curl -s -w '  HTTP %{http_code}\n' -X POST https://restauranty.aks.springlaughing.dev/api/auth/login \
+    -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"wrong"}'
+{"message":"Email or Password Incorrect"}  HTTP 401
