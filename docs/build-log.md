@@ -4,6 +4,16 @@
 
 **How to read it.** Entries are in order. Each one starts with its result in one line. You can read any entry on its own.
 
+**Three kinds of numbers.** They are unrelated to each other:
+
+| Looks like | Means | Example |
+| --- | --- | --- |
+| `26.` at the start of a heading | An entry in this log. Entries count up through the whole log, from 1; they do not restart in each part. | 26. Before #10 |
+| `#10` | An issue on GitHub: one piece of planned work | #10 = Gateway block and rate limit |
+| `F6` | A finding in the [security assessment](security-assessment.md) | F6 = no limit on login attempts |
+
+So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are different things. Headings without a number, such as "What is Trivy", explain an idea; numbered entries record work that was done.
+
 **Parts 1 to 5 are from 9 November 2026, Part 6 from 10 November.**
 
 ---
@@ -47,6 +57,14 @@
   - [24. Before the rules: the attacker reaches MongoDB, the password holds](#24-before-the-rules-the-attacker-reaches-mongodb-the-password-holds)
   - [25. After the rules: every attack blocked, the app still works](#25-after-the-rules-every-attack-blocked-the-app-still-works)
   - [What #11 creates](#what-11-creates)
+- [Part 7 — rules at the edge](#part-7--rules-at-the-edge)
+  - [What "the edge" means](#what-the-edge-means)
+  - [26. Before #10: what the code fixes left open](#26-before-10-what-the-code-fixes-left-open)
+  - [27. The rules: close the user list, slow down guessing, stop floods](#27-the-rules-close-the-user-list-slow-down-guessing-stop-floods)
+  - [Rate limiting: why, and how it works](#rate-limiting-why-and-how-it-works)
+  - [28. Two surprises: a refused pattern and a test too slow to matter](#28-two-surprises-a-refused-pattern-and-a-test-too-slow-to-matter)
+  - [29. After the rules: 11 of 11](#29-after-the-rules-11-of-11)
+  - [What #10 creates](#what-10-creates)
 - [What is next](#what-is-next)
 
 ---
@@ -124,6 +142,8 @@ set_key backend/items/.env     JWT_PUBLIC_KEY  jwt-public.pem
 
 **How keys are handled later:** on AKS the keys come from Azure Key Vault, not from `.env` files (see entry 10). In real production you would not manage the key at all: an identity provider (Entra External ID, Keycloak) would hold it and publish the public key at a JWKS URL, and rotate it automatically.
 
+**Files changed** (`backend/*` = in all three backends): `backend/*/config/jwt.js` (new: loads the key), `backend/*/middleware/jwt.middleware.js` (checks tokens with the public key), `backend/*/app.js`, `backend/*/.env.example`, `backend/auth/routes/auth.routes.js` (signs with the private key). Commit `d4ccc8f`.
+
 **Proof:** a token forged with the old secret was accepted before, refused (401) after. Retest 1 in the assessment.
 
 ### 4. Code fix: 401 instead of 500, and brief errors
@@ -133,11 +153,15 @@ set_key backend/items/.env     JWT_PUBLIC_KEY  jwt-public.pem
 - Token errors: the shared error handler (`backend/*/error-handling/index.js`) answers 401 and writes one short log line, so attacks no longer look like server outages.
 - Input errors: 32 route handlers used to send the whole database error (model and field names). They now pass the error on, and the handler answers `Invalid id` or `Invalid or missing fields`. The details go only to the log.
 
+**Files changed:** `backend/*/error-handling/index.js` (the shared error handler), and the route files that sent raw errors: `backend/auth/routes/users.routes.js`, `backend/discounts/routes/campaigns.routes.js`, `coupons.routes.js`, `backend/items/routes/dietary.routes.js`, `items.routes.js`, `orders.routes.js`. Commits `1522185`, `6f93d8b`.
+
 ### 5. Code fix: one login answer
 
 **Result:** login gives the same answer whether or not the email exists, so it no longer reveals which emails have an account. (Fixes F4.)
 
 Before: an unknown email got "User not found." (fast), a wrong password got "Email or Password Incorrect" (slow). Now both get the same message, and an unknown email is still checked against a dummy hash so the response takes the same time.
+
+**File changed:** `backend/auth/routes/auth.routes.js` (the login route). Commit `bbcb0be`.
 
 ### 6. Code fix: no password hashes, no personal data in logs
 
@@ -145,6 +169,8 @@ Before: an unknown email got "User not found." (fast), a wrong password got "Ema
 
 - The User model hides the `password` field by default and strips it from every answer. Login is the only query that loads it.
 - The `console.log` lines that wrote token content (email, address, phone) and whole records were removed.
+
+**Files changed:** `backend/*/models/User.model.js` (the `password` field hidden), `backend/auth/routes/auth.routes.js` (login asks for the hash explicitly; log lines removed), `backend/items/routes/dietary.routes.js`, `orders.routes.js` (log lines removed). Commits `81efba4`, `6a17c02`.
 
 PRs #22 covered entries 3 to 6. Each fix is one commit.
 
@@ -154,6 +180,8 @@ PRs #22 covered entries 3 to 6. Each fix is one commit.
 
 - The token check runs where the routes are mounted (`backend/*/app.js`), so a new route is protected automatically. Health checks, `/metrics`, signup and login stay public on purpose.
 - The frontend adds the token to every call to our own API, through one axios interceptor (`client/src/services/apiToken.js`).
+
+**Files changed:** `backend/*/app.js` (the token check where routes are mounted), `client/src/services/apiToken.js` (new: adds the token) and `client/src/index.jsx` (loads it). Commits `2773060`, `957ec48`.
 
 **Proof:** every data route answered 401 without a token; the admin pages still work. Retest 2 in the assessment. PR #23.
 
@@ -430,6 +458,23 @@ az keyvault secret set --vault-name kv-evgenia-restauranty -n mongo-password \
 
 The HTTPS listeners accept routes only from namespaces labelled `gateway-access: "true"`, so a stray route in any other namespace cannot publish a service. Two annotations on the Gateway tell Azure to put the static IP from entry 12 on its load balancer.
 
+**The routes** (`k8s/app/httproute.yaml`) say which path goes to which service. The Gateway is the door; the routes are the signs behind it. One object of the kind **HTTPRoute** holds four rules:
+
+| Path starts with | Goes to |
+| --- | --- |
+| `/api/auth` | auth |
+| `/api/discounts` | discounts |
+| `/api/items` | items |
+| `/` (everything else) | client |
+
+The longest matching path wins, so `/api/items/...` goes to items and not to the client. The backends' `/metrics` pages are not routed: a request for `/metrics` lands on the client, so the internet cannot read them.
+
+**Why an HTTPRoute and not an Ingress.** The brief asks for an Ingress, the older Kubernetes object for the same job. **Gateway API** (Gateway + HTTPRoute) is its successor, with three advantages here:
+
+- **Two owners, two files.** The Gateway (the door, HTTPS, the certificate) belongs to the platform; the routes belong to the app. With an Ingress, both are in one object.
+- **Rules without vendor tricks.** Path rules, redirects and policies such as rate limits are part of the standard or attach to it cleanly. An Ingress needs controller-specific annotations for most of this.
+- **The controller the brief names is retired.** The brief suggests the NGINX Ingress controller. The Kubernetes project retired it: maintenance ended in March 2026, so it gets no more security fixes. The project recommends moving to Gateway API ([Kubernetes blog, 11 Nov 2025](https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/)). For a project about security, starting on software with no security fixes would be the wrong choice.
+
 **Why NGINX Gateway Fabric.** It is the same controller as the voting app, so the setup is known. Version 2.4 added `RateLimitPolicy`, which the login rate limit needs (#10). Raw NGINX config snippets stay switched off: a snippet can do anything NGINX can, so it could get around every other rule.
 
 **Why `externalTrafficPolicy: Local`.** Azure then sends traffic only to nodes that run an NGINX pod, so NGINX sees the visitor's real IP. Without it, NGINX sees a node's IP, and a per-IP login limit (#10) would count all visitors as a few addresses.
@@ -556,7 +601,8 @@ Done the same evening: a free Cloudinary account with its own API key named `res
 | Let's Encrypt issuers (staging, production) + certificate (production since 9 Nov) | `k8s/platform/cluster-issuers.yaml`, `certificate.yaml` | Deployed |
 | `cloud-name`, `cloud-api-key`, `cloud-api-secret` (own Cloudinary account and key) | Key Vault, set by hand with `read -s` | Done |
 | `restauranty-tls-backup` (copy of the certificate Secret) | Key Vault, written by `scripts/setup-aks.sh` | Done |
-| Helm values for NGINX Gateway Fabric and cert-manager | `k8s/platform/*-values.yaml` | Deployed |
+| Helm settings for NGINX Gateway Fabric: no usage data sent to the vendor, raw NGINX snippets off, the Gateway's Service keeps the caller's real IP (`externalTrafficPolicy: Local`, needed for the rate limits in #10) | `k8s/platform/nginx-gateway-fabric-values.yaml` | Deployed |
+| Helm settings for cert-manager: installs its object types, and may use Gateway API for the Let's Encrypt check (off by default) | `k8s/platform/cert-manager-values.yaml` | Deployed |
 | MongoDB StatefulSet with two users | `k8s/app/mongodb.yaml` | Deployed |
 | auth, discounts, items, client + their ServiceAccounts and Services | `k8s/app/*.yaml` | Deployed |
 | Path routing | `k8s/app/httproute.yaml` | Deployed |
@@ -1089,12 +1135,512 @@ From the other attacker the same address still showed "blocked": that attacker's
 
 ---
 
+## Part 7 — rules at the edge
+
+**Goal:** stop three kinds of harmful requests at the Gateway, before they reach any service. The Gateway is the app's front door: every request from the internet passes through it first.
+
+| Harmful request | What the Gateway answers |
+| --- | --- |
+| Anyone asks for the list of all users (`/api/auth/users`) | `403 Forbidden`, always, for everyone |
+| One address tries many logins in a row (password guessing) | After 6 tries: `429 Too Many Requests` |
+| One address sends a huge number of requests (a flood) | Above 50 a second: `429 Too Many Requests` |
+
+**Why at the Gateway, when the code is already fixed?** The code now checks the login token and never sends password hashes. But code changes. If a later change breaks the token check by mistake, the Gateway still refuses these requests. Two separate checks are harder to get past than one.
+
+**Its place in the project.** The [approach](approach.md) follows a real incident in four steps: contain, close, guard, detect. This part is **contain**: block the attack at the front door first, fast, without touching the code. The code fixes (Part 1) were **close**: the real repair inside the app.
+
+Issue #10, branch `10-gateway-block-rate-limit`.
+
+### What "the edge" means
+
+**In one line:** the edge is the border between the internet and my system: the first thing of mine that a request from outside touches. Here, that is the Gateway.
+
+![Restauranty on AKS with four trust boundaries](images/trust-boundary.png)
+
+**How to read the picture.** Each red dashed line is a **trust boundary**: a place where a request moves from a side I trust less to a side I trust more, so it must be checked there.
+
+| Line | Between | Checked there by |
+| --- | --- | --- |
+| TB1 | The internet and the Gateway | The Gateway: HTTPS, routing, the rules in this part |
+| TB2 | The Gateway and the four services | The services: the login token check (#9); the network rules (#11) |
+| TB3 | The services and MongoDB | The network rules (#11) and MongoDB's password |
+| TB4 | The cluster and Azure (Key Vault, Entra ID) or Cloudinary | One Azure identity per service (#8) |
+
+**The edge is TB1**, the top red line: the first place where a request from the internet meets something of mine. Everything in this part happens there, in the blue Gateway box. Some boxes are still to come: GitHub Actions (#12) and Monitoring (#14, #15).
+
+The word comes from networking: an "edge router" sits at the edge of a company network, and content networks (CDNs) have "edge locations" close to users. It always means the outer border, where outside traffic first arrives.
+
+**Why put rules at the edge:**
+
+| Reason | What it means here |
+| --- | --- |
+| Earliest point | A refused request costs one line of NGINX work. It never starts Node.js, never runs bcrypt, never touches MongoDB. |
+| One place for all services | One flood limit covers client, auth, discounts, items and, later, Grafana. No service needs its own copy. |
+| No code change | The rules work even for code I cannot or do not want to change, for example a third-party app. |
+| Fast to deploy | A Gateway rule is live seconds after `kubectl apply`. A code fix needs a build, a scan and a rollout. That is why "contain" comes before "close" in an incident. |
+
+**What the edge cannot do.** The Gateway sees the request: address, path, headers, how often. It does not know the user, the account or the business rules. So it cannot say "this user may see only their own orders". That stays in the code. So the edge is only the **first** check a request meets, never the only one. Several independent checks, one behind the other, are called **defence in depth**: if one fails, the next still holds.
+
+**Why the test is called the edge test.** `scripts/test-edge.sh` runs from my laptop, **outside** the cluster, exactly like a stranger on the internet. Every request crosses the edge. Compare with the network test of #11:
+
+| Test | Runs from | Tests |
+| --- | --- | --- |
+| `scripts/test-edge.sh` (#10) | Outside: my laptop, over the internet | What a stranger can do through the front door |
+| `scripts/test-network.sh` (#11) | Inside: pods in the cluster | What a hacked pod can do once it is already in |
+
+Together they cover both directions: the front door, and the rooms behind it.
+
+### 26. Before #10: what the code fixes left open
+
+**In one line:** the code fixes made the worst leak smaller, but did not close it. And nothing slowed down password guessing.
+
+**F-numbers** (F1 to F20) are the findings in the [security assessment](security-assessment.md), the test of the app as I received it.
+
+**The user list (findings F11, F14, F15).** On day one, `/api/auth/users` gave every user's password hash to anyone, without login. The code fixes changed that: a token is needed (#9), and no answer contains a hash (#21). What is left:
+
+- Any logged-in user still gets every user's email, address and phone number.
+- Anyone can sign up, and every new user is admin (finding F1).
+- The frontend never calls this route. Nobody needs it from the internet.
+- Capital letters reach it too: Express, the web framework inside auth, ignores case, so `/api/auth/USERS` runs the same code as `/api/auth/users`. So a Gateway rule that closes this path must cover every spelling (entry 27).
+
+**Password guessing (finding F6).** About 10 guesses per second, with no limit and no slowdown.
+
+**Floods.** No limit at all: one machine could send as many requests as it likes.
+
+**The test** `scripts/test-edge.sh` runs from my laptop, like a stranger on the internet, in four groups:
+
+- **The app still works:** the website, auth, the items API and a wrong login.
+- **The user list is closed:** five ways of writing its path.
+- **Password guessing is limited:** 20 wrong logins in a row.
+- **A flood is refused:** 300 requests at once.
+
+**403 or 401 shows who answered.** 401 comes from the app's token check; 403 comes from the Gateway. So the test proves which layer stopped the request.
+
+```
+$ ./scripts/test-edge.sh
+Edge rules: 0 policies
+
+The app still works
+  PASS  GET /  (the website)                             200
+  PASS  GET /api/auth  (auth is up)                      200
+  PASS  GET /api/items/items, no token  (reaches the app) 401
+  PASS  POST /api/auth/login, wrong password             401
+
+The user list is closed at the Gateway (403 = Gateway, 401 = the app)
+  FAIL  GET /api/auth/users                              expected 403, got 401
+  FAIL  GET /api/auth/USERS                              expected 403, got 401
+  FAIL  GET /api/auth/Users                              expected 403, got 401
+  FAIL  GET /api/auth/users/                             expected 403, got 401
+  FAIL  GET /api/auth/users/000000000000000000000000     expected 403, got 401
+
+Password guessing: 20 wrong logins in a row
+        answers: 20 x 401, 0 x 429
+  FAIL  some guesses refused with 429                    expected yes, got no
+
+Flood: 300 requests at once from one address
+        answers: 300 x 200, 0 x 429
+  FAIL  some requests refused with 429                   expected yes, got no
+
+4 passed, 7 failed
+```
+
+As predicted: every request reaches the app, every guess gets an answer, every flood request is served.
+
+### 27. The rules: close the user list, slow down guessing, stop floods
+
+**In one line:** three rules at the Gateway, in two **new** files. No existing file was changed: the normal routes in `k8s/app/httproute.yaml` stay as they were.
+
+| File | New or changed | What it holds |
+| --- | --- | --- |
+| `k8s/app/edge-rules.yaml` | New | The user list block, and the login route with its limit |
+| `k8s/platform/rate-limit.yaml` | New | The flood limit for the whole Gateway |
+| `scripts/setup-aks.sh` | One line added | Applies `rate-limit.yaml` after a rebuild. `edge-rules.yaml` needs no line: the script already applies every file in `k8s/app/`. |
+
+**How new routes win over old ones without editing them.** The Gateway collects all routes for the same address and, for each request, picks the most specific match. `/api/auth/users` and `/api/auth/login` (new file) are more specific than `/api/auth` (old file), so they win. Every other request still follows the old routes.
+
+| Rule | What it does | Kind |
+| --- | --- | --- |
+| `block-user-list` | Every path starting with `/api/auth/users`, in any mix of upper and lower case, answers **403**. The request never reaches auth. | HTTPRoute + AccessPolicy "deny everyone" |
+| `login` | 10 logins per minute per IP address, with room for 5 quick tries first. More answer **429** (Too Many Requests). | HTTPRoute + RateLimitPolicy |
+| `flood` | 50 requests per second per IP address on everything, with room for a burst of 100. More answer **429**. | RateLimitPolicy on the Gateway |
+
+**Blocking the user list: every spelling, not only lowercase.**
+
+The user list is closed by a rule at the Gateway, a **block**: the Gateway answers `403 Forbidden` itself, and the request never reaches auth. The block does not match only the exact path `/api/auth/users`. It also matches every mix of upper and lower case: `USERS`, `Users`, and so on. The reason is how the two programs read letters:
+
+- The **Gateway** compares letters exactly: `u` is not `U`.
+- **Express**, the web framework inside auth, ignores case: `USERS` runs the same user list code as `users`.
+
+So a block for lowercase `users` only would let `/api/auth/USERS` through to the user list.
+
+The block is in `k8s/app/edge-rules.yaml`. Two parts:
+
+```yaml
+# Part 1: a route that matches the user list path, in any case.
+# [Uu] means "u or U", and so on for each letter.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: block-user-list
+  namespace: restauranty
+spec:
+  parentRefs:
+    - name: restauranty
+      namespace: gateway
+      sectionName: https-app
+  hostnames:
+    - restauranty.aks.springlaughing.dev
+  rules:
+    - matches:
+        - path: { type: RegularExpression, value: "/api/auth/[Uu][Ss][Ee][Rr][Ss]" }
+      backendRefs:
+        - { name: auth, port: 80 }   # required by the format; no request gets here
+---
+# Part 2: refuse every caller on that route. The Gateway answers 403 itself.
+apiVersion: gateway.nginx.org/v1alpha1
+kind: AccessPolicy
+metadata:
+  name: block-user-list
+  namespace: restauranty
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: block-user-list
+  action: Deny
+  rules:
+    - name: everyone-ipv4
+      source:
+        type: IPAddress
+        ipAddress: { address: 0.0.0.0/0 }   # every IPv4 address
+    - name: everyone-ipv6
+      source:
+        type: IPAddress
+        ipAddress: { address: "::/0" }      # every IPv6 address
+```
+
+**The user routes: closed at the Gateway, kept in the code.** auth has four user routes: list all users, get one, change one, delete one. The block is only a Gateway rule; the code in `backend/auth/routes/users.routes.js` is unchanged. Why not delete the routes?
+
+| Question | Answer |
+| --- | --- |
+| Are the routes needed? | Yes, in a real restaurant: an admin must be able to manage users. The frontend does not use them yet. |
+| What would the proper fix be? | A role check in auth: only real admins may call these routes (authorization by role, often called RBAC). |
+| Why not this week? | Every new user is admin (finding F1). A role check that everyone passes protects nothing. Fixing it means changing sign-up, creating the first admin, and adding the check: real app work. |
+| So what now? | **Contain:** the Gateway closes the routes for everyone. The proper fix goes into SECURITY.md as "production would add" (#19). |
+| Can an admin still reach them? | Only someone with rights on the cluster, with `kubectl port-forward` straight to auth, around the Gateway. An emergency door for the few people who are trusted anyway. |
+
+**Why each rule is its own route.** A policy applies to a whole HTTPRoute. So the user list and login get their own small routes, and more specific paths win over the general `/api/auth` route.
+
+**Why 403 and not 500.** The simplest way to block a path is a route with nowhere to send it. But then the Gateway answers `500 Internal Server Error`, which means "something broke". In the assessment, the app made the same mistake (finding F8): attacks were answered with 500, so in the logs they looked like server faults, not attacks. Instead, the rule says "deny everyone": every IPv4 address (`0.0.0.0/0`) and every IPv6 address (`::/0`). Then NGINX answers `403 Forbidden`, which means "refused on purpose".
+
+**How much slower guessing gets.** Before: about 10 guesses per second, so 36,000 an hour. After: 10 a minute, so 600 an hour, 60 times fewer. A person who mistypes a password twice never notices the limit.
+
+**How much traffic is normal.** Loading the app is about 10 requests; a person clicking around sends a few per second. The flood limit is far above both. It stops one machine from overloading the app, but not a flood from many machines at once (a DDoS). That needs Azure DDoS Protection or a firewall in front: out of scope.
+
+**Why the limits can count per person.** The key is the caller's IP address. The Gateway's Service keeps the real client IP (`externalTrafficPolicy: Local`, entry 15). Without it, NGINX would see the node's address, and every visitor would share one count.
+
+```
+$ kubectl apply -f k8s/app/edge-rules.yaml -f k8s/platform/rate-limit.yaml
+httproute.gateway.networking.k8s.io/block-user-list created
+accesspolicy.gateway.nginx.org/block-user-list created
+httproute.gateway.networking.k8s.io/login created
+ratelimitpolicy.gateway.nginx.org/login created
+ratelimitpolicy.gateway.nginx.org/flood created
+```
+
+The setup script applies both files, so a rebuilt cluster gets the rules too.
+
+### Rate limiting: why, and how it works
+
+**In one line:** a rate limit caps how many requests one caller may send in a given time. Above the cap, the Gateway answers `429 Too Many Requests` instead of passing the request on.
+
+#### Why: three attacks that need speed
+
+Many attacks only work because a computer can try very fast. A rate limit does not make them impossible; it makes them too slow to pay off.
+
+| Attack | How it works | Why speed matters |
+| --- | --- | --- |
+| **Brute force** | Many passwords against one account | Needs thousands of tries for one weak password |
+| **Password spraying** | One common password (`Password1`) against many accounts | Needs one try per account, across all accounts |
+| **Credential stuffing** | Email and password pairs leaked from **other** sites, tried here | People reuse passwords. Leaked lists have millions of pairs; each pair is one try |
+| **Flooding** | As many requests as possible, to slow down or stop the app | Without a cap, one machine can keep every service busy |
+
+**A real case: 23andMe, 2023.** Attackers used credential stuffing: logins leaked from other sites, tried on 23andMe. About 14,000 accounts opened, roughly 0.1% of users. Through a feature that shows relatives' profiles, those accounts gave access to data of about 6.9 million people. The company said its own systems were not broken into: the attackers simply logged in, many times, with passwords that worked.
+
+**In this app (finding F6):** about 10 guesses per second, no limit, no slowdown. And the weak passwords from F5 (`Password1`, `Qwerty123`) were accepted. Together that is the brute-force and spraying case exactly.
+
+**A second reason: logins are expensive.**
+
+- Every login checks the password with **bcrypt**. bcrypt is slow on purpose, so that stolen password hashes take very long to crack.
+- auth runs on Node.js, which handles all requests on **one thread**: one line of work at a time.
+- The login code uses `bcrypt.compareSync`. "Sync" means auth does nothing else until the check is done. While it checks one password, every other user waits.
+- A login with an unknown email does the same work, on purpose: then the answer time does not reveal which emails exist (finding F4).
+
+So a stream of logins does more than guess passwords: it keeps auth busy, and real users wait. The limit protects auth's CPU too.
+
+
+
+#### How: the code, and what it does
+
+The login limit is in `k8s/app/edge-rules.yaml`:
+
+```yaml
+apiVersion: gateway.nginx.org/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: login
+  namespace: restauranty
+spec:
+  targetRefs:                   # which route the limit is for
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: login               # the route for /api/auth/login only
+  rateLimit:
+    rejectCode: 429             # the answer when a caller is over the limit
+    logLevel: warn
+    local:
+      rules:
+        - key: $binary_remote_addr   # count per caller IP address
+          rate: 10r/m                # 10 requests per minute
+          burst: 5                   # plus 5 extra, right away
+          noDelay: true              # serve the 5 extra at once, do not hold them back
+```
+
+What each line means:
+
+| Line | In plain words |
+| --- | --- |
+| `key: $binary_remote_addr` | Each IP address is counted on its own. Two callers never share a count. |
+| `rate: 10r/m` | 10 logins per minute. NGINX spreads this evenly: **one login every 6 seconds**, not 10 at once and then nothing. |
+| `burst: 5` | On top of that, up to **5 extra** logins are allowed right away. A person who mistypes a password twice never notices the limit. |
+| `noDelay: true` | The 5 extra are answered at once. Without it, NGINX would hold them and answer one every 6 seconds, so the login would feel slow. |
+| `rejectCode: 429` | When a caller has used all of that up, the Gateway answers `429 Too Many Requests` itself. auth never sees the request. |
+
+The flood limit in `k8s/platform/rate-limit.yaml` has the same lines, with `rate: 50r/s` (50 per second, so one every 20 milliseconds) and `burst: 100`. It applies to every path, not only login.
+
+**Why 429 and not 403.** 403 means "never allowed". 429 means "allowed, but not this fast: wait". A normal program that gets 429 knows to slow down and try again later. The user list gets 403 because it is closed for good.
+
+#### The test, and why the numbers come out as they do
+
+The test sends logins as fast as it can, from one address. This is the code in `scripts/test-edge.sh`:
+
+```bash
+# Before this group, "the app still works" already sent 1 wrong login.
+codes=$(for i in $(seq 20); do wrong_login; echo; done)    # 20 wrong logins in a row
+```
+
+The result, from the "after" run:
+
+```
+Password guessing: 20 wrong logins in a row
+        answers: 5 x 401, 15 x 429
+```
+
+Counting all wrong logins in this run, one after the other, within a fraction of a second:
+
+| Login number | Allowed by | Answer |
+| --- | --- | --- |
+| 1 (in "the app still works") | the normal rate | `401`: auth checked the password |
+| 2 to 6 (first 5 in the loop) | the 5 extra (`burst: 5`) | `401` |
+| 7 to 21 (the other 15) | nothing left | `429`: the Gateway refused |
+
+So 6 logins reached auth, then everything was refused. After 6 seconds, one more login would be allowed, then one every 6 seconds.
+
+**The flood test** sends 300 requests for the home page, 50 at a time:
+
+```bash
+codes=$(curl -s -Z --parallel-max 50 --max-time 15 -w '%{stderr}%{http_code}\n' "$URL/?n=[1-300]" 2>&1 >/dev/null)
+```
+
+```
+Flood: 300 requests at once from one address
+        answers: 119 x 200, 181 x 429
+```
+
+The 300 requests took about 0.45 seconds. In that time the limit allows: 1 at the normal rate, plus 100 extra (`burst: 100`), plus about 22 more (50 per second for 0.45 seconds). That is about 123; the test got 119. The small difference comes from timing. The rest, 181, got `429`.
+
+#### Proof: the Gateway counts each caller by their real address
+
+The limits only work if NGINX sees the caller's real public address. If it saw an address from inside Azure instead, every visitor would share one count. The Gateway's own log, after the test:
+
+```
+$ kubectl logs -n gateway <gateway pod> | grep -a 'api/auth/login' | tail -1
+<my IP> - - [10/Nov/2026:17:47:14 +0000] "POST /api/auth/login HTTP/2.0" 429 162 "-" "curl/7.81.0"
+
+$ kubectl logs -n gateway <gateway pod> | grep -a 'limiting requests' | tail -2
+[warn] limiting requests, excess: 5.020 by zone "restauranty_rl_login_rule0", client: <my IP>, ...
+[warn] limiting requests, excess: 100.200 by zone "gateway_rl_flood_rule0", client: <my IP>, request: "GET /?n=300 ...
+```
+
+(`grep -a` reads the log as text: it contains a few non-text bytes, and without `-a` grep prints nothing.)
+
+| Part of the line | Meaning |
+| --- | --- |
+| `<my IP>`, `client: <my IP>` | My laptop's real public address. NGINX counts per real caller. |
+| `zone "restauranty_rl_login_rule0"` | The login limit's own count. The flood limit has a separate one, `gateway_rl_flood_rule0`. |
+| `excess: 5.020` | Just over the 5 extra logins allowed (`burst: 5`): refused |
+| `excess: 100.200` | Just over the 100 extra requests allowed (`burst: 100`): refused |
+
+The same log shows other addresses from the internet. Each has its own count, so my test never slowed them down. **Many users at once are fine: the limits stop only one address that sends too much.** The exception is many people behind one shared address, in the table below.
+
+#### Where to limit: at the edge or in the code
+
+| | At the edge (this project) | In the code (for example `express-rate-limit`) |
+| --- | --- | --- |
+| Covers | Every service at once | One service |
+| Cost of a refused request | Almost none: NGINX answers | Node.js already started on it |
+| Knows the user or account | No, only the IP address | Yes: it could lock **one account** after 5 wrong passwords, from any address |
+| Needs a code change | No | Yes |
+
+The edge limit is the first check: cheap, and the same for every service. A per-account lock (5 wrong passwords, then the account waits) would be the next one, in the code. Not this week: it can also be abused to lock real users out, so it needs care.
+
+#### What a rate limit per IP address does not stop
+
+| Gap | Why | The answer |
+| --- | --- | --- |
+| **Many addresses** | A botnet has thousands of IP addresses, each with its own fresh bucket | Alert on many failed logins in total, from any address (#15) |
+| **IPv6** | One home connection often gets billions of IPv6 addresses (a range written as `/64`); each address could get its own bucket | Count per `/64` range instead of per address. This Gateway is IPv4 only today |
+| **Shared addresses** | An office or a mobile network puts many people behind one IP; they share one bucket | Fine for login (10 a minute); real traffic would need tuning, ideally from measurements |
+| **More Gateway pods** | `local` limits count per NGINX pod. With 3 pods, a caller gets about 3 times the limit | One pod today. With more, lower the rate, or use a shared counter |
+| **Floods from many machines** | A DDoS sends from thousands of machines at once | Azure DDoS Protection or a firewall in front of the Gateway: out of scope |
+
+**How limits are set in real life.** Start with `dryRun: true`: NGINX counts and logs what it **would** refuse, but refuses nothing. Watch the logs for a week, see what normal users really send, then set the limit above that and switch dry run off. Here the limits come from estimates, not measurements: a known shortcut for a one-week project.
+
+### 28. Two surprises: a refused pattern and a test too slow to matter
+
+**In one line:** two things went wrong on the way. One rule was accepted by Kubernetes but did nothing. And one test sent its requests too slowly, so it never reached the limit and showed no effect.
+
+**Surprise 1: the Gateway software refused the pattern, and only the route's status said so.**
+
+The Gateway runs on **NGINX Gateway Fabric (NGF)**: software that reads the route files and turns them into NGINX settings. There are two checks when a route file is applied:
+
+1. **Kubernetes** checks the file's format: are the fields there, is the path text? It said "created".
+2. **NGF** checks whether it can turn the route into NGINX settings. It writes its answer into the route's **status**, a section Kubernetes adds to every object. `kubectl apply` does not show it.
+
+The first version matched the path with the pattern `(?i)^/api/auth/users`. `(?i)` means "ignore upper and lower case". Kubernetes accepted it: it is valid text. NGF refused it, and said so only in the status:
+
+```
+$ kubectl get httproute block-user-list -n restauranty \
+    -o jsonpath='{range .status.parents[0].conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+ResolvedRefs=True ResolvedRefs: All references are resolved
+Accepted=False UnsupportedValue: All rules are invalid: spec.rules[0].matches[0].path.value:
+  Invalid value: "(?i)^/api/auth/users": must start with / ...
+
+$ curl -s -o /dev/null -w '%{http_code}\n' https://restauranty.aks.springlaughing.dev/api/auth/users
+401        <- still reaches the app: the block does nothing
+```
+
+The fix: write both cases for each letter, `/api/auth/[Uu][Ss][Ee][Rr][Ss]`. That needs no flag and works in every pattern language. After that:
+
+```
+Accepted=True Accepted
+Programmed=True Programmed: Policy is programmed in the data plane
+/api/auth/users 403
+/api/auth/USERS 403
+```
+
+**Lesson:** a Gateway rule can be "created" and still do nothing. Only its status (`status.conditions`) says whether NGF accepted it. Check it after every change.
+
+**Surprise 2: the flood test was slower than the limit.** The first "after" run gave 10 of 11: the flood test got `300 x 200`, no 429. So I checked the NGINX config that NGF generated, inside the Gateway pod:
+
+```
+$ kubectl exec -n gateway <gateway pod> -- nginx -T | grep -nE 'limit_req|server_name|location'
+594: limit_req_zone $binary_remote_addr zone=gateway_rl_flood_rule0:10m rate=50r/s;
+279:     server_name restauranty.aks.springlaughing.dev;
+280:     include .../RateLimitPolicy_gateway_flood_gateway_server.conf;   <- limit_req ... burst=100 nodelay
+283:     location ~ ^/api/auth/[Uu][Ss][Ee][Rr][Ss] {
+306:     location = /api/auth/login {
+461:     location / {
+```
+
+The rule was there and in the right place. So the question was whether the test really sent more than 50 requests per second:
+
+```
+old way (300 curl processes, 50 at a time):
+    300 200
+  took 6.505140383 s                  <- about 46 requests/s: under the limit
+
+one curl, 300 requests over shared connections, 50 at a time:
+    112 200
+    188 429
+  took .445680269 s                   <- about 670 requests/s
+```
+
+Each separate `curl` starts a new process and does its own HTTPS handshake. Fifty of them in parallel from a laptop reached only about 46 requests per second, just under the limit. The rule was right; the test was too weak. The script now sends the flood from one `curl` that reuses its connections. The "before" result still stands: with no limit, a faster flood is also served in full.
+
+Two more things the config showed:
+
+- **NGF adds `^` to every pattern itself.** In a pattern, `^` means "the path must start here". The config shows `location ~ ^/api/auth/...` with a `^` my rule does not have. So `/other/api/auth/users` is not blocked by mistake, and that is why NGF wants patterns to start with `/`.
+- **The login limit replaces the flood limit on `/api/auth/login`.** In NGINX, a location with its own `limit_req` does not inherit the server's. That is fine here, because the login limit is the stricter one.
+
+### 29. After the rules: 11 of 11
+
+**In one line:** the user list answers 403 in every spelling, password guessing gets 429 after 6 tries, and a flood gets 429 after about 120 requests. The app works as before.
+
+```
+$ ./scripts/test-edge.sh
+Edge rules: 3 policies
+
+The app still works
+  PASS  GET /  (the website)                             200
+  PASS  GET /api/auth  (auth is up)                      200
+  PASS  GET /api/items/items, no token  (reaches the app) 401
+  PASS  POST /api/auth/login, wrong password             401
+
+The user list is closed at the Gateway (403 = Gateway, 401 = the app)
+  PASS  GET /api/auth/users                              403
+  PASS  GET /api/auth/USERS                              403
+  PASS  GET /api/auth/Users                              403
+  PASS  GET /api/auth/users/                             403
+  PASS  GET /api/auth/users/000000000000000000000000     403
+
+Password guessing: 20 wrong logins in a row
+        answers: 5 x 401, 15 x 429
+  PASS  some guesses refused with 429                    yes
+
+Flood: 300 requests at once from one address
+        answers: 119 x 200, 181 x 429
+  PASS  some requests refused with 429                   yes
+
+11 passed, 0 failed
+```
+
+| Check | Before | After |
+| --- | --- | --- |
+| The app (4 checks) | works | works |
+| `/api/auth/users`, 5 spellings | 401: reaches the app | **403: refused at the Gateway** |
+| 20 wrong logins | 20 answered | 6 answered (1 + burst of 5), then **429** |
+| 300 requests at once | 300 served | about 120 served (burst of 100 + refill), then **429** |
+| **Result** | 4 passed, 7 failed | **11 passed, 0 failed** |
+
+Full outputs: `docs/evidence/10-edge-before.txt`, `10-edge-after.txt`.
+
+**The day-one leak, now met three ways:** the Gateway refuses the route (#10), the code asks for a token (#9), and the code sends no hashes (#21). An alert on it comes with #15.
+
+**What the rules do not stop:**
+
+- **Guessing from many addresses.** The limits count per IP address; an attacker with many addresses (a botnet) gets a fresh count on each. The alert on many failed logins (#15) is the answer to that.
+- **Users behind one shared address.** People in one office share an IP and one count. For the login limit that is acceptable (10 a minute); for real traffic it would need tuning.
+- **A flood from many machines.** See entry 27: that needs protection in front of the Gateway.
+
+### What #10 creates
+
+| Thing | Where | State |
+| --- | --- | --- |
+| User list closed at the Gateway, any case, 403 | `k8s/app/edge-rules.yaml` (HTTPRoute + AccessPolicy) | Applied |
+| Login limit: 10 a minute per IP, burst 5, 429 | `k8s/app/edge-rules.yaml` (HTTPRoute + RateLimitPolicy) | Applied |
+| Flood limit: 50 a second per IP, burst 100, 429 | `k8s/platform/rate-limit.yaml` | Applied |
+| Setup script applies the flood limit | `scripts/setup-aks.sh` | Ready for the next rebuild |
+| Test with 11 checks, PASS/FAIL | `scripts/test-edge.sh` | 11 of 11 |
+| Before/after outputs | `docs/evidence/10-edge-before.txt`, `10-edge-after.txt` | Saved |
+
+---
+
 ## What is next
 
 | Task | Issue |
 | --- | --- |
 | docker-compose for local dev | #1 |
-| Gateway block on the user list, login rate limit | #10 |
 | Backends reconnect to MongoDB by themselves | #28 |
 | Pipeline with security gates | #12, #13 |
 | Monitoring, alerts, the attack demo | #14, #15 |

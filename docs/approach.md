@@ -103,6 +103,8 @@ The way the work is organised is part of the method:
 - **Evidence, not claims.** Each fix is retested with the same attack that proved the problem, and the before and after are saved.
 - **Everything is written down.** Three documents (assessment, build log, this one) and the issues link each claim to its proof.
 
+The exact rules (branch names, commit format, the test checklist before a pull request) are in [CONTRIBUTING.md](../CONTRIBUTING.md). `.gitmessage` is the commit template: with `git config commit.template .gitmessage`, every new commit message starts from it.
+
 ## What we accepted, and what production would add
 
 The project is honest about its limits. Some things are left for a reason and named as such:
