@@ -1737,6 +1737,41 @@ Full outputs: `docs/evidence/10-edge-before.txt`, `10-edge-after.txt`.
 
 **Why two and not one.** The build job runs `npm ci`, which installs packages from the internet: 156 per backend, 1,516 for the client. Any of them could be poisoned (event-stream, 2018). If the build job had the deploy identity, a poisoned package could reach the cluster directly: read Secrets, delete things, change the network rules, without anyone approving. With two identities, the deploy identity exists only inside the approved deploy job.
 
+**Where the two identities are defined.** Four places, three in Terraform and one in the workflow:
+
+| What | File |
+| --- | --- |
+| Push identity `id-evgenia-restauranty-pipeline` and its role AcrPush | `terraform/persistent/main.tf` (made in entry 10; code below) |
+| Deploy identity `id-evgenia-restauranty-deploy`, and the GitHub rules for both identities | `terraform/persistent/github.tf` (code further down in this entry) |
+| Deploy identity's role on the cluster | `terraform/cluster-access/pipeline.tf` (code further down in this entry) |
+| Which job signs in as which identity | `.github/workflows/ci-cd.yaml` (entry 32) |
+
+The push identity, in `terraform/persistent/main.tf`:
+
+```hcl
+# The pipeline's Azure account. No password exists for it.
+resource "azurerm_user_assigned_identity" "pipeline" {
+  name                = "id-${local.name_suffix}-pipeline"
+  resource_group_name = azurerm_resource_group.persistent.name
+  location            = azurerm_resource_group.persistent.location
+  tags                = local.common_tags
+}
+
+# Its only right: push and pull images in this one registry.
+resource "azurerm_role_assignment" "pipeline_acr_push" {
+  scope                = azurerm_container_registry.main.id
+  role_definition_name = "AcrPush"
+  principal_id         = azurerm_user_assigned_identity.pipeline.principal_id
+}
+```
+
+| Part | Meaning |
+| --- | --- |
+| `azurerm_user_assigned_identity` | Creates the identity: an Azure account for a program |
+| `azurerm_role_assignment` | Gives it a right. Three parts: **who** (`principal_id`, the identity), **what** (`role_definition_name`, AcrPush), **where** (`scope`, the registry only) |
+
+The deploy identity is built the same way: `azurerm_user_assigned_identity.deploy` in `github.tf`, and its one role in `cluster-access/pipeline.tf`, with the cluster as the scope.
+
 **Each identity has exactly one role**, read back from Azure:
 
 ```
