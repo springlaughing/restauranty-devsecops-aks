@@ -115,6 +115,10 @@ prometheusOperator:
 
 grafana:
   fullnameOverride: grafana            # Service "grafana", used by the HTTPRoute
+  # Grafana's pod runs as its own ServiceAccount. The name "grafana" is taken:
+  # that one is External Secrets' sign-in to Key Vault (grafana-secrets.yaml).
+  serviceAccount:
+    name: grafana-server
   testFramework:
     enabled: false
   # Grafana's helper loads dashboards from ConfigMaps. By default it may read
