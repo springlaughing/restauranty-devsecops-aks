@@ -3670,7 +3670,7 @@ The Secret `grafana-admin` then held exactly two keys, `admin-password` and `adm
 
 **In one line:** the monitoring tools are installed with Helm in seven steps, the backends become scrape targets, Grafana is published through the Gateway, and one network rule opens for Prometheus. Two surprises in step 5, both about names and rights.
 
-**State:** steps 3 to 6 done (kube-prometheus-stack and Loki run). Steps 7 to 9 follow.
+**State:** steps 3 to 7 done (kube-prometheus-stack, Loki and Alloy run). Steps 8 and 9 follow.
 
 **The steps,** after entry 52. The setup script does the same in its step 7.
 
@@ -3809,6 +3809,40 @@ persistentvolumeclaim/storage-loki-0   Bound   10Gi   RWO   managed-csi-zrs
 ```
 
 The warning comes from the namespace label `warn: restricted` (entry 50): Kubernetes reports a pod that misses the strictest profile, but admits it, because only `baseline` is enforced. The setting Loki's chart leaves out is **seccomp**, a Linux filter that limits which system calls (requests to the kernel) a container may make. `RuntimeDefault` blocks the rarely used, risky ones. The app pods in `restauranty` have it, because there "restricted" is enforced. For Loki it is a small fix in the values file, noted for later.
+
+**Step 7: Alloy.** Installed on the first try. Its log shows it finding pods in every listed namespace and reading their logs, with no `forbidden` line, so its narrowed rights (entry 51) match what its settings ask for:
+
+```
+$ kubectl get pods -n monitoring        (shortened)
+alloy-6c54b7cbcf-rzmbq   2/2     Running   0          35s
+
+$ kubectl logs -n monitoring deploy/alloy --tail=20        (shortened)
+level=info msg="opened log stream" ... target=restauranty/discounts-6bb9dc7946-jmdc9:discounts
+level=info msg="opened log stream" ... target=reloader/reloader-reloader-df6cd89c-44bv8:reloader-reloader
+level=info msg="opened log stream" ... target=restauranty/items-7df9c5b45b-9kk8n:items
+level=info msg="opened log stream" ... target=cert-manager/cert-manager-6784c9f6fb-7qmvd:cert-manager-controller
+level=info msg="container finished, stopping tailer" ... target=gateway/restauranty-nginx-85c5954cc8-cgvgl:init
+```
+
+"Container finished" is normal: init containers run once when a pod starts, then stop.
+
+The install warning was longer than Loki's:
+
+```
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false,
+  unrestricted capabilities, runAsNonRoot != true, seccompProfile (container "alloy" ...)
+```
+
+In plain words: **the chart runs Alloy as root**, with every Linux capability (special powers such as changing file owners), allowed to gain more privileges, and with no seccomp filter. A collector that reads logs through the Kubernetes API needs none of that.
+
+**Hardening Alloy and Loki.** Both values files now give their pods the same settings as the app pods in `restauranty`:
+
+- Alloy runs as its own user, 473 (named `alloy` in its image), not as root.
+- It cannot gain privileges, has no capabilities, and has the seccomp filter.
+- Its file system is read-only, so an attacker inside it cannot change its program or settings. Alloy needs one writable folder for its working files, `/tmp/alloy`, so that folder is a small empty volume (`emptyDir`) that disappears with the pod.
+- Loki already ran as a normal user, without capabilities, with a read-only file system. It only gets the seccomp filter.
+
+Before applying, the rendered files were checked for the four rules of the warnings: no gaps left in Alloy, its config reloader, or Loki.
 
 ---
 

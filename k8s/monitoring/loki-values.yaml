@@ -5,6 +5,13 @@ deploymentMode: SingleBinary
 
 loki:
   auth_enabled: false                  # one user (us), so no tenants
+  # The chart already runs Loki as a normal user, without capabilities, with
+  # a read-only file system. It leaves out the seccomp filter (a limit on
+  # which kernel calls the container may make); added here. Helm merges this
+  # into the chart's other settings, it does not replace them.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
   commonConfig:
     replication_factor: 1
   storage:

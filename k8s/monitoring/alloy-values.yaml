@@ -27,8 +27,33 @@ rbac:
 controller:
   type: deployment
   replicas: 1
+  # A small writable folder for Alloy's working files (--storage.path),
+  # because the rest of its file system is read-only (below).
+  volumes:
+    extra:
+      - name: storage
+        emptyDir: {}
 
 alloy:
+  # The chart runs Alloy as root, with every Linux capability. Reading logs
+  # through the Kubernetes API needs neither: Alloy runs as its own user
+  # (473, "alloy" in the image), cannot gain privileges, has no capabilities,
+  # a seccomp filter, and cannot change its own files. The same settings as
+  # the app pods ("restricted" profile).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 473
+    runAsGroup: 473
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+  mounts:
+    extra:
+      - name: storage
+        mountPath: /tmp/alloy
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 256Mi }
