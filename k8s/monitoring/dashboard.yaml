@@ -117,7 +117,7 @@ data:
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by (job) (rate(http_requests_total{statusCode=~\"5..\"}[1m]))",
+              "expr": "sum by (job) (rate(http_requests_total{statusCode=~\"5..\"}[1m])) or vector(0)",
               "legendFormat": "{{job}}",
               "datasource": {
                 "type": "prometheus",

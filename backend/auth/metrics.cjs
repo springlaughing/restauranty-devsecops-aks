@@ -52,7 +52,10 @@ const httpRequestDuration = new client.Histogram({
   name: 'http_request_duration_seconds',
   help: 'Time from request to response, in seconds',
   labelNames: ['method', 'route'],
-  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10],
+  // From 1 ms: most requests take a few milliseconds. With 10 ms as the
+  // smallest bucket, Prometheus only knew "between 0 and 10 ms" and showed
+  // a made-up p95 of 9.5 ms (build log, entry 55).
+  buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10],
 });
 
 // The "route" label is the route pattern from the code, such as
