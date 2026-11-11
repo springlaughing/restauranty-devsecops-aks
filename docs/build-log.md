@@ -4598,7 +4598,7 @@ Free space divided by size, for every disk (PersistentVolumeClaim) in `restauran
 
 **In one line:** six commands bring the secret, the routing and the rules to the cluster; one more sends a test alert straight to Alertmanager, to prove the route to Slack works before any real alert fires.
 
-**State:** commands written and explained; the results are added below them as they come in.
+**State:** steps 1 to 5 done, every one on the first try. Step 6, the test message, follows.
 
 **1. Alertmanager's webhook from Key Vault.**
 
@@ -4610,6 +4610,17 @@ kubectl get secretstore alertmanager -n monitoring
 
 `apply` creates the ServiceAccount, the SecretStore and the ExternalSecret (entry 57). `wait` blocks until External Secrets reports that it has written the Secret, or gives up after 3 minutes. The last command shows the SecretStore's status: `Valid` means the sign-in to Key Vault as Alertmanager's identity works. Success: `condition met`, and `STATUS Valid`.
 
+```
+serviceaccount/alertmanager created
+secretstore.external-secrets.io/alertmanager created
+externalsecret.external-secrets.io/alertmanager-slack created
+externalsecret.external-secrets.io/alertmanager-slack condition met
+NAME           AGE   STATUS   CAPABILITIES   READY
+alertmanager   3s    Valid    ReadWrite      True
+```
+
+Synced within seconds: with the real client id in the file from the start, there was no failed sign-in and no waiting for a retry, unlike Grafana's first try (entry 52).
+
 **2. Ask whether the rules are valid, without applying them.**
 
 ```bash
@@ -4617,6 +4628,12 @@ kubectl apply --dry-run=server -f k8s/monitoring/alert-rules.yaml
 ```
 
 `--dry-run=server` sends the file to the cluster, which runs every check, including the Prometheus Operator's admission webhook (a check that runs before an object is saved), and then throws the object away. That webhook parses the PromQL of every rule. Without this step, a typo in a query would be stored as plain text, and Prometheus would quietly skip the broken rule: the same "looks deployed, does not work" trap as Grafana's 2/3 in entry 53. Success: `prometheusrule.monitoring.coreos.com/restauranty created (server dry run)`.
+
+```
+prometheusrule.monitoring.coreos.com/restauranty created (server dry run)
+```
+
+The operator's check parsed all nine queries and found nothing to refuse. Nothing was stored yet.
 
 **3. Alertmanager with the route to Slack.**
 
@@ -4627,6 +4644,14 @@ helm upgrade --install kps prometheus-community/kube-prometheus-stack --version 
 
 The same command as in entry 53, step 3: Helm compares the new values with what runs and changes only the difference. Here that is Alertmanager's configuration and its pod, which restarts once to mount the Secret `alertmanager-slack`. That is also why step 1 comes first: a pod that mounts a missing Secret cannot start. Success: `STATUS: deployed`.
 
+```
+Release "kps" has been upgraded. Happy Helming!
+STATUS: deployed
+REVISION: 3
+```
+
+Revision 3: the first install (entry 53, step 3), the fix for Grafana's loaders (surprise 2), and now Alertmanager's route. `helm history kps -n monitoring` lists them; `helm rollback kps 2 -n monitoring` would go back one step.
+
 **4. The rules, for real.**
 
 ```bash
@@ -4634,6 +4659,10 @@ kubectl apply -f k8s/monitoring/alert-rules.yaml
 ```
 
 Success: `prometheusrule.monitoring.coreos.com/restauranty created`. Within about a minute, Prometheus loads the nine rules.
+
+```
+prometheusrule.monitoring.coreos.com/restauranty created
+```
 
 **5. Did Alertmanager load the new configuration?**
 
@@ -4643,6 +4672,18 @@ kubectl logs -n monitoring alertmanager-kps-kube-prometheus-stack-alertmanager-0
 ```
 
 The pod should be `2/2 Running`: Alertmanager, plus a helper that reloads it when its configuration changes. Alertmanager checks its configuration when it loads it; a wrong setting shows as an error in its log, and the old configuration stays. Success: a line `Completed loading of configuration file` and no `error`.
+
+```
+NAME                                                    READY   STATUS    RESTARTS   AGE
+alertmanager-kps-kube-prometheus-stack-alertmanager-0   2/2     Running   0          75s
+
+level=INFO msg="Listening on" address=[::]:9093
+level=INFO msg="TLS is disabled." http2=false address=[::]:9093
+level=INFO msg="Loading configuration file" file=/etc/alertmanager/config_out/alertmanager.env.yaml
+level=INFO msg="Completed loading of configuration file" file=/etc/alertmanager/config_out/alertmanager.env.yaml
+```
+
+The pod is 75 seconds old: it restarted to mount the Secret, as expected. Alertmanager read the new configuration without an error, so the route, the receivers and the templates are valid; this replaces the `amtool` check that could not run on the laptop (entry 57). "TLS is disabled" is about Alertmanager's own port, 9093, inside the cluster: only Prometheus (sending alerts) and Grafana (showing them) talk to it, and it is not published through the Gateway. The message to Slack itself goes out over HTTPS (the webhook URL starts with `https://`).
 
 **6. A test message to Slack.**
 
