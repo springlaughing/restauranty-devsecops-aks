@@ -56,11 +56,37 @@ const httpRequestsCounter = new client.Counter({
   labelNames: ['method', 'route', 'statusCode'],
 });
 
+// The "route" label is the route pattern from the code, such as
+// /api/items/items/:id, never the URL the visitor sent. Every different label
+// value is a new time series in Prometheus's memory: with the raw URL, each
+// made-up URL created one more, and junk requests could crash the monitoring
+// (finding F18). Now the number of values is fixed by the code. Requests that
+// match no route, such as junk URLs or a refused login token, count as "no_route".
+//
+// Express forgets the first part of the path (req.baseUrl) when an error or a
+// refused token leaves a router. So the pattern is noted at the moment Express
+// picks the route, not when the response is sent.
+function routePattern(req) {
+  let route;
+  let pattern = 'no_route';
+  Object.defineProperty(req, 'route', {
+    configurable: true,
+    enumerable: true,
+    get() { return route; },
+    set(value) {
+      route = value;
+      pattern = req.baseUrl + value.path;
+    },
+  });
+  return () => pattern;
+}
+
 // Express middleware to update both HTTP requests counters.
 function httpMetricsMiddleware(req, res, next) {
+  const pattern = routePattern(req);
   res.on('finish', () => {
     const method = req.method;
-    const route = req.originalUrl || req.url;
+    const route = pattern();
     const statusCode = res.statusCode.toString();
 
     // Increment the detailed counter.
