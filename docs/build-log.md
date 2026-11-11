@@ -2782,13 +2782,15 @@ Each pull request is normal: it goes through every gate before it can be merged.
 
 ### Pinning: why a version tag is not enough
 
-**In one line:** every tool and action in the pipeline is fixed to its exact bytes (a SHA or digest), not to a version name, because in March 2026 the version names of a security scanner were moved to malware.
+**In one line:** every tool and action in the pipeline is fixed to its exact bytes (a SHA or digest), not to a version name, because in March 2026 attackers changed the version names of a security scanner to point to their own code.
 
-**The real case.** On 19 March 2026, attackers used stolen credentials of the Trivy project. They moved 76 of the 77 version tags of the Trivy GitHub Action (`aquasecurity/trivy-action`) to code that read the secrets of every pipeline that ran it, and published a poisoned Trivy release, v0.69.4, for about 3 hours. Poisoned Docker images followed on 22 and 23 March. It is tracked as CVE-2026-33634, rated critical, and is on CISA's list of vulnerabilities used in real attacks. Pipelines that named the action by commit SHA kept running the old, clean code. ([StepSecurity](https://www.stepsecurity.io/blog/trivy-compromised-a-second-time---malicious-v0-69-4-release), [Endor Labs](https://www.endorlabs.com/vulnerability/cve-2026-33634), [CVE record](https://cveawg.mitre.org/api/cve/CVE-2026-33634))
+**What a version tag is.** A version name like `trivy-action@0.28.0` is a **tag**: a label in git that points to one specific version of the code (one commit). When a pipeline says "use `trivy-action@0.28.0`", GitHub looks up where that label points and runs that code. Whoever controls the project can change a label to point somewhere else; people call that "moving" the tag. The name stays the same, the code behind it is different.
+
+**The real case.** On 19 March 2026, attackers used stolen credentials of the Trivy project. They changed 76 of the 77 version tags of the Trivy GitHub Action (`aquasecurity/trivy-action`) to point to new code they had written: code that read the secrets of every pipeline that ran it. The tags kept their names, so nothing looked different. They also published a poisoned Trivy release, v0.69.4, for about 3 hours. Poisoned Docker images followed on 22 and 23 March. It is tracked as CVE-2026-33634, rated critical, and is on CISA's list of vulnerabilities used in real attacks. Pipelines that named the action by commit SHA kept running the old, clean code. ([StepSecurity](https://www.stepsecurity.io/blog/trivy-compromised-a-second-time---malicious-v0-69-4-release), [Endor Labs](https://www.endorlabs.com/vulnerability/cve-2026-33634), [CVE record](https://cveawg.mitre.org/api/cve/CVE-2026-33634))
 
 | How a tool is named | Example | Can someone change what I get? |
 | --- | --- | --- |
-| A tag on an action | `trivy-action@0.28.0` | Yes. A tag is a label; the owner, or a thief, can move it |
+| A tag on an action | `trivy-action@0.28.0` | Yes. A tag is a label; the owner, or a thief, can point it to other code |
 | A tag on an image | `aquasec/trivy:0.76.1` | Yes, tags can be overwritten |
 | A commit SHA or image digest | `aquasec/trivy:0.76.1@sha256:790fd66d…` | **No.** It is a hash of the contents. Other contents give another hash, and Docker refuses them |
 
@@ -5032,7 +5034,7 @@ Name, version and the place to download it, as in an SBOM, plus `integrity`: the
 | Can be looked up in a CVE list | yes | no: a fingerprint says nothing about vulnerabilities |
 | Can be fooled by a moved or reused name | yes | no |
 
-Names and versions can lie. In the Trivy attack of March 2026 (Part 9, "Pinning"), the version name `trivy-action@0.28.0` was moved to malware. A parts list would still have said "trivy-action 0.28.0"; only the commit hash showed that the code was different. And a hash alone cannot tell whether something is vulnerable: nobody can look up `sha512-Bdcs…` in a list of CVEs. So:
+Names and versions can lie. In the Trivy attack of March 2026 (Part 9, "Pinning"), attackers changed what the version name `trivy-action@0.28.0` points to: the name stayed the same, but behind it was now their own code, which stole the secrets of every pipeline that ran it. A parts list would still have said "trivy-action 0.28.0"; only the commit hash showed that the code was different. And a hash alone cannot tell whether something is vulnerable: nobody can look up `sha512-Bdcs…` in a list of CVEs. So:
 
 - the **SBOM** says what to look up in the vulnerability lists;
 - the **hash** proves that what runs is exactly what was looked up.
