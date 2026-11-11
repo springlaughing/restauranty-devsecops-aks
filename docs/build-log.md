@@ -2802,7 +2802,7 @@ The **publisher**, the Trivy project, could have:
 
 The **users** of Trivy could have:
 
-1. **Named the action by commit SHA, and images by digest.** That alone kept them safe: the rest of this section.
+1. **Named the action by its commit hash, and Trivy's images by digest.** In a workflow file, the Trivy GitHub Action was used with a line like `uses: aquasecurity/trivy-action@0.28.0`: the label. Written with the commit hash instead, `uses: aquasecurity/trivy-action@<the 40-character hash of the version they had used>  # 0.28.0`, the line names that exact version of the code; the comment only keeps the version readable for people. When the attackers changed where the label `0.28.0` pointed, pipelines written this way still ran the code behind their hash: the old, clean version. The same for Docker images: `aquasec/trivy:0.76.1@sha256:790fd66d…` instead of only `aquasec/trivy:0.76.1`. That alone kept them safe. How this project does it, with real lines from its pipeline: the table and the list "What the pipeline does" just below. (This project does not use the Trivy action at all: it runs Trivy as a Docker image, pinned by digest.)
 2. **Waited before adopting a new version.** Poisoned releases are usually found within hours or days. This project's rule: at least a week old.
 3. **Given the job that runs a tool as few secrets as possible.** The malware stole secrets; a job with nothing to steal loses nothing. In this pipeline, the scanner jobs have no Azure sign-in (no `id-token`), and no passwords are stored anywhere (OIDC, entry 30). Even a poisoned scanner would have found very little.
 4. **Verified signatures,** where the publisher signs.
