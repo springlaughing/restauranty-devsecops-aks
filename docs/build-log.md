@@ -5377,16 +5377,42 @@ So the pin changes nothing about **what** runs today; it guarantees that it stay
 
 ## What is next
 
-| Task | Issue |
-| --- | --- |
-| docker-compose for local dev | #1 |
-| Fail the build on an end-of-life base image or runtime, whatever its CVE count (entry 45) | — |
-| Monitoring, alerts, the attack demo; a Grafana panel for vulnerabilities (Trivy Operator), if time allows | #14, #15 |
-| Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
-| Reliability, outside this project's security focus: a readiness check that asks MongoDB's state (fast errors instead of 10 s waits, entry 46); MongoDB as a replica set for high availability | — |
-| Reliability: spread the app pods over all 3 nodes and zones. Today all of them run on one node (entry 47). Fix: a strict spread rule (`DoNotSchedule`) or the descheduler; a second Gateway pod | — |
-| Alerts from the logs: Loki's ruler, connected to Alertmanager, for the day-one leak (any 403 on the user list) and the Gateway's own 5xx (entry 62) | #15 |
-| Network rules for `trivy-system`: scan jobs may reach only DNS and HTTPS on the internet (for the vulnerability database), nothing in the cluster; the operator keeps the Kubernetes API, Prometheus keeps the operator ("Can a security tool be trusted?", fix 2) | #15 |
-| A newer MongoDB image: its Go 1.24.6 (1 CRITICAL), apt and js-yaml have fixed versions (entry 64) | — |
-| GitOps with Argo CD or Flux: platform charts and app manifests installed from git by a controller in the cluster; no `helm` or `kubectl` from laptops or the pipeline, drift put back automatically, and the deploy identity no longer needs admin rights (entries 35, 53) | — |
-| Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
+**In one line:** the plan after the bootcamp, grouped by topic, the most important first in each group. Every item says why it matters and where the log explains it.
+
+### 1. Who may do what: identities and logins
+
+- **Grafana login through Entra ID** (#17). Today Grafana has one local `admin` user with a strong password from Key Vault (entry 52), but no multi-factor login, one shared account, and its login page is on the internet. The plan: an app registration in Entra ID with three roles (Viewer, Editor, Admin) and "assignment required", so only invited people get in; Grafana signs in to Entra ID with Workload Identity, so there is no client secret; then Grafana's own login form and basic login are switched off. Proof for a demo: a classmate's account is refused. Risk: the tenant is shared, so creating the app registration may need rights from the tenant's admins.
+- **AKS with Entra ID and Kubernetes RBAC** (entries 35, 54). Today `az aks get-credentials` gives an admin certificate, to my laptop and to the pipeline's deploy job. With Entra ID, a kubeconfig holds no secret, only a short-lived token tied to a login with MFA; rights like `pods/portforward` go only to an admin group, granted just in time (Entra PIM); and audit logs show who did what.
+- **Roles for the app's own users** (finding F1, accepted). Every new account is an admin today: a demo shortcut. New accounts should start as normal users, with admins set up separately; later a real identity service (Keycloak or Entra External ID) instead of the app's own passwords.
+
+### 2. The supply chain: what gets built and what may run
+
+- **GitOps with Argo CD or Flux** (entries 35, 53). A controller in the cluster installs the platform charts and the app from git; no `helm` or `kubectl` from laptops or the pipeline. Changes made by hand are put back automatically, and the deploy identity no longer needs any rights on the cluster.
+- **Signed images, checked before they start.** The pipeline signs each image (for example with Sigstore's cosign); an admission controller in the cluster (for example Kyverno) refuses images without a valid signature. Pinning by digest proves "these bytes"; a signature also proves "built by our pipeline" ("Can a security tool be trusted?", Part 9).
+- **Fail the build on an end-of-life base image or runtime,** whatever its CVE count (entry 45).
+- **A newer MongoDB image:** its Go 1.24.6 (1 CRITICAL), `apt` and `js-yaml` have fixed versions (entry 64).
+- **Major upgrades,** each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS.
+
+### 3. The network and the cluster's insides
+
+- **Network rules for `trivy-system`:** scan jobs may reach only DNS and HTTPS on the internet, nothing in the cluster ("Can a security tool be trusted?", fix 2).
+- **Network rules for `gateway` and `monitoring`,** which have none yet: default deny, then only the paths they use, as in `restauranty` (#11).
+- **Name the hosts `items` may call** (Cloudinary only), instead of "any public address on 443": Cilium's FQDN rules, which on AKS come with Advanced Container Networking Services (`k8s/network/policies.yaml`).
+- **Narrow the Prometheus Operator's rights:** its ClusterRole can still change Secrets in every namespace; Roles per namespace would close that (entry 51).
+- **Detect attacks inside running containers** with Falco (#18): for example a shell opened in a container, or a sensitive file read.
+
+### 4. Seeing and responding
+
+- **Alerts from the logs:** Loki's rule engine (the "ruler"), connected to Alertmanager, for the day-one leak (any 403 on the user list) and the Gateway's own 5xx (entry 62).
+- **Secret rotation under load, with a runbook** (#16): a new MongoDB password while k6 runs, with zero failed requests; a written procedure for "a secret leaked: now what?".
+- **Security headers** at the Gateway or in nginx (ZAP's warnings, entry 42).
+
+### 5. Reliability (outside this project's security focus)
+
+- **Spread the app pods over all 3 nodes and zones,** with a strict spread rule (`DoNotSchedule`) or the descheduler, and a second Gateway pod: after a cluster start, all app pods ran on one node (entry 47).
+- **A readiness check that asks MongoDB's state:** fast errors instead of 10-second waits (entry 46).
+- **MongoDB as a replica set,** for high availability.
+
+### 6. Developer comfort
+
+- **docker-compose for local development** (#1).
