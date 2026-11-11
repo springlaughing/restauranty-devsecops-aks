@@ -3670,7 +3670,7 @@ The Secret `grafana-admin` then held exactly two keys, `admin-password` and `adm
 
 **In one line:** the monitoring tools are installed with Helm in seven steps, the backends become scrape targets, Grafana is published through the Gateway, and one network rule opens for Prometheus. Two surprises in step 5, both about names and rights.
 
-**State:** steps 3 to 5 done (kube-prometheus-stack runs). Steps 6 to 9 follow.
+**State:** steps 3 to 6 done (kube-prometheus-stack and Loki run). Steps 7 to 9 follow.
 
 **The steps,** after entry 52. The setup script does the same in its step 7.
 
@@ -3794,6 +3794,21 @@ prometheus-kps-kube-prometheus-stack-prometheus-0       2/2     Running   0
 ```
 
 **What the two surprises teach.** First, removing a right can break a default that relied on it. The 403 also proved that the narrowed rights are really enforced. Second, `STATUS: deployed` does not mean "healthy". `--wait` checks that each pod became ready once. A helper that starts failing after that is not caught. The READY column, `2/3`, showed it.
+
+**Step 6: Loki.** Installed on the first try, with one warning:
+
+```
+$ helm upgrade --install loki grafana/loki --version 7.6.0 -n monitoring -f k8s/monitoring/loki-values.yaml --wait --timeout=10m
+Warning: would violate PodSecurity "restricted:latest": seccompProfile (pod or container "loki"
+  must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+STATUS: deployed
+
+$ kubectl get pods,pvc -n monitoring        (shortened)
+pod/loki-0                         1/1     Running   0          70s
+persistentvolumeclaim/storage-loki-0   Bound   10Gi   RWO   managed-csi-zrs
+```
+
+The warning comes from the namespace label `warn: restricted` (entry 50): Kubernetes reports a pod that misses the strictest profile, but admits it, because only `baseline` is enforced. The setting Loki's chart leaves out is **seccomp**, a Linux filter that limits which system calls (requests to the kernel) a container may make. `RuntimeDefault` blocks the rarely used, risky ones. The app pods in `restauranty` have it, because there "restricted" is enforced. For Loki it is a small fix in the values file, noted for later.
 
 ---
 
