@@ -4997,11 +4997,16 @@ Its limit: it lists what the build tools **declared**. Something copied into an 
 
 **The hash: "is it exactly that, unchanged?"** A hash is a fingerprint of some bytes, computed by a fixed formula such as SHA-256 or SHA-512. The same bytes always give the same fingerprint; change a single bit and the fingerprint is completely different. And nobody can make different bytes with a chosen fingerprint. So comparing fingerprints proves that two things are exactly the same.
 
-This project checks hashes in four places:
+This project checks hashes in four places. The first needs two words explained:
+
+- **npm** is the package manager of Node.js: it downloads the libraries an app uses (express, mongoose, …) from the public npm registry.
+- **`package-lock.json`** is a file in each app folder that pins every library to an exact version, with the address to download it and a hash of the file.
+- **`npm ci`** is the command that installs exactly what `package-lock.json` lists, nothing newer, and checks each downloaded file against its hash. It runs twice for every build: in the pipeline's build job, before the tests (`ci-cd.yaml`), and inside each Dockerfile, while the image is built (`RUN npm ci …`). So every library that ends up in an image has passed this check.
+
 
 | Where | What is hashed | Who compares |
 | --- | --- | --- |
-| `package-lock.json`, field `integrity` (entry 30) | each npm package | `npm ci` refuses a package whose content does not match |
+| `package-lock.json`, field `integrity` (entry 30) | each npm package | `npm ci`, in the pipeline and in the Dockerfile, refuses a package whose content does not match |
 | image digests, `client@sha256:…` (entry 41) | a whole image | Kubernetes pulls exactly that image |
 | action pins, `checkout@3d3c42e5…` (Part 9, "Pinning") | a version of an action's code | GitHub runs exactly that commit |
 | the k6 key's fingerprint, `C5AD…1D69` (entry 60) | a signing key | I compare it before `apt` trusts the key |
@@ -5016,7 +5021,7 @@ The real lock-file entry for express in `auth`:
 }
 ```
 
-Name, version and the place to download it, as in an SBOM, plus `integrity`: the SHA-512 fingerprint of that exact package file. If anyone replaced the file on the registry with different content under the same version number, `npm ci` would compute a different fingerprint and stop.
+Name, version and the place to download it, as in an SBOM, plus `integrity`: the SHA-512 fingerprint of that exact package file. If anyone replaced the file on the npm registry with different content under the same version number, `npm ci` would compute a different fingerprint while downloading it, and the build would stop with an error: in the pipeline, the image would never be built.
 
 **How the two fit together.**
 
