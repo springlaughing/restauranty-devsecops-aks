@@ -118,6 +118,9 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [55. Retest on AKS: F18 is fixed, and a latency number that was made up](#55-retest-on-aks-f18-is-fixed-and-a-latency-number-that-was-made-up)
 - [Part 12 — alerts](#part-12--alerts)
   - [56. Slack: a channel for the alerts, and its webhook in Key Vault](#56-slack-a-channel-for-the-alerts-and-its-webhook-in-key-vault)
+  - [57. Alertmanager: where the alerts go](#57-alertmanager-where-the-alerts-go)
+  - [58. The alert rules](#58-the-alert-rules)
+  - [59. Applying the alerts, and a test message to Slack](#59-applying-the-alerts-and-a-test-message-to-slack)
 - [What is next](#what-is-next)
 
 ---
@@ -4256,6 +4259,13 @@ The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside t
 
 **Goal:** a person learns about an attack or an outage without watching the dashboard: Alertmanager sends a message to Slack. Then a k6 password-guessing run shows it working. Issue #15, branch `15-alerts`.
 
+**What this part sets up, in order:**
+
+1. **A Slack channel** for the alerts, and its webhook in Key Vault (entry 56).
+2. **Where alerts go:** Alertmanager's route to Slack, with its own Azure identity (entry 57).
+3. **When alerts fire:** nine rules for attacks, the app and MongoDB, each with its code and the reason for its threshold (entry 58).
+4. **Applying and testing** them, with a test message to Slack (entry 59).
+
 ### 56. Slack: a channel for the alerts, and its webhook in Key Vault
 
 **In one line:** alerts go to the Slack channel `#restauranty-alerts` in my own workspace, through an "incoming webhook". The webhook's address is a secret, so it went straight into Key Vault without appearing on screen, in a file or in the shell history.
@@ -4304,6 +4314,351 @@ az keyvault secret show --vault-name kv-evgenia-restauranty -n alertmanager-slac
 The secret exists, and it is 82 characters long: the URL (81) plus the line break that `-o tsv` adds. An empty paste would have given 1. Checking a **property** of a secret (does it exist, how long is it) instead of looking at it is a habit worth keeping, in scripts too.
 
 **Next:** Alertmanager needs to read this one secret. The same pattern as Grafana's password (entry 52): its own Azure identity with a role on `alertmanager-slack-webhook` only, a ServiceAccount, a SecretStore and an ExternalSecret.
+
+### 57. Alertmanager: where the alerts go
+
+**In one line:** Alertmanager, already installed with kube-prometheus-stack (entry 53), gets a route to Slack: this project's alerts go to `#restauranty-alerts`, everything else stays in Alertmanager and Grafana. The webhook comes from Key Vault through Alertmanager's own Azure identity, and Alertmanager reads it as a file, so it is never part of any configuration.
+
+**What this step adds:**
+
+- In Azure: an identity for Alertmanager that may read one Key Vault secret, `alertmanager-slack-webhook` (`terraform/cluster-access/variables.tf`).
+- In the cluster: the Secret `alertmanager-slack`, filled from Key Vault by External Secrets (`k8s/monitoring/alertmanager-secrets.yaml`).
+- In Alertmanager's settings: where alerts go, how they are grouped, and what the Slack message says (`k8s/monitoring/kube-prometheus-stack-values.yaml`, section `alertmanager`).
+- In the setup script: the same, for every rebuild (`scripts/setup-aks.sh`, steps 5 and 7).
+
+**How an alert travels:**
+
+```
+Prometheus checks each rule every 30 s
+   │  the rule's query returns something, for longer than its "for:" time
+   ▼
+the alert "fires" ──> Alertmanager: which route? group it, wait 30 s for more of the same
+                          │
+                          ├── label project=restauranty ──> Slack, #restauranty-alerts
+                          └── anything else ─────────────> "null": nobody is sent anything,
+                                                            the alert is still visible in
+                                                            Alertmanager and Grafana
+```
+
+Prometheus decides **whether** something is wrong (the rules, entry 58). Alertmanager decides **who hears about it, and how often**.
+
+#### The Azure side: Alertmanager's own identity
+
+The same pattern as Grafana's password (entry 52). Two lines in `terraform/cluster-access/variables.tf`:
+
+```hcl
+variable "workload_secrets" {
+  default = {
+    # ... auth, discounts, items, mongodb, grafana as before
+    alertmanager = ["alertmanager-slack-webhook"] # where alerts are sent (#15), in the monitoring namespace
+  }
+}
+variable "workload_namespaces" {
+  default = {
+    grafana      = "monitoring"
+    alertmanager = "monitoring"
+  }
+}
+```
+
+The first line creates an identity named after the workload and gives it the role "Key Vault Secrets User" on that **one** secret. The second line says its ServiceAccount lives in `monitoring`, not in `restauranty`.
+
+```bash
+cd terraform/cluster-access && terraform apply && cd ../..
+```
+
+```
+Apply complete! Resources: 3 added, 0 changed, 0 destroyed.
+workload_client_ids = {
+  "alertmanager" = "1eff89d5-b19c-4b51-812e-5646c33ea6f2"
+  ...
+}
+```
+
+The three new resources: the identity, its trust rule for `system:serviceaccount:monitoring:alertmanager`, and the role on the secret. Nothing else changed.
+
+**Why not share Grafana's identity?** Grafana is on the internet. If someone took it over, they would get what Grafana's identity may read. With a shared identity that would include the Slack webhook, and with it they could post a fake "all clear" during an attack. One identity per workload keeps a break-in limited to that workload's own secrets, like `auth` and `items` in #8.
+
+#### The secret: from Key Vault to a file
+
+`k8s/monitoring/alertmanager-secrets.yaml` holds the same three objects as Grafana's file (entry 52):
+
+1. The **ServiceAccount** `alertmanager`, with the annotation `azure.workload.identity/client-id: 1eff89d5-…`: "I stand for Alertmanager's Azure identity". This time the real client id was in the file before anything was applied: the placeholder mistake of entry 52 could not happen again.
+2. The **SecretStore** `alertmanager`: "use Key Vault, signed in as the ServiceAccount `alertmanager`".
+3. The **ExternalSecret** `alertmanager-slack`: "write the Secret `alertmanager-slack` with the key `webhook-url`, from the Key Vault secret `alertmanager-slack-webhook`".
+
+Before writing the file, the name `alertmanager` was checked against every object the chart creates in `monitoring` (the lesson of entry 53, surprise 1): only a label used that word, no object.
+
+Alertmanager gets the Secret as a file. In the values file:
+
+```yaml
+alertmanager:
+  alertmanagerSpec:
+    secrets:
+      - alertmanager-slack     # mounted at /etc/alertmanager/secrets/alertmanager-slack/
+```
+
+and its Slack setting names only that file: `api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url`. The other way, `api_url: https://hooks.slack.com/...`, would put the URL into Alertmanager's configuration, which comes from the Helm values. Then the URL would have to be in the values file (in git) or be passed in by hand on every install, and the operator would keep one more copy of it in a Kubernetes Secret. With a file, the configuration contains only a path, and the URL exists in two places only: Key Vault and the Secret that External Secrets keeps in sync with it.
+
+#### The routing, line by line
+
+The `alertmanager.config` section of `k8s/monitoring/kube-prometheus-stack-values.yaml`:
+
+```yaml
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: "null"
+      group_by: [alertname, job]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - receiver: slack
+          matchers:
+            - project = "restauranty"
+    receivers:
+      - name: "null"
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#restauranty-alerts"
+            send_resolved: true
+            title: '{{ if eq .Status "firing" }}:rotating_light:{{ else }}:white_check_mark:{{ end }} {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+            text: >-
+              {{ range .Alerts }}*{{ .Annotations.summary }}*
+              {{ .Annotations.description }}
+              {{ end }}
+              <https://grafana.aks.springlaughing.dev/d/restauranty|Open the dashboard>
+```
+
+- `resolve_timeout: 5m`: an alert that Prometheus stops reporting counts as over after 5 minutes.
+- `route` is a tree. The top says: by default, send to the receiver `"null"`, which sends nothing.
+- `routes` has one branch: alerts with the label `project="restauranty"` go to the receiver `slack`. Only the rules of this project carry that label (entry 58).
+- `group_by: [alertname, job]`: alerts with the same name and the same service become one message. Ten "refused tokens" alerts for `items` make one Slack message, not ten.
+- `group_wait: 30s`: after the first alert of a group, wait 30 seconds for more of the same, then send. That is why a test message arrives about half a minute late.
+- `group_interval: 5m`: news about a group already sent (a new alert in it, or one that ended) at most every 5 minutes.
+- `repeat_interval: 4h`: if an alert is still firing, remind every 4 hours, so it is not forgotten, but not every minute either.
+- `receivers` lists the two places alerts can go: `"null"` (nowhere) and `slack`.
+- `api_url_file` and `channel`: the webhook, read from the file, and the channel it posts to.
+- `send_resolved: true`: a second message when the alert is over, with a different symbol.
+- `title`: :rotating_light: and the rule's name and severity while it fires, :white_check_mark: when it is over. The `{{ }}` parts are Go templates that Alertmanager fills in for each message.
+- `text`: for each alert in the group, its summary in bold and its description, then a link to the dashboard. **No IP addresses**: the rules' texts carry counts and service names only. Slack keeps messages for a long time, outside my control; the details stay in Grafana, behind its login (entry 56).
+
+**Why the chart's standard alerts do not go to Slack.** kube-prometheus-stack brings about 100 rules about Kubernetes itself: a pod that restarts often, a node short of memory, a certificate about to expire. They are useful, but some fire on a small demo cluster for harmless reasons, and in a demo every message in the channel should be about the app. They still fire, and they are visible in Alertmanager's page and in Grafana's alert list. A real team would send them to a second channel for the platform.
+
+**Checked before applying,** on the laptop: the chart was rendered with `helm template`, and the configuration it produces was read back.
+
+```
+route receiver: null | sub-routes: [{'matchers': ['project = "restauranty"'], 'receiver': 'slack'}]
+slack api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url | channel: #restauranty-alerts
+title kept as template: True
+Alertmanager secrets mounted: ['alertmanager-slack']
+```
+
+"Title kept as template" matters: Helm also uses `{{ }}`, and could have tried to fill these in itself. It does not here, so Alertmanager receives them unchanged. Alertmanager's own checker, `amtool`, could not run on the laptop (no Docker, and downloading binaries was not allowed in this session); Alertmanager checks the configuration itself when it loads it (entry 59).
+
+**The setup script** (`scripts/setup-aks.sh`):
+
+- Step 5 stops with a message if `alertmanager-slack-webhook` is missing in Key Vault. The script cannot create it: the webhook is made in Slack (entry 56). Without it, Alertmanager's pod could not start, because the Secret it mounts would not exist.
+- Step 7 applies `alertmanager-secrets.yaml` together with Grafana's secret file and waits for both, before installing the chart. At the end it applies `alert-rules.yaml`, which needs the PrometheusRule type that the chart adds.
+
+### 58. The alert rules
+
+**In one line:** nine rules in three groups (attacks, the app, MongoDB), in `k8s/monitoring/alert-rules.yaml`. Each one has a reason for its threshold, and none puts an IP address into an alert.
+
+**How a rule works.** The file is a **PrometheusRule**, an object type of the Prometheus Operator (entry 53). The operator hands its rules to Prometheus, which checks each one every 30 seconds. A rule has four parts:
+
+- `expr`: a PromQL query. If it returns nothing, all is well. If it returns a value, something is wrong.
+- `for`: how long it must stay wrong before the alert fires. Before that, the alert is "pending". This keeps a single odd minute from waking anyone.
+- `labels`: `project: restauranty`, so Alertmanager routes it to Slack (entry 57), and `severity`:
+  - `critical`: the app or its data is in danger now.
+  - `warning`: someone should look soon; an attack, or a trend.
+- `annotations`: the texts of the Slack message, `summary` and `description`. `{{ $value }}` is the number the query returned, `{{ $labels.job }}` the service.
+
+The rules use only numbers the system already has: the backends' metrics code (entries 48, 49, 54), the kubelet, and kube-state-metrics.
+
+#### Group 1: attacks
+
+**RestaurantyLoginGuessing: someone is guessing passwords.**
+
+```yaml
+- alert: RestaurantyLoginGuessing
+  expr: sum(increase(http_requests_total{job="auth", route="/api/auth/login", statusCode="401"}[5m])) > 20
+  for: 1m
+  labels: { project: restauranty, severity: warning }
+```
+
+The query counts the failed logins of the last 5 minutes: answers 401 from `auth` on the login route. The threshold comes from the Gateway's login limit (entry 27): one IP address may try 10 logins per minute, plus a burst of 5. So one attacker makes about 15 wrong guesses in the first minute and 10 per minute after that, and crosses 20 within about 2 minutes. A person who mistyped a password a few times never gets close. The first guesses are counted too, because the login counters start at 0 (entry 54).
+
+**RestaurantyRefusedTokens: someone calls the API without a valid login.**
+
+```yaml
+- alert: RestaurantyRefusedTokens
+  expr: sum by (job) (increase(http_requests_total{route="no_route", statusCode="401"}[5m])) > 50
+  for: 1m
+  labels: { project: restauranty, severity: warning }
+```
+
+Requests to a protected route with no token, an expired one or a forged one are refused before they reach a route, so they are counted as `no_route` with 401 (entry 48). More than 50 in 5 minutes, per service, means someone is probing the API or trying forged tokens. The F18 retest (entry 55) made 200 such requests in about a minute: it would have fired. In the metrics, a missing token and a forged one look the same; the backends' logs in Loki tell them apart.
+
+**RestaurantyMetricsGrowing: F18's second guard.**
+
+```yaml
+- alert: RestaurantyMetricsGrowing
+  expr: max by (job) (scrape_samples_scraped{job=~"auth|discounts|items"}) > 700
+  for: 5m
+  labels: { project: restauranty, severity: warning }
+```
+
+`scrape_samples_scraped` is how many series Prometheus received from a backend in its last scrape. Normal is 150 to 170 (entry 55). At 1,000, Prometheus throws the scrape away (`sampleLimit`, entry 53) and that backend goes dark on every dashboard. The alert warns at 700, before that happens. If it fires, a label is probably taking values from visitors again: F18 coming back with some future change.
+
+#### Group 2: the app
+
+**RestaurantyServerErrors: a backend is broken.**
+
+```yaml
+- alert: RestaurantyServerErrors
+  expr: |
+    sum by (job) (rate(http_requests_total{job=~"auth|discounts|items", statusCode=~"5.."}[5m]))
+      / sum by (job) (rate(http_requests_total{job=~"auth|discounts|items"}[5m])) > 0.05
+  for: 5m
+  labels: { project: restauranty, severity: critical }
+```
+
+The share of answers with status 500 to 599, per service: server errors divided by all answers. More than 5% for 5 minutes. A share and not a count, because a busy service may have a few errors without anything being broken. Since the code fix of entry 4, attacks get 401, not 500, so this alert fires for real failures, not for every attack: that was the reason for the fix.
+
+**RestaurantyBackendPodDown: one copy of a backend does not answer.**
+
+```yaml
+- alert: RestaurantyBackendPodDown
+  expr: up{job=~"auth|discounts|items"} == 0
+  for: 2m
+  labels: { project: restauranty, severity: warning }
+```
+
+`up` is the metric Prometheus makes by itself for every target: 1 if the last scrape worked, 0 if not (entry 54). One pod at 0 for 2 minutes: crashed, stuck, or cut off by a network rule. Only a warning, because the second copy still serves users.
+
+**RestaurantyServiceDown: a whole service has no ready pod.**
+
+```yaml
+- alert: RestaurantyServiceDown
+  expr: kube_deployment_status_replicas_available{namespace="restauranty"} == 0
+  for: 2m
+  labels: { project: restauranty, severity: critical }
+```
+
+From kube-state-metrics: how many pods of a Deployment are ready. Zero means every request to that service fails right now: critical. This rule uses Kubernetes' view, not Prometheus's scrapes, so it also fires when the pods are gone entirely and there is nothing left to scrape.
+
+#### Group 3: MongoDB
+
+**RestaurantyMongoDisconnected: a backend has lost its database.**
+
+```yaml
+- alert: RestaurantyMongoDisconnected
+  expr: min by (job) (mongo_connection_status) == 0
+  for: 2m
+  labels: { project: restauranty, severity: critical }
+```
+
+Each backend reports 1 while it is connected to MongoDB and 0 when the connection is lost. Since #28, a backend whose **first** connection fails exits and Kubernetes restarts it (entry 46). This alert catches what a restart cannot fix: MongoDB itself down, a wrong password, a network rule in the way.
+
+**RestaurantyMongoDown: MongoDB is not ready.**
+
+```yaml
+- alert: RestaurantyMongoDown
+  expr: kube_statefulset_status_replicas_ready{namespace="restauranty", statefulset="mongodb"} < 1
+  for: 2m
+  labels: { project: restauranty, severity: critical }
+```
+
+From kube-state-metrics: the MongoDB pod is not ready. Together with the rule above, it tells whether the problem is MongoDB itself or the path to it.
+
+**RestaurantyMongoDiskFilling: MongoDB's disk is filling up.**
+
+```yaml
+- alert: RestaurantyMongoDiskFilling
+  expr: |
+    kubelet_volume_stats_available_bytes{namespace="restauranty"}
+      / kubelet_volume_stats_capacity_bytes{namespace="restauranty"} < 0.20
+  for: 10m
+  labels: { project: restauranty, severity: warning }
+```
+
+Free space divided by size, for every disk (PersistentVolumeClaim) in `restauranty`; today that is only MongoDB's. Less than 20% free for 10 minutes. The kubelet reports these numbers, which is why node-exporter was not needed for this (entry 50). A full disk stops MongoDB from writing; the disk can be made bigger (`allowVolumeExpansion` in the storage class), but only after someone acts, so the alert comes early.
+
+#### What the rules do not cover
+
+- **Requests refused at the Gateway** (403 for the user list, 429 over a limit). They never reach a backend, so the backends' metrics do not see them; only the Gateway's log in Loki does. An alert on a log needs Loki's own rule engine (the "ruler") or Grafana's alerting; neither is set up. The dashboard shows them ("Login attempts at the Gateway", "Gateway answers by status").
+- **Vulnerabilities in the running images.** Planned with the Trivy Operator, as its own rule.
+- **A missing token vs a forged one.** The same in the metrics (above).
+
+### 59. Applying the alerts, and a test message to Slack
+
+**In one line:** six commands bring the secret, the routing and the rules to the cluster; one more sends a test alert straight to Alertmanager, to prove the route to Slack works before any real alert fires.
+
+**State:** commands written and explained; the results are added below them as they come in.
+
+**1. Alertmanager's webhook from Key Vault.**
+
+```bash
+kubectl apply -f k8s/monitoring/alertmanager-secrets.yaml
+kubectl wait externalsecret/alertmanager-slack -n monitoring --for=condition=Ready --timeout=3m
+kubectl get secretstore alertmanager -n monitoring
+```
+
+`apply` creates the ServiceAccount, the SecretStore and the ExternalSecret (entry 57). `wait` blocks until External Secrets reports that it has written the Secret, or gives up after 3 minutes. The last command shows the SecretStore's status: `Valid` means the sign-in to Key Vault as Alertmanager's identity works. Success: `condition met`, and `STATUS Valid`.
+
+**2. Ask whether the rules are valid, without applying them.**
+
+```bash
+kubectl apply --dry-run=server -f k8s/monitoring/alert-rules.yaml
+```
+
+`--dry-run=server` sends the file to the cluster, which runs every check, including the Prometheus Operator's admission webhook (a check that runs before an object is saved), and then throws the object away. That webhook parses the PromQL of every rule. Without this step, a typo in a query would be stored as plain text, and Prometheus would quietly skip the broken rule: the same "looks deployed, does not work" trap as Grafana's 2/3 in entry 53. Success: `prometheusrule.monitoring.coreos.com/restauranty created (server dry run)`.
+
+**3. Alertmanager with the route to Slack.**
+
+```bash
+helm upgrade --install kps prometheus-community/kube-prometheus-stack --version 93.2.0 \
+  -n monitoring -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
+```
+
+The same command as in entry 53, step 3: Helm compares the new values with what runs and changes only the difference. Here that is Alertmanager's configuration and its pod, which restarts once to mount the Secret `alertmanager-slack`. That is also why step 1 comes first: a pod that mounts a missing Secret cannot start. Success: `STATUS: deployed`.
+
+**4. The rules, for real.**
+
+```bash
+kubectl apply -f k8s/monitoring/alert-rules.yaml
+```
+
+Success: `prometheusrule.monitoring.coreos.com/restauranty created`. Within about a minute, Prometheus loads the nine rules.
+
+**5. Did Alertmanager load the new configuration?**
+
+```bash
+kubectl get pods -n monitoring -l app.kubernetes.io/name=alertmanager
+kubectl logs -n monitoring alertmanager-kps-kube-prometheus-stack-alertmanager-0 -c alertmanager --tail=5
+```
+
+The pod should be `2/2 Running`: Alertmanager, plus a helper that reloads it when its configuration changes. Alertmanager checks its configuration when it loads it; a wrong setting shows as an error in its log, and the old configuration stays. Success: a line `Completed loading of configuration file` and no `error`.
+
+**6. A test message to Slack.**
+
+```bash
+kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-alertmanager 9093:9093 >/dev/null &
+sleep 3
+curl -s -XPOST localhost:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{
+  "labels": {"alertname":"RestaurantyTest","project":"restauranty","severity":"warning","job":"test"},
+  "annotations": {"summary":"Test alert","description":"If this is in Slack, the route and the webhook work."}}]' \
+  && echo "sent"
+kill %1
+```
+
+A tunnel to Alertmanager (like the one to Prometheus in entry 54), then a hand-made alert sent to Alertmanager's API, the same way Prometheus sends real ones. It skips Prometheus and the rules on purpose: it tests only the second half of the path, routing and Slack. The alert carries `project: restauranty`, so it should take the route to Slack. The `labels` are what Alertmanager routes and groups by; the `annotations` fill the message.
+
+Success: about 30 seconds later (`group_wait`), `#restauranty-alerts` shows ":rotating_light: RestaurantyTest (warning)" with the text and the dashboard link. About 5 minutes later (`resolve_timeout`, since nobody sends this alert again), a second message with :white_check_mark: says it is over.
 
 ---
 
