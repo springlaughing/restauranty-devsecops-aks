@@ -36,6 +36,15 @@ const httpRequestsCounter = new client.Counter({
   labelNames: ['method', 'route', 'statusCode'],
 });
 
+// The login counters start at 0 when the service starts. Prometheus sees a
+// rise only between two scrapes. Without this, the counter for "login, 401"
+// would first appear with the value 1 (made by the first failed login), and
+// Prometheus would see no rise: the first failed logins of an attack would be
+// missing from the dashboard and from the alert (#15).
+for (const statusCode of ['200', '401']) {
+  httpRequestsCounter.labels('POST', '/api/auth/login', statusCode).inc(0);
+}
+
 // How long each request takes, for the latency panels (p95 per service).
 // Labels: method and route only. Each label multiplies the number of series by
 // its number of values, and a histogram already has one series per bucket.
