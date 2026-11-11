@@ -36,6 +36,16 @@ const httpRequestsCounter = new client.Counter({
   labelNames: ['method', 'route', 'statusCode'],
 });
 
+// How long each request takes, for the latency panels (p95 per service).
+// Labels: method and route only. Each label multiplies the number of series by
+// its number of values, and a histogram already has one series per bucket.
+const httpRequestDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Time from request to response, in seconds',
+  labelNames: ['method', 'route'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10],
+});
+
 // The "route" label is the route pattern from the code, such as
 // /api/items/items/:id, never the URL the visitor sent. Every different label
 // value is a new time series in Prometheus's memory: with the raw URL, each
@@ -64,6 +74,7 @@ function routePattern(req) {
 // Express middleware to update both HTTP requests counters.
 function httpMetricsMiddleware(req, res, next) {
   const pattern = routePattern(req);
+  const endTimer = httpRequestDuration.startTimer();
   res.on('finish', () => {
     const method = req.method;
     const route = pattern();
@@ -71,6 +82,7 @@ function httpMetricsMiddleware(req, res, next) {
 
     // Increment the detailed counter.
     httpRequestsCounter.labels(method, route, statusCode).inc();
+    endTimer({ method, route });
 
     // Increment the overall counter.
     totalHttpRequestsCounter.inc();
