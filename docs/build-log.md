@@ -129,7 +129,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [63. Trivy Operator: the design, and three rights checked](#63-trivy-operator-the-design-and-three-rights-checked)
   - [64. The scanner checked: three corrections in one evening](#64-the-scanner-checked-three-corrections-in-one-evening)
   - [Can a security tool be trusted?](#can-a-security-tool-be-trusted)
-  - [65. Trusting the scanner: pinned images, and what a poisoned Trivy could do here](#65-trusting-the-scanner-pinned-images-and-what-a-poisoned-trivy-could-do-here)
+  - [65. Pinning the scanner: both Trivy images by digest](#65-pinning-the-scanner-both-trivy-images-by-digest)
 - [What is next](#what-is-next)
 
 ---
@@ -2791,6 +2791,24 @@ Each pull request is normal: it goes through every gate before it can be merged.
 
 **The real case.** A label can be changed to point somewhere else. That's what the attackers did on 19 March 2026. With stolen credentials of the Trivy project, they changed the labels (76 of the 77 version tags of the Trivy GitHub Action, `aquasecurity/trivy-action`) so they pointed to new code they had written themselves, code that read the secrets of every pipeline that ran it. The label still said `0.28.0`. Nothing looked different. But every pipeline using that name now ran the attackers' code. They also published a poisoned Trivy release, v0.69.4, for about 3 hours. Poisoned Docker images followed on 22 and 23 March. It is tracked as CVE-2026-33634, rated critical, and is on CISA's list of vulnerabilities used in real attacks. Pipelines that named the action by commit SHA kept running the old, clean code. ([StepSecurity](https://www.stepsecurity.io/blog/trivy-compromised-a-second-time---malicious-v0-69-4-release), [Endor Labs](https://www.endorlabs.com/vulnerability/cve-2026-33634), [CVE record](https://cveawg.mitre.org/api/cve/CVE-2026-33634))
 
+**What should have been done?** Two groups had something to do.
+
+The **publisher**, the Trivy project, could have:
+
+1. **Protected the keys to publishing.** The attackers used stolen credentials. Publishing with short-lived tokens (OIDC, as this project's pipeline does for Azure) instead of long-lived passwords or tokens leaves nothing lasting to steal. Two-factor login with hardware keys for the maintainers helps too.
+2. **Made version labels unchangeable.** GitHub can refuse changes to tags (tag rules) and offers "immutable releases", which cannot be changed once published. With those, a stolen login still could not point `0.28.0` at new code.
+3. **Signed what it publishes.** If every release and image is signed (for example with Sigstore's cosign), users can check the signature before running it, and a poisoned image without a valid signature is refused.
+4. **Watched its own tags.** 76 tags changing at once is a loud signal, if someone is listening.
+
+The **users** of Trivy could have:
+
+1. **Named the action by commit SHA, and images by digest.** That alone kept them safe: the rest of this section.
+2. **Waited before adopting a new version.** Poisoned releases are usually found within hours or days. This project's rule: at least a week old.
+3. **Given the job that runs a tool as few secrets as possible.** The malware stole secrets; a job with nothing to steal loses nothing. In this pipeline, the scanner jobs have no Azure sign-in (no `id-token`), and no passwords are stored anywhere (OIDC, entry 30). Even a poisoned scanner would have found very little.
+4. **Verified signatures,** where the publisher signs.
+
+The same question for the Trivy Operator in the cluster: "Can a security tool be trusted?" (Part 12).
+
 | How a tool is named | Example | Can someone change what I get? |
 | --- | --- | --- |
 | A tag on an action | `trivy-action@0.28.0` | Yes. A tag is a label; the owner, or a thief, can point it to other code |
@@ -5257,30 +5275,45 @@ The nightly scan's 2 HIGH in the client's libxslt were still open in GitHub. But
 
 ### Can a security tool be trusted?
 
-**In one line:** not by default, and not because it is called a security tool. Trivy itself was attacked in March 2026. The answer is the same as for any other software: pin exactly what runs, give it only the rights it needs, and keep an independent check.
+**In one line:** not by default, and not because it is called a security tool. Trivy itself was attacked in March 2026. You can never fully trust it, but you can limit what it can do if it betrays you, and check that what runs is what you meant to run.
 
-**The question.** Trivy is supposed to protect. In March 2026 it was attacked successfully (Part 9, "Pinning"). And the Trivy Operator runs inside the cluster, with rights. Is it trustworthy?
+**The question.** Trivy is supposed to protect. In March 2026 it was attacked successfully (Part 9, "Pinning"). And the Trivy Operator runs inside the cluster, with rights. Is Trivy in the cluster trustworthy?
 
-**The honest answer.** No tool can be made fully trustworthy, security tools included. What can be decided is **how much damage it could do if it turned out to be bad**, and **whether what runs is what was meant to run**. That is "assume breach", applied to the defenders' own tools: the same thinking as entry 51, where five monitoring tools could read every Secret.
+**A check found a real gap.** The cluster pulls both Trivy images by tag, not by fingerprint:
+
+```
+mirror.gcr.io/aquasec/trivy-operator:0.36.1     ← the operator
+mirror.gcr.io/aquasec/trivy:0.76.1              ← the scanner in every scan job
+```
+
+That's the chart's default, and it has no setting for a digest. In March 2026, the attackers also published poisoned Trivy Docker images. The pipeline would have been safe, because it pins `aquasec/trivy:0.76.1@sha256:790fd66d…`. The cluster wouldn't have been: if those tags were changed, the next scan would pull whatever they point to. So on this point, the operator breaks the rule the pipeline follows.
+
+**What could a poisoned Trivy do in the cluster, today?** Thanks to the narrowing in entries 51 and 63, a lot less than with the chart's defaults:
+
+| A bad operator or scan job could… | Could not… |
+| --- | --- |
+| read the specs of workloads (image names, settings) | read Secrets anywhere except `trivy-system` (cluster-wide right removed) |
+| start pods in `trivy-system`, as root | use `nodes/proxy` (removed) or get host access (baseline refuses it) |
+| read the files of the app's images (code, which is public anyway) | get the running pods' secrets: scan jobs start the image fresh, without its Secrets, and with no Kubernetes token (`scanJobAutomountServiceAccountToken: false`) |
+| send data to the internet: `trivy-system` has no network rules | reach MongoDB or the backends: the rules in `restauranty` let only the backends, the Gateway and Prometheus in |
+
+**So the honest answer:** you can never fully trust it, but you can limit what it can do if it betrays you, and check that what runs is what you meant to run. Three fixes bring it in line with the rest of the project:
+
+1. **Pin both images by digest.** The chart has no digest setting, but the usual trick works: put the digest into the tag (`tag: "0.36.1@sha256:…"`), so the result reads `aquasec/trivy-operator:0.36.1@sha256:…`. For Trivy itself, the digest is the one the pipeline already pins; the operator's is looked up from the registry. This is the most important fix, because it closes the exact attack from March. **Done: entry 65.**
+2. **Network rules for `trivy-system`:** scan jobs may only reach HTTPS on the internet (to download Trivy's vulnerability database), and nothing inside the cluster. That's the same pattern as `items` → Cloudinary in #11. **Open: in "What is next".** The operator itself must still reach the Kubernetes API, and Prometheus must still reach the operator, so the rules need testing.
+3. **Keep the two independent scans.** If one scanner were poisoned or simply wrong, the other one disagrees. On 11 November that exact disagreement found two bugs in the scanner (entry 64). **Done.**
+
+This also fits the threat model: story 10, "a poisoned package or image", with the project's own security tool as the example. It's the classic question "who watches the watchers?", and the answer is: nobody fully, so give the watchers as little power as possible.
 
 **Security tools are high-value targets precisely because they're trusted and widely installed.** One poisoned scanner reaches thousands of pipelines and clusters at once, which is why attackers went after Trivy in the first place. The defenses are the same as for any dependency: pin what you run, give it the least rights it needs, and keep an independent check. Being a "security" tool earns it no exemption.
 
-### 65. Trusting the scanner: pinned images, and what a poisoned Trivy could do here
+### 65. Pinning the scanner: both Trivy images by digest
 
-**In one line:** the cluster pulled both Trivy images by version name, not by fingerprint, so an attack like the one of March 2026 would have reached it, while the pipeline would have been safe. Both are now pinned by digest. What a poisoned Trivy could still do is listed below, with the next fix.
+**In one line:** fix 1 of "Can a security tool be trusted?": the Trivy Operator and Trivy images are now named by digest, and both digests were checked against two registries and against the pipeline's own pin.
 
 **State:** pins committed; applied with the next `helm upgrade` of the operator.
 
-**The gap.** The chart names both images by tag, and has no setting for a digest:
-
-```
-mirror.gcr.io/aquasec/trivy-operator:0.36.1     the operator
-mirror.gcr.io/aquasec/trivy:0.76.1              the scanner in every scan job
-```
-
-In March 2026 the attackers did not only change the tags of the Trivy GitHub Action; they also published poisoned Trivy Docker images (Part 9). This project started later, but the question is the same for any future attack. The pipeline would be safe from it, because it names Trivy as `aquasec/trivy:0.76.1@sha256:790fd66d…`. The cluster would not: if the tag `0.76.1` were pointed at a poisoned image, the next scan job would pull and run it. On this point, the operator broke the rule the pipeline follows.
-
-**The fix: the digest goes into the tag.** A Docker image name may carry both, `<repository>:<tag>@sha256:<digest>`; the digest wins, and the tag is only there for people reading it. In `k8s/monitoring/trivy-operator-values.yaml`:
+**The change,** in `k8s/monitoring/trivy-operator-values.yaml`. A Docker image name may carry both a tag and a digest, `<repository>:<tag>@sha256:<digest>`; the digest wins, and the tag is only there for people reading it:
 
 ```yaml
 image:
@@ -5290,7 +5323,9 @@ trivy:
     tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
 ```
 
-The digests were not taken on trust either. Each was asked from two registries, Docker Hub and `mirror.gcr.io` (the copy of Docker Hub the chart uses), and they matched. Trivy's also matches the pin in `ci-cd.yaml`, so the cluster runs exactly the Trivy that the pipeline already trusts:
+Rendered, the operator's image line reads `mirror.gcr.io/aquasec/trivy-operator:0.36.1@sha256:05191a51…`, and the scan jobs' Trivy `mirror.gcr.io/aquasec/trivy:0.76.1@sha256:790fd66d…`.
+
+**The digests were not taken on trust either.** Each was asked from two registries: Docker Hub, and `mirror.gcr.io` (the copy of Docker Hub that the chart uses). They matched. Trivy's also matches the pin in `ci-cd.yaml`, so the cluster runs exactly the Trivy that the pipeline already trusts:
 
 ```
 aquasec/trivy-operator:0.36.1  docker.io=sha256:05191a51…  mirror.gcr.io=sha256:05191a51…
@@ -5298,24 +5333,7 @@ aquasec/trivy:0.76.1           docker.io=sha256:790fd66d…  mirror.gcr.io=sha25
 ci-cd.yaml:                    aquasec/trivy:0.76.1@sha256:790fd66d…
 ```
 
-The operator 0.36.1 was built on 29 October 2026 (its own start log says so), 13 days before: older than the pipeline's rule of "at least a week".
-
-**What a poisoned Trivy could do in this cluster, today.** Thanks to the narrowed rights (entries 51 and 63), much less than with the chart's defaults:
-
-| A bad operator or scan job could… | It could not… |
-| --- | --- |
-| read the settings of workloads (image names, environment variables written in the manifests) | read Secrets outside `trivy-system`: the cluster-wide right is off (entry 63, decision 2) |
-| start pods in `trivy-system`, as root | use `nodes/proxy`, or get host access: "baseline" refuses it |
-| read the files of the app's images (the code, which is public anyway) | get the running pods' secrets: a scan job starts the image fresh, without its Secrets, and without a Kubernetes token (`scanJobAutomountServiceAccountToken: false`) |
-| **send data to the internet**: `trivy-system` has no network rules | reach MongoDB or the backends: the rules in `restauranty` let in only the backends, the Gateway and Prometheus (#11) |
-
-**Three defenses, three states:**
-
-1. **Pin what runs.** Done above.
-2. **The least rights it needs.** Mostly done: the Secret right and `nodes/proxy` are off, the scope is one namespace. Open: **network rules for `trivy-system`**. Scan jobs need only DNS and HTTPS to the internet, to download Trivy's vulnerability database; nothing inside the cluster. That is the pattern of `items` → Cloudinary (#11). Not done this week: the operator itself must still reach the Kubernetes API, and Prometheus must reach the operator, so the rules need testing. In "What is next".
-3. **An independent check.** Done: the nightly scan in GitHub reads SBOMs, the operator reads files in the cluster. If one were poisoned or simply wrong, the other would disagree. Entry 64 is that disagreement at work: it found two mistakes in the scanner.
-
-**For the threat model (#3):** story 10, "a poisoned package or image", with the project's own security tool as the example. Who watches the watchers? Nobody fully; so the watchers get as little power as possible.
+The operator 0.36.1 was built on 29 October 2026 (its own start log says so), 13 days before: older than the pipeline's rule of "at least a week" (Part 9).
 
 ---
 
@@ -5330,7 +5348,7 @@ The operator 0.36.1 was built on 29 October 2026 (its own start log says so), 13
 | Reliability, outside this project's security focus: a readiness check that asks MongoDB's state (fast errors instead of 10 s waits, entry 46); MongoDB as a replica set for high availability | — |
 | Reliability: spread the app pods over all 3 nodes and zones. Today all of them run on one node (entry 47). Fix: a strict spread rule (`DoNotSchedule`) or the descheduler; a second Gateway pod | — |
 | Alerts from the logs: Loki's ruler, connected to Alertmanager, for the day-one leak (any 403 on the user list) and the Gateway's own 5xx (entry 62) | #15 |
-| Network rules for `trivy-system`: scan jobs may reach only DNS and HTTPS on the internet (for the vulnerability database), nothing in the cluster; the operator keeps the Kubernetes API, Prometheus keeps the operator (entry 65) | #15 |
+| Network rules for `trivy-system`: scan jobs may reach only DNS and HTTPS on the internet (for the vulnerability database), nothing in the cluster; the operator keeps the Kubernetes API, Prometheus keeps the operator ("Can a security tool be trusted?", fix 2) | #15 |
 | A newer MongoDB image: its Go 1.24.6 (1 CRITICAL), apt and js-yaml have fixed versions (entry 64) | — |
 | GitOps with Argo CD or Flux: platform charts and app manifests installed from git by a controller in the cluster; no `helm` or `kubectl` from laptops or the pipeline, drift put back automatically, and the deploy identity no longer needs admin rights (entries 35, 53) | — |
 | Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
