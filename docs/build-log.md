@@ -97,14 +97,23 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [46. Fix: a backend that cannot reach MongoDB at start exits, and Kubernetes restarts it](#46-fix-a-backend-that-cannot-reach-mongodb-at-start-exits-and-kubernetes-restarts-it)
   - [What #28 changes](#what-28-changes)
 - [Part 11 — monitoring](#part-11--monitoring)
-  - [47. Before monitoring: what runs in the cluster](#47-before-monitoring-what-runs-in-the-cluster)
-  - [48. Code fix: metrics labelled by route, not by URL (F18)](#48-code-fix-metrics-labelled-by-route-not-by-url-f18)
   - [How monitoring works: four questions, five tools](#how-monitoring-works-four-questions-five-tools)
-  - [49. Code: how long each request takes](#49-code-how-long-each-request-takes)
+  - [47. Before monitoring: what runs in the cluster](#47-before-monitoring-what-runs-in-the-cluster)
+  - [48. Backend code: count requests by route, not by URL (F18)](#48-backend-code-count-requests-by-route-not-by-url-f18)
+  - [49. Backend code: measure how long each request takes](#49-backend-code-measure-how-long-each-request-takes)
   - [50. Design: where each monitoring part runs, and what it may do](#50-design-where-each-monitoring-part-runs-and-what-it-may-do)
   - [51. Finding: five monitoring tools could read every Secret in the cluster](#51-finding-five-monitoring-tools-could-read-every-secret-in-the-cluster)
   - [52. Grafana's login from Key Vault](#52-grafanas-login-from-key-vault)
-  - [53. Install: Prometheus, Grafana, Loki and Alloy](#53-install-prometheus-grafana-loki-and-alloy)
+  - [53. Install, step by step: Prometheus, Grafana, Loki, Alloy](#53-install-step-by-step-prometheus-grafana-loki-alloy)
+    - [Step 1: the namespace](#step-1-the-namespace)
+    - [Step 2: Grafana's password](#step-2-grafanas-password)
+    - [Step 3: kube-prometheus-stack (Prometheus, Alertmanager, Grafana)](#step-3-kube-prometheus-stack-prometheus-alertmanager-grafana)
+    - [Step 4: Loki](#step-4-loki)
+    - [Step 5: Alloy](#step-5-alloy)
+    - [Hardening Alloy and Loki after the install](#hardening-alloy-and-loki-after-the-install)
+    - [Step 6: scrape targets, Grafana's address, the dashboard](#step-6-scrape-targets-grafanas-address-the-dashboard)
+    - [Step 7: network rule 6, Prometheus may scrape the backends](#step-7-network-rule-6-prometheus-may-scrape-the-backends)
+    - [The same steps in the setup script](#the-same-steps-in-the-setup-script)
 - [What is next](#what-is-next)
 
 ---
@@ -3213,6 +3222,52 @@ The 2 restarts are the fix at work: each one is a backend that found no MongoDB 
 
 **Goal:** see what happens in the cluster and in the app, and get an alert when someone attacks it. Issue #14, branch `14-monitoring`.
 
+**What this part sets up, in order:**
+
+1. **What already runs.** A look at every pod in the cluster before monitoring adds its own (entry 47).
+2. **The backends' numbers.** Our three backend services, `auth`, `discounts` and `items`, already publish numbers for Prometheus at `/metrics`. Two changes in their code make those numbers safe and complete: one stops visitors from creating endless new numbers (F18, entry 48), one adds how long each request takes (entry 49).
+3. **The design.** Which monitoring tools, where they run, and what they may access (entry 50).
+4. **A check before installing.** The tools' default rights, read from the charts: five could read every secret in the cluster (entry 51).
+5. **Grafana's password**, from Key Vault (entry 52).
+6. **The install, step by step:** the namespace, Prometheus with Grafana, Loki, Alloy, the scrape targets, the dashboard and one network rule, and where these commands live in the setup script (entry 53).
+
+The explainer below says what each monitoring tool does. Entries 48 and 49 use its words (metric, label, time series).
+
+### How monitoring works: four questions, five tools
+
+**In one line:** monitoring answers four questions about the running system. Each question has its own tool, and Grafana shows the answers side by side.
+
+- **How much, how fast, how often?** These are **metrics**: numbers over time, for example "12 failed logins per minute". Prometheus collects and stores them.
+- **What exactly happened?** These are **logs**: one line of text per event, for example `<ip> "POST /api/auth/login" 429`. Loki stores them, Alloy collects them.
+- **Does a person need to act now?** These are **alerts**: rules on metrics or logs, for example "more than 30 failed logins in 5 minutes". Prometheus checks the rules, Alertmanager sends the message (#15).
+- **What does it look like?** These are **dashboards**. Grafana draws them from Prometheus and Loki.
+
+**How the data flows:**
+
+```
+ auth, discounts, items  /metrics ─┐
+ kubelet (CPU, memory, disks)  ────┼── Prometheus asks every 30 s ──> Prometheus ──> Alertmanager ──> (#15)
+ kube-state-metrics (replicas,  ───┘    ("scrape", a pull)                │
+   restarts, pod states)                                                   │
+                                                                           ▼
+ logs of the pods ── Alloy reads them like "kubectl logs" ──> Loki ───> Grafana <── me, in the browser:
+                                                                                      https://grafana.aks.springlaughing.dev
+```
+
+**Words used in this part:**
+
+- A **metric** is a named number. `http_requests_total` is how many requests a backend has answered since it started.
+- A **label** is a name=value pair on a metric, like `route="/api/auth/login"` or `statusCode="401"`. Labels let one metric be split: "only the 401s on the login route".
+- A **time series** is one metric with one exact set of labels, and its values over time. Each one costs Prometheus memory. That is why labels must have few values (F18, entry 48).
+- A **scrape** is Prometheus asking a program for its metrics, over HTTP, at `/metrics`. Prometheus **pulls**: the backends send nothing on their own, they only answer.
+- **PromQL** and **LogQL** are the query languages of Prometheus and Loki. Every dashboard panel is one query.
+
+**Helm, charts and values.** Prometheus, Grafana, Loki and Alloy are not written by me. They come as **Helm charts**: packages of Kubernetes files with settings left open. A **values file** fills in those settings, for example "no disk for Grafana" or "keep 7 days of data". The command `helm upgrade --install <name> <chart> --version <v> -f <values>` installs the chart the first time and updates it on every later run, so it is safe to run again. `--version` pins the chart version, so the same command installs the same chart next month.
+
+A chart version is like an image **tag**, not a digest (entry 41): the people who publish the chart repository could replace a version with different content, and the images inside the charts are pulled by tag too (Alloy: `grafana/alloy:v1.21.3`). Charts published as OCI images, like NGINX Gateway Fabric's, can be pinned by digest. For this project, version pins are the accepted level.
+
+**Operators and their object types.** The Prometheus Operator is a program that adds new object types to Kubernetes and acts on them. This project uses one of them, the **ServiceMonitor**: a small file that says "scrape these Services, on this port, at this path". The operator reads it and writes Prometheus's settings. So adding a scrape target is a `kubectl apply`, not an edit inside Prometheus. External Secrets (Part 5) works the same way, with its own types, SecretStore and ExternalSecret.
+
 ### 47. Before monitoring: what runs in the cluster
 
 **In one line:** after `az aks start` on 11 November, 48 pods run on 3 nodes. This entry says what each one does. The same list shows the #28 fix working after a real cluster start, and it shows that all app pods sit on one node.
@@ -3384,7 +3439,9 @@ Now every service keeps one copy if any one node fails. Two things are still sin
 
 **Next in this part:** Prometheus, Grafana and Loki go into their own namespace, `monitoring`, and add their pods to this list.
 
-### 48. Code fix: metrics labelled by route, not by URL (F18)
+### 48. Backend code: count requests by route, not by URL (F18)
+
+**What changes:** the code of our three backend services, `auth`, `discounts` and `items`, in the file `backend/<service>/metrics.cjs`. No monitoring tool changes here. Each backend counts its requests and publishes the counts at `/metrics`; Prometheus reads them every 30 seconds (entry 53). This entry changes how the backends **name** those counts.
 
 **In one line:** each request is now counted under the route pattern from the code, such as `/api/items/items/:id`, not under the URL the visitor sent. 250 junk requests made 251 new counters before the fix, and 3 after it.
 
@@ -3459,44 +3516,9 @@ The 3 new series are `/metrics` itself, the 400 answers for invalid IDs, and `no
 
 **Still to do:** the same retest on AKS after the deploy, through the Gateway like a real attacker, and its result in the security assessment.
 
-### How monitoring works: four questions, five tools
+### 49. Backend code: measure how long each request takes
 
-**In one line:** monitoring answers four questions about the running system. Each question has its own tool, and Grafana shows the answers side by side.
-
-- **How much, how fast, how often?** These are **metrics**: numbers over time, for example "12 failed logins per minute". Prometheus collects and stores them.
-- **What exactly happened?** These are **logs**: one line of text per event, for example `<ip> "POST /api/auth/login" 429`. Loki stores them, Alloy collects them.
-- **Does a person need to act now?** These are **alerts**: rules on metrics or logs, for example "more than 30 failed logins in 5 minutes". Prometheus checks the rules, Alertmanager sends the message (#15).
-- **What does it look like?** These are **dashboards**. Grafana draws them from Prometheus and Loki.
-
-**How the data flows:**
-
-```
- auth, discounts, items  /metrics ─┐
- kubelet (CPU, memory, disks)  ────┼── Prometheus asks every 30 s ──> Prometheus ──> Alertmanager ──> (#15)
- kube-state-metrics (replicas,  ───┘    ("scrape", a pull)                │
-   restarts, pod states)                                                   │
-                                                                           ▼
- logs of the pods ── Alloy reads them like "kubectl logs" ──> Loki ───> Grafana <── me, in the browser:
-                                                                                      https://grafana.aks.springlaughing.dev
-```
-
-**Words used in this part:**
-
-- A **metric** is a named number. `http_requests_total` is how many requests a backend has answered since it started.
-- A **label** is a name=value pair on a metric, like `route="/api/auth/login"` or `statusCode="401"`. Labels let one metric be split: "only the 401s on the login route".
-- A **time series** is one metric with one exact set of labels, and its values over time. Each one costs Prometheus memory. That is why labels must have few values (F18, entry 48).
-- A **scrape** is Prometheus asking a program for its metrics, over HTTP, at `/metrics`. Prometheus **pulls**: the backends send nothing on their own, they only answer.
-- **PromQL** and **LogQL** are the query languages of Prometheus and Loki. Every dashboard panel is one query.
-
-**Helm, charts and values.** Prometheus, Grafana, Loki and Alloy are not written by me. They come as **Helm charts**: packages of Kubernetes files with settings left open. A **values file** fills in those settings, for example "no disk for Grafana" or "keep 7 days of data". The command `helm upgrade --install <name> <chart> --version <v> -f <values>` installs the chart the first time and updates it on every later run, so it is safe to run again. `--version` pins the chart version, so the same command installs the same chart next month.
-
-A chart version is like an image **tag**, not a digest (entry 41): the people who publish the chart repository could replace a version with different content, and the images inside the charts are pulled by tag too (Alloy: `grafana/alloy:v1.21.3`). Charts published as OCI images, like NGINX Gateway Fabric's, can be pinned by digest. For this project, version pins are the accepted level.
-
-**Where the commands live.** In `scripts/setup-aks.sh`, step 7: the same `helm upgrade --install` lines, in the same order, with the chart versions as variables at the top. On a rebuilt cluster, one run installs everything again. A script is **imperative** ("run these commands"): nothing happens until someone runs it, and nobody notices when someone changes the cluster by hand afterwards. Production teams usually make it **declarative** with GitOps: a tool such as Argo CD or Flux runs inside the cluster, watches a git repository that lists each chart with its version and values, installs it, and puts it back when someone changes it by hand. An upgrade is then a pull request that changes a version number, and the pipeline needs no rights on the cluster at all. Listed in "What is next".
-
-**Operators and their object types.** The Prometheus Operator is a program that adds new object types to Kubernetes and acts on them. This project uses one of them, the **ServiceMonitor**: a small file that says "scrape these Services, on this port, at this path". The operator reads it and writes Prometheus's settings. So adding a scrape target is a `kubectl apply`, not an edit inside Prometheus. External Secrets (Part 5) works the same way, with its own types, SecretStore and ExternalSecret.
-
-### 49. Code: how long each request takes
+**What changes:** again the code of our three backend services, in `backend/<service>/metrics.cjs`. They get one more number at `/metrics`. Prometheus collects it (entry 53), and Grafana draws it as the "Latency p95" panel of the dashboard.
 
 **In one line:** the three backends now measure how long each request takes (`http_request_duration_seconds`), so Grafana can show the slowest 5 of every 100 requests per service.
 
@@ -3670,57 +3692,170 @@ The Secret `grafana-admin` then held exactly two keys, `admin-password` and `adm
 
 **Two things to keep.** `kubectl get secretstore` is the fastest check when an ExternalSecret stays not ready: its STATUS names the problem. And `force-sync` helps with key rotation (#16): change a value in Key Vault, force a sync, and Reloader restarts the pods within seconds instead of within the hour.
 
-### 53. Install: Prometheus, Grafana, Loki and Alloy
+### 53. Install, step by step: Prometheus, Grafana, Loki, Alloy
 
-**In one line:** the monitoring tools are installed with Helm in seven steps, the backends become scrape targets, Grafana is published through the Gateway, and one network rule opens for Prometheus. Two surprises in step 5, both about names and rights.
+**In one line:** the monitoring tools are installed with Helm, the backends become scrape targets, Grafana gets its address on the internet, and one network rule opens for Prometheus. Seven steps, run by hand once, and written into the setup script for every rebuild.
 
-**State:** steps 3 to 7 done (kube-prometheus-stack, Loki and Alloy run). Steps 8 and 9 follow.
+**State:** steps 1 to 5 done (Prometheus with Grafana, Loki and Alloy run). The hardening of Alloy and Loki, and steps 6 and 7, follow.
 
-**The steps,** after entry 52. The setup script does the same in its step 7.
+**The order matters:**
+
+1. The namespace `monitoring` (entry 50).
+2. Grafana's password, from Key Vault (entry 52). It must exist before step 3: without it, Grafana's pod cannot start.
+3. kube-prometheus-stack: Prometheus, Alertmanager, Grafana, the operator, kube-state-metrics.
+4. Loki.
+5. Alloy.
+6. The scrape targets, Grafana's address and the dashboard. These need step 3: the object type ServiceMonitor only exists once the operator is installed.
+7. Network rule 6, so Prometheus can reach the backends.
+
+Every Helm command uses `--wait`: Helm waits until the new pods are ready, so a broken install stops here instead of failing quietly. It checks only once, though (step 3 shows the limit).
+
+#### Step 1: the namespace
 
 ```bash
-# 3. The namespace (entry 50)
 kubectl apply -f k8s/platform/namespaces.yaml
-# 4. Grafana's login (entry 52). Before step 5: without it, Grafana's pod cannot
-#    start, and Helm waits until it times out.
+```
+
+Creates the namespace `monitoring` with its three labels (entry 50).
+
+#### Step 2: Grafana's password
+
+```bash
 kubectl apply -f k8s/monitoring/grafana-secrets.yaml
-# 5. Prometheus, Alertmanager, Grafana, the operator, kube-state-metrics.
-#    Also adds the object types ServiceMonitor and PrometheusRule.
+kubectl wait externalsecret/grafana-admin -n monitoring --for=condition=Ready --timeout=3m
+```
+
+Everything about this step, including its surprise, is in entry 52.
+
+#### Step 3: kube-prometheus-stack (Prometheus, Alertmanager, Grafana)
+
+```bash
 helm upgrade --install kps prometheus-community/kube-prometheus-stack --version 93.2.0 \
   -n monitoring -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
-# 6. Loki
+```
+
+This one chart installs five parts: Prometheus, Alertmanager, Grafana, the Prometheus Operator and kube-state-metrics (entry 50). It also adds the object types ServiceMonitor and PrometheusRule. `kps` is the name of this installation in Helm.
+
+The values file `k8s/monitoring/kube-prometheus-stack-values.yaml` switches off node-exporter and the control plane scrapers (entry 50). Prometheus keeps 7 days or 8 GB of data, whichever is reached first, on a 10 GB disk, and reads ServiceMonitors from any namespace. Grafana is on the internet, so it allows no sign-up and no anonymous visitors, sends its login cookie over HTTPS only, and makes no calls home (usage reports, update checks, profile pictures). Grafana gets Loki as a second data source and no disk. The narrowed rights of entry 51 are here too.
+
+The first try failed, and the second one only looked successful.
+
+**Surprise 1: two things wanted the name `grafana`.** The first install of kube-prometheus-stack stopped at once:
+
+```
+Error: Unable to continue with install: ServiceAccount "grafana" in namespace "monitoring" exists
+and cannot be imported into the current release: invalid ownership metadata; ...
+```
+
+The values file sets `fullnameOverride: grafana`, so the Service is simply called `grafana`. But the chart then names Grafana's ServiceAccount `grafana` too, and that name was taken by External Secrets' ServiceAccount from entry 52. Helm manages only objects it created itself, so it refused to take over a stranger. Nothing had been installed. The fix gives the chart's ServiceAccount its own name, `grafana-server`. Before the next try, every object the chart would create was compared with what already existed in `monitoring`: no other clash. The chart's own warning at the end ("get the password from the Secret `kps-grafana`") is generic text: that Secret does not exist, the password comes from `grafana-admin`.
+
+**Surprise 2: Helm said "deployed", but Grafana kept crashing.** The install ended with `STATUS: deployed`, yet Grafana's pod showed `2/3 Error` with 4 restarts. The three containers in that pod told the story:
+
+```
+grafana                 ready=true
+grafana-sc-datasources  ready=true
+grafana-sc-dashboard    ready=false  restarts=4  last=Error/1
+```
+
+The dashboard loader's log said `ForbiddenException: (403)`, and its settings said `NAMESPACE=ALL` and `RESOURCE=both`. kube-prometheus-stack tells the loader to search **every** namespace, for ConfigMaps **and** Secrets. But entry 51 had limited its rights to `monitoring`. Kubernetes refused, the loader exited, and Kubernetes restarted it again and again.
+
+The fix changes the loaders, not the rights: they now search only their own namespace (`searchNamespace: null`) and read only ConfigMaps (`resource: configmap`). Dashboards and data sources never come from Secrets, so this removes one more right they never needed. After `helm upgrade`, the five pods of kube-prometheus-stack ran:
+
+```
+NAME                                                    READY   STATUS    RESTARTS
+alertmanager-kps-kube-prometheus-stack-alertmanager-0   2/2     Running   0
+grafana-84b59ddddd-2plz2                                3/3     Running   0
+kps-kube-prometheus-stack-operator-587f6dbb8f-46gnc     1/1     Running   0
+kps-kube-state-metrics-6bf4956584-r8v86                 1/1     Running   0
+prometheus-kps-kube-prometheus-stack-prometheus-0       2/2     Running   0
+```
+
+**What the two surprises teach.** First, removing a right can break a default that relied on it. The 403 also proved that the narrowed rights are really enforced. Second, `STATUS: deployed` does not mean "healthy". `--wait` checks that each pod became ready once. A helper that starts failing after that is not caught. The READY column, `2/3`, showed it.
+
+#### Step 4: Loki
+
+```bash
 helm upgrade --install loki grafana/loki --version 7.6.0 \
   -n monitoring -f k8s/monitoring/loki-values.yaml --wait --timeout=10m
-# 7. Alloy
+```
+
+The values file `k8s/monitoring/loki-values.yaml` runs Loki as one instance ("single binary"), with its files on its own disk, and deletes logs after 7 days. The parts a big installation needs are off: caches, an extra NGINX in front, self-tests, and the rules loader (entry 51).
+
+Installed on the first try, with one warning:
+
+```
+$ helm upgrade --install loki grafana/loki --version 7.6.0 -n monitoring -f k8s/monitoring/loki-values.yaml --wait --timeout=10m
+Warning: would violate PodSecurity "restricted:latest": seccompProfile (pod or container "loki"
+  must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
+STATUS: deployed
+
+$ kubectl get pods,pvc -n monitoring        (shortened)
+pod/loki-0                         1/1     Running   0          70s
+persistentvolumeclaim/storage-loki-0   Bound   10Gi   RWO   managed-csi-zrs
+```
+
+The warning comes from the namespace label `warn: restricted` (entry 50): Kubernetes reports a pod that misses the strictest profile, but admits it, because only `baseline` is enforced. The setting Loki's chart leaves out is **seccomp**, a Linux filter that limits which system calls (requests to the kernel) a container may make. `RuntimeDefault` blocks the rarely used, risky ones. The app pods in `restauranty` have it, because there "restricted" is enforced. For Loki it is a small fix in the values file, noted for later.
+
+#### Step 5: Alloy
+
+```bash
 helm upgrade --install alloy grafana/alloy --version 1.15.0 \
   -n monitoring -f k8s/monitoring/alloy-values.yaml --wait --timeout=5m
-# 8. What to scrape, Grafana's address, the dashboard
+```
+
+The values file `k8s/monitoring/alloy-values.yaml` runs Alloy as one pod. It reads the pods of 7 namespaces through the Kubernetes API: `restauranty`, `gateway`, `nginx-gateway`, `cert-manager`, `external-secrets`, `reloader` and `monitoring`. Its rights are Roles in exactly those namespaces.
+
+Installed on the first try. Its log shows it finding pods in every listed namespace and reading their logs, with no `forbidden` line, so its narrowed rights (entry 51) match what its settings ask for:
+
+```
+$ kubectl get pods -n monitoring        (shortened)
+alloy-6c54b7cbcf-rzmbq   2/2     Running   0          35s
+
+$ kubectl logs -n monitoring deploy/alloy --tail=20        (shortened)
+level=info msg="opened log stream" ... target=restauranty/discounts-6bb9dc7946-jmdc9:discounts
+level=info msg="opened log stream" ... target=reloader/reloader-reloader-df6cd89c-44bv8:reloader-reloader
+level=info msg="opened log stream" ... target=restauranty/items-7df9c5b45b-9kk8n:items
+level=info msg="opened log stream" ... target=cert-manager/cert-manager-6784c9f6fb-7qmvd:cert-manager-controller
+level=info msg="container finished, stopping tailer" ... target=gateway/restauranty-nginx-85c5954cc8-cgvgl:init
+```
+
+"Container finished" is normal: init containers run once when a pod starts, then stop.
+
+The install warning was longer than Loki's:
+
+```
+Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false,
+  unrestricted capabilities, runAsNonRoot != true, seccompProfile (container "alloy" ...)
+```
+
+In plain words: **the chart runs Alloy as root**, with every Linux capability (special powers such as changing file owners), allowed to gain more privileges, and with no seccomp filter. A collector that reads logs through the Kubernetes API needs none of that.
+
+#### Hardening Alloy and Loki after the install
+
+Both values files now give their pods the same settings as the app pods in `restauranty`:
+
+- Alloy runs as its own user, 473 (named `alloy` in its image), not as root.
+- It cannot gain privileges, has no capabilities, and has the seccomp filter.
+- Its file system is read-only, so an attacker inside it cannot change its program or settings. Alloy needs one writable folder for its working files, `/tmp/alloy`, so that folder is a small empty volume (`emptyDir`) that disappears with the pod.
+- Loki already ran as a normal user, without capabilities, with a read-only file system. It only gets the seccomp filter.
+
+Before applying, the rendered files were checked for the four rules of the warnings: no gaps left in Alloy, its config reloader, or Loki.
+
+#### Step 6: scrape targets, Grafana's address, the dashboard
+
+```bash
 kubectl apply -f k8s/monitoring/servicemonitors.yaml \
               -f k8s/monitoring/grafana-route.yaml \
               -f k8s/monitoring/dashboard.yaml
-# 9. The network rule for Prometheus
-kubectl apply -f k8s/network/policies.yaml
 ```
 
-`--wait` makes Helm wait until the new pods are ready, so a broken install stops the steps instead of failing quietly. It checks once, though: surprise 2 shows its limit.
+Three files, three jobs.
 
-**What each file sets, and why:**
-
-- `k8s/monitoring/kube-prometheus-stack-values.yaml` switches off node-exporter and the control plane scrapers (entry 50). Prometheus keeps 7 days or 8 GB of data, whichever is reached first, on a 10 GB disk, and reads ServiceMonitors from any namespace. Grafana is on the internet, so it allows no sign-up and no anonymous visitors, sends its login cookie over HTTPS only, and makes no calls home (usage reports, update checks, profile pictures). Grafana gets Loki as a second data source and no disk. The narrowed rights of entry 51 are here too.
-- `k8s/monitoring/loki-values.yaml` runs Loki as one instance ("single binary"), with its files on its own disk, and deletes logs after 7 days. The parts a big installation needs are off: caches, an extra NGINX in front, self-tests, and the rules loader (entry 51).
-- `k8s/monitoring/alloy-values.yaml` runs Alloy as one pod. It reads the pods of 7 namespaces through the Kubernetes API: `restauranty`, `gateway`, `nginx-gateway`, `cert-manager`, `external-secrets`, `reloader` and `monitoring`. Its rights are Roles in exactly those namespaces.
-- `k8s/monitoring/servicemonitors.yaml` tells Prometheus to scrape `auth`, `discounts` and `items` at `/metrics` every 30 seconds, with a limit per scrape (below).
-- `k8s/monitoring/grafana-route.yaml` sends `grafana.aks.springlaughing.dev` to Grafana, through the Gateway (below).
-- `k8s/monitoring/dashboard.yaml` holds the dashboard (below).
-- `k8s/network/policies.yaml` gets rule 6, for Prometheus (below).
-
-**The ServiceMonitor, and a second guard for F18.** It picks the Services in `restauranty` whose label `app` is `auth`, `discounts` or `items`, and names Prometheus's `job` after that label. The line `sampleLimit: 1000` means: if one scrape brings more than 1,000 series, Prometheus throws that scrape away and marks the target as down, instead of filling its memory. Each backend sends about 100 to 400 series. The code fix (entry 48) closes the known hole; the limit protects Prometheus from the next one.
+**`servicemonitors.yaml`: what Prometheus scrapes, and a second guard for F18.** It picks the Services in `restauranty` whose label `app` is `auth`, `discounts` or `items`, and names Prometheus's `job` after that label. The line `sampleLimit: 1000` means: if one scrape brings more than 1,000 series, Prometheus throws that scrape away and marks the target as down, instead of filling its memory. Each backend sends about 100 to 400 series. The code fix (entry 48) closes the known hole; the limit protects Prometheus from the next one.
 
 **Is `/metrics` public?** No. The Gateway sends paths starting with `/api/auth`, `/api/discounts` and `/api/items` to the backends, and everything else to the client. So `https://restauranty.aks.springlaughing.dev/metrics` reaches the client's nginx, which has no such page. Inside the cluster, the network rules decide.
 
-**Network rule 6: Prometheus may scrape the backends.** Since #11, every pod in `restauranty` refuses all traffic that no rule allows (entry 21). The new rule opens exactly one more path: from the Prometheus pods (label `app.kubernetes.io/name: prometheus`) in the namespace `monitoring`, to `auth`, `discounts` and `items`, on their port `http` (3001, 3002, 3003). Grafana, Loki and Alloy get no path into `restauranty`; Alloy reads logs through the Kubernetes API, not from the pods. The client and MongoDB stay closed to Prometheus.
-
-**Grafana on the internet.** The Gateway already had a listener for `grafana.aks.springlaughing.dev`, and the certificate already covered the name (entry 15), so no new certificate was needed. The login is protected five ways:
+**`grafana-route.yaml`: Grafana on the internet.** The Gateway already had a listener for `grafana.aks.springlaughing.dev`, and the certificate already covered the name (entry 15), so no new certificate was needed. The login is protected five ways:
 
 - HTTPS only; plain HTTP is redirected (the Gateway, entry 15).
 - A flood limit per IP address (the Gateway, entry 27).
@@ -3730,7 +3865,7 @@ kubectl apply -f k8s/network/policies.yaml
 
 Better, later: sign-in through Entra ID instead of a password (#17).
 
-**The dashboard "Restauranty: traffic and security".** It is generated as JSON and stored as a ConfigMap. Grafana's dashboard loader reads every ConfigMap in `monitoring` with the label `grafana_dashboard`, so the dashboard comes back after every rebuild. A change made in Grafana's editor is lost on the next restart: export the JSON and put it into the file. It has three rows.
+**`dashboard.yaml`: "Restauranty: traffic and security".** It is generated as JSON and stored as a ConfigMap. Grafana's dashboard loader reads every ConfigMap in `monitoring` with the label `grafana_dashboard`, so the dashboard comes back after every rebuild. A change made in Grafana's editor is lost on the next restart: export the JSON and put it into the file. It has three rows.
 
 *Traffic*, from Prometheus:
 
@@ -3767,86 +3902,47 @@ Loki stores the line as it is. The dashboard's queries cut it into fields when t
 
 This follows the same rule as the metric labels in entry 48: values that come from visitors, like the IP and the path, stay inside the log line and never become labels.
 
-**Surprise 1: two things wanted the name `grafana`.** The first install of kube-prometheus-stack stopped at once:
+#### Step 7: network rule 6, Prometheus may scrape the backends
 
-```
-Error: Unable to continue with install: ServiceAccount "grafana" in namespace "monitoring" exists
-and cannot be imported into the current release: invalid ownership metadata; ...
-```
-
-The values file sets `fullnameOverride: grafana`, so the Service is simply called `grafana`. But the chart then names Grafana's ServiceAccount `grafana` too, and that name was taken by External Secrets' ServiceAccount from entry 52. Helm manages only objects it created itself, so it refused to take over a stranger. Nothing had been installed. The fix gives the chart's ServiceAccount its own name, `grafana-server`. Before the next try, every object the chart would create was compared with what already existed in `monitoring`: no other clash. The chart's own warning at the end ("get the password from the Secret `kps-grafana`") is generic text: that Secret does not exist, the password comes from `grafana-admin`.
-
-**Surprise 2: Helm said "deployed", but Grafana kept crashing.** The install ended with `STATUS: deployed`, yet Grafana's pod showed `2/3 Error` with 4 restarts. The three containers in that pod told the story:
-
-```
-grafana                 ready=true
-grafana-sc-datasources  ready=true
-grafana-sc-dashboard    ready=false  restarts=4  last=Error/1
+```bash
+kubectl apply -f k8s/network/policies.yaml
 ```
 
-The dashboard loader's log said `ForbiddenException: (403)`, and its settings said `NAMESPACE=ALL` and `RESOURCE=both`. kube-prometheus-stack tells the loader to search **every** namespace, for ConfigMaps **and** Secrets. But entry 51 had limited its rights to `monitoring`. Kubernetes refused, the loader exited, and Kubernetes restarted it again and again.
+Since #11, every pod in `restauranty` refuses all traffic that no rule allows (entry 21). The new rule opens exactly one more path: from the Prometheus pods (label `app.kubernetes.io/name: prometheus`) in the namespace `monitoring`, to `auth`, `discounts` and `items`, on their port `http` (3001, 3002, 3003). Grafana, Loki and Alloy get no path into `restauranty`; Alloy reads logs through the Kubernetes API, not from the pods. The client and MongoDB stay closed to Prometheus.
 
-The fix changes the loaders, not the rights: they now search only their own namespace (`searchNamespace: null`) and read only ConfigMaps (`resource: configmap`). Dashboards and data sources never come from Secrets, so this removes one more right they never needed. After `helm upgrade`, the five pods of kube-prometheus-stack ran:
+#### The same steps in the setup script
 
-```
-NAME                                                    READY   STATUS    RESTARTS
-alertmanager-kps-kube-prometheus-stack-alertmanager-0   2/2     Running   0
-grafana-84b59ddddd-2plz2                                3/3     Running   0
-kps-kube-prometheus-stack-operator-587f6dbb8f-46gnc     1/1     Running   0
-kps-kube-state-metrics-6bf4956584-r8v86                 1/1     Running   0
-prometheus-kps-kube-prometheus-stack-prometheus-0       2/2     Running   0
-```
+`scripts/setup-aks.sh` does all of this on a new or rebuilt cluster, so the hand-run steps above happen only once:
 
-**What the two surprises teach.** First, removing a right can break a default that relied on it. The 403 also proved that the narrowed rights are really enforced. Second, `STATUS: deployed` does not mean "healthy". `--wait` checks that each pod became ready once. A helper that starts failing after that is not caught. The READY column, `2/3`, showed it.
+- Its **step 3** applies `k8s/platform/namespaces.yaml`, which now includes `monitoring`.
+- Its **step 5** creates `grafana-admin-password` in Key Vault if it is missing, like the MongoDB root password.
+- Its **step 6** applies `k8s/network/`, which now includes rule 6.
+- Its new **step 7** installs the monitoring:
 
-**Step 6: Loki.** Installed on the first try, with one warning:
-
-```
-$ helm upgrade --install loki grafana/loki --version 7.6.0 -n monitoring -f k8s/monitoring/loki-values.yaml --wait --timeout=10m
-Warning: would violate PodSecurity "restricted:latest": seccompProfile (pod or container "loki"
-  must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")
-STATUS: deployed
-
-$ kubectl get pods,pvc -n monitoring        (shortened)
-pod/loki-0                         1/1     Running   0          70s
-persistentvolumeclaim/storage-loki-0   Bound   10Gi   RWO   managed-csi-zrs
-```
-
-The warning comes from the namespace label `warn: restricted` (entry 50): Kubernetes reports a pod that misses the strictest profile, but admits it, because only `baseline` is enforced. The setting Loki's chart leaves out is **seccomp**, a Linux filter that limits which system calls (requests to the kernel) a container may make. `RuntimeDefault` blocks the rarely used, risky ones. The app pods in `restauranty` have it, because there "restricted" is enforced. For Loki it is a small fix in the values file, noted for later.
-
-**Step 7: Alloy.** Installed on the first try. Its log shows it finding pods in every listed namespace and reading their logs, with no `forbidden` line, so its narrowed rights (entry 51) match what its settings ask for:
-
-```
-$ kubectl get pods -n monitoring        (shortened)
-alloy-6c54b7cbcf-rzmbq   2/2     Running   0          35s
-
-$ kubectl logs -n monitoring deploy/alloy --tail=20        (shortened)
-level=info msg="opened log stream" ... target=restauranty/discounts-6bb9dc7946-jmdc9:discounts
-level=info msg="opened log stream" ... target=reloader/reloader-reloader-df6cd89c-44bv8:reloader-reloader
-level=info msg="opened log stream" ... target=restauranty/items-7df9c5b45b-9kk8n:items
-level=info msg="opened log stream" ... target=cert-manager/cert-manager-6784c9f6fb-7qmvd:cert-manager-controller
-level=info msg="container finished, stopping tailer" ... target=gateway/restauranty-nginx-85c5954cc8-cgvgl:init
+```bash
+# 7. Monitoring (#14): Prometheus, Alertmanager and Grafana, Loki for logs,
+#    Alloy to collect them. Grafana's login first, so its pod can start.
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add grafana https://grafana.github.io/helm-charts
+kubectl apply -f k8s/monitoring/grafana-secrets.yaml
+kubectl wait externalsecret/grafana-admin -n monitoring --for=condition=Ready --timeout=3m
+helm upgrade --install kps prometheus-community/kube-prometheus-stack \
+  --version "$KPS_VERSION" --namespace monitoring \
+  -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
+helm upgrade --install loki grafana/loki \
+  --version "$LOKI_VERSION" --namespace monitoring \
+  -f k8s/monitoring/loki-values.yaml --wait --timeout=10m
+helm upgrade --install alloy grafana/alloy \
+  --version "$ALLOY_VERSION" --namespace monitoring \
+  -f k8s/monitoring/alloy-values.yaml --wait --timeout=5m
+kubectl apply -f k8s/monitoring/servicemonitors.yaml \
+              -f k8s/monitoring/grafana-route.yaml \
+              -f k8s/monitoring/dashboard.yaml
 ```
 
-"Container finished" is normal: init containers run once when a pod starts, then stop.
+(Shortened: the real script hides the output of `helm repo add` and refreshes the repositories.) The chart versions are variables at the top of the script: `KPS_VERSION="93.2.0"`, `LOKI_VERSION="7.6.0"`, `ALLOY_VERSION="1.15.0"`. One thing stays outside the script, because it changes Azure: the `terraform apply` for Grafana's identity (entry 52). It runs before the script, like all of `terraform/cluster-access`.
 
-The install warning was longer than Loki's:
-
-```
-Warning: would violate PodSecurity "restricted:latest": allowPrivilegeEscalation != false,
-  unrestricted capabilities, runAsNonRoot != true, seccompProfile (container "alloy" ...)
-```
-
-In plain words: **the chart runs Alloy as root**, with every Linux capability (special powers such as changing file owners), allowed to gain more privileges, and with no seccomp filter. A collector that reads logs through the Kubernetes API needs none of that.
-
-**Hardening Alloy and Loki.** Both values files now give their pods the same settings as the app pods in `restauranty`:
-
-- Alloy runs as its own user, 473 (named `alloy` in its image), not as root.
-- It cannot gain privileges, has no capabilities, and has the seccomp filter.
-- Its file system is read-only, so an attacker inside it cannot change its program or settings. Alloy needs one writable folder for its working files, `/tmp/alloy`, so that folder is a small empty volume (`emptyDir`) that disappears with the pod.
-- Loki already ran as a normal user, without capabilities, with a read-only file system. It only gets the seccomp filter.
-
-Before applying, the rendered files were checked for the four rules of the warnings: no gaps left in Alloy, its config reloader, or Loki.
+**Script or GitOps.** A script is **imperative** ("run these commands"): nothing happens until someone runs it, and nobody notices when someone changes the cluster by hand afterwards. Production teams usually make it **declarative** with GitOps: a tool such as Argo CD or Flux runs inside the cluster, watches a git repository that lists each chart with its version and values, installs it, and puts it back when someone changes it by hand. An upgrade is then a pull request that changes a version number, and the pipeline needs no rights on the cluster at all. Listed in "What is next".
 
 ---
 
