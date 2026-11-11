@@ -1,0 +1,155 @@
+# kube-prometheus-stack (#14): Prometheus (metrics), Alertmanager (alerts),
+# Grafana (dashboards), kube-state-metrics (the state of Kubernetes objects)
+# and the Prometheus Operator (turns ServiceMonitor objects into scrape settings).
+# Installed by scripts/setup-aks.sh into the monitoring namespace.
+
+# node-exporter reads the node itself: it needs the host's network, process
+# list and file system. Off. Pod CPU, memory and volume usage still come from
+# the kubelet, which Prometheus scrapes anyway. Its rules go too, or they
+# would complain that their data is missing.
+nodeExporter:
+  enabled: false
+
+# AKS runs the control plane (etcd, scheduler, controller manager) itself and
+# hides it, and Cilium replaces kube-proxy. Nothing to scrape: off, or their
+# "target down" alerts would fire forever.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  rules:
+    etcd: false
+    kubeSchedulerAlerting: false
+    kubeSchedulerRecording: false
+    kubeControllerManager: false
+    kubeProxy: false
+    node: false
+    nodeExporterAlerting: false
+    nodeExporterRecording: false
+
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    retentionSize: 8GB                 # below the 10 Gi disk: old data goes first
+    # Read ServiceMonitors and rules from any namespace, without the Helm
+    # release label (ours live in k8s/monitoring/).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: { cpu: 200m, memory: 1Gi }
+      limits: { memory: 2Gi }
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi-zrs
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 10Gi
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { memory: 128Mi }
+
+# kube-state-metrics turns the state of Kubernetes objects into metrics
+# (replicas wanted vs ready, pod restarts, ...). The chart lets it list every
+# Secret in the cluster, values included, only to report their names. The
+# list below is the chart's default without "secrets", so it gets no right
+# on Secrets at all.
+kube-state-metrics:
+  collectors:
+    - certificatesigningrequests
+    - configmaps
+    - cronjobs
+    - daemonsets
+    - deployments
+    - endpointslices
+    - horizontalpodautoscalers
+    - ingresses
+    - jobs
+    - leases
+    - limitranges
+    - mutatingwebhookconfigurations
+    - namespaces
+    - networkpolicies
+    - nodes
+    - persistentvolumeclaims
+    - persistentvolumes
+    - poddisruptionbudgets
+    - pods
+    - replicasets
+    - replicationcontrollers
+    - resourcequotas
+    - services
+    - statefulsets
+    - storageclasses
+    - validatingwebhookconfigurations
+    - volumeattachments
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 128Mi }
+
+# The operator writes Prometheus's and Alertmanager's settings into Secrets.
+# Here it watches only the monitoring namespace, where all ServiceMonitors
+# and rules of this project live.
+# Known gap: this limits what the program does, not what it may do. The
+# chart still gives it a ClusterRole that can read and change Secrets in
+# every namespace, with no option to narrow it. A copy of the chart's role
+# with Roles per namespace would close it.
+prometheusOperator:
+  namespaces:
+    releaseNamespace: true
+    additional: []
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+
+grafana:
+  fullnameOverride: grafana            # Service "grafana", used by the HTTPRoute
+  testFramework:
+    enabled: false
+  # Grafana's helper loads dashboards from ConfigMaps. By default it may read
+  # ConfigMaps and Secrets in every namespace; it only needs this one.
+  rbac:
+    namespaced: true
+  # The admin login comes from Key Vault through External Secrets
+  # (grafana-secrets.yaml), never from a default or a value in git.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  # Dashboards are files in git (ConfigMaps with the label grafana_dashboard),
+  # so Grafana needs no disk: a new pod loads them again.
+  persistence:
+    enabled: false
+  grafana.ini:
+    server:
+      root_url: https://grafana.aks.springlaughing.dev
+    auth.anonymous:
+      enabled: false
+    users:
+      allow_sign_up: false
+    security:
+      cookie_secure: true             # the login cookie travels over HTTPS only
+      disable_gravatar: true          # no calls to an outside image service
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      url: http://loki.monitoring.svc:3100
+      access: proxy
+  resources:
+    requests: { cpu: 50m, memory: 192Mi }
+    limits: { memory: 384Mi }

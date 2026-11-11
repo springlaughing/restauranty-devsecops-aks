@@ -16,6 +16,9 @@ NGF_VERSION="2.8.1"                      # chart and app version; 2.4+ has RateL
 CERT_MANAGER_VERSION="v1.21.3"
 EXTERNAL_SECRETS_VERSION="2.14.0"
 RELOADER_VERSION="2.2.18"
+KPS_VERSION="93.2.0"                     # kube-prometheus-stack: Prometheus, Alertmanager, Grafana (#14)
+LOKI_VERSION="7.6.0"
+ALLOY_VERSION="1.15.0"
 
 TLS_BACKUP="restauranty-tls-backup"      # Key Vault secret: copy of the HTTPS certificate Secret
 
@@ -106,6 +109,12 @@ if ! kv_exists mongo-root-password; then
   az keyvault secret set --vault-name "$KEY_VAULT" -n mongo-root-password \
     --file <(openssl rand -hex 32 | tr -d '\n') --output none
 fi
+# Grafana's admin password (#14) has no other home either.
+if ! kv_exists grafana-admin-password; then
+  echo "  grafana-admin-password missing in Key Vault, generating one"
+  az keyvault secret set --vault-name "$KEY_VAULT" -n grafana-admin-password \
+    --file <(openssl rand -hex 24 | tr -d '\n') --output none
+fi
 # The app password goes into the MongoDB URL, so it must need no URL escaping.
 if ! kv mongo-password | grep -qE '^[0-9a-f]+$'; then
   echo "  mongo-password in Key Vault is not hex: it would break MONGODB_URI. Replace it with:"
@@ -153,7 +162,28 @@ done
 log "Applying the network rules"
 kubectl apply -f k8s/network/
 
-# 7. Save the HTTPS certificate in Key Vault, so the next rebuild can restore it
+# 7. Monitoring (#14): Prometheus, Alertmanager and Grafana, Loki for logs,
+#    Alloy to collect them. Grafana's login first, so its pod can start.
+log "Installing monitoring: kube-prometheus-stack ${KPS_VERSION}, Loki ${LOKI_VERSION}, Alloy ${ALLOY_VERSION}"
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
+helm repo update prometheus-community grafana >/dev/null
+kubectl apply -f k8s/monitoring/grafana-secrets.yaml
+kubectl wait externalsecret/grafana-admin -n monitoring --for=condition=Ready --timeout=3m
+helm upgrade --install kps prometheus-community/kube-prometheus-stack \
+  --version "$KPS_VERSION" --namespace monitoring \
+  -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
+helm upgrade --install loki grafana/loki \
+  --version "$LOKI_VERSION" --namespace monitoring \
+  -f k8s/monitoring/loki-values.yaml --wait --timeout=10m
+helm upgrade --install alloy grafana/alloy \
+  --version "$ALLOY_VERSION" --namespace monitoring \
+  -f k8s/monitoring/alloy-values.yaml --wait --timeout=5m
+kubectl apply -f k8s/monitoring/servicemonitors.yaml \
+              -f k8s/monitoring/grafana-route.yaml \
+              -f k8s/monitoring/dashboard.yaml
+
+# 8. Save the HTTPS certificate in Key Vault, so the next rebuild can restore it
 #    (step 3). Only the parts cert-manager checks are kept; saved again only
 #    when the certificate changed (first issue or renewal).
 log "Backing up the HTTPS certificate"
@@ -174,11 +204,14 @@ else
   echo "  certificate not ready yet: run this script again later to back it up"
 fi
 
-# 8. Where things stand
+# 9. Where things stand
 log "Status"
 kubectl get gateway -n gateway
 kubectl get svc -n gateway
 kubectl get certificate -n gateway
 kubectl get pods -n "$APP_NS" -o wide
 echo
+kubectl get pods -n monitoring
+echo
 echo "Open: https://restauranty.aks.springlaughing.dev"
+echo "      https://grafana.aks.springlaughing.dev  (user admin, password: az keyvault secret show --vault-name ${KEY_VAULT} -n grafana-admin-password --query value -o tsv)"

@@ -27,3 +27,19 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
     # The Gateway accepts routes only from namespaces with this label.
     gateway-access: "true"
+---
+# monitoring: Prometheus, Alertmanager, Grafana, Loki, Alloy (#14).
+# These tools read a lot: metrics of every pod, logs of every pod. So they
+# get their own namespace, and none of them gets access to the node itself
+# (no node-exporter, logs read through the Kubernetes API). That keeps the
+# "baseline" profile enforced here. "restricted" only warns: some charts'
+# pods do not set every field it asks for.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    # Grafana is published through the Gateway (https-grafana listener).
+    gateway-access: "true"

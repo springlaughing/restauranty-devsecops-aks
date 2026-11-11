@@ -1,0 +1,696 @@
+# The Restauranty dashboard (#14), as code. Grafana's helper loads every
+# ConfigMap with the label grafana_dashboard in this namespace, so the
+# dashboard comes back by itself after a rebuild. Changes made in Grafana's
+# editor are lost on the next restart: export the JSON and paste it here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: restauranty-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  restauranty.json: |
+    {
+      "uid": "restauranty",
+      "title": "Restauranty: traffic and security",
+      "tags": [
+        "restauranty"
+      ],
+      "timezone": "browser",
+      "schemaVersion": 41,
+      "version": 1,
+      "refresh": "30s",
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "row",
+          "title": "Traffic: what the backends see",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Requests per second",
+          "description": "All requests that reached a backend, per service.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (rate(http_requests_total[1m]))",
+              "legendFormat": "{{job}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 2,
+          "gridPos": {
+            "x": 0,
+            "y": 1,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Server errors (5xx) per second",
+          "description": "Answers with status 500-599, per service. Should stay at 0.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (rate(http_requests_total{statusCode=~\"5..\"}[1m]))",
+              "legendFormat": "{{job}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 3,
+          "gridPos": {
+            "x": 8,
+            "y": 1,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Latency p95",
+          "description": "95 of 100 requests were faster than this, per service (5-minute window).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m])))",
+              "legendFormat": "{{job}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 4,
+          "gridPos": {
+            "x": 16,
+            "y": 1,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 5,
+          "type": "row",
+          "title": "Security: who knocks, who is refused",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 9,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Failed logins per minute",
+          "description": "Wrong email or password: auth answered 401 on /api/auth/login. Logins over the limit never get here: the Gateway answers them with 429 (next panels).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(increase(http_requests_total{job=\"auth\", route=\"/api/auth/login\", statusCode=\"401\"}[1m]))",
+              "legendFormat": "failed logins",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 6,
+          "gridPos": {
+            "x": 0,
+            "y": 10,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Refused tokens per minute",
+          "description": "Requests to a protected route with no token or a bad one (401 before any route), per service.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (increase(http_requests_total{route=\"no_route\", statusCode=\"401\"}[1m]))",
+              "legendFormat": "{{job}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 7,
+          "gridPos": {
+            "x": 8,
+            "y": 10,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Gateway answers per minute, by status",
+          "description": "Every request from the internet, from the Gateway's access log (Loki). 403 = blocked path (user list), 429 = over a rate limit.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (status) (count_over_time({namespace=\"gateway\", container=\"nginx\"} | pattern `<ip> - <_> [<_>] \"<method> <path> <_>\" <status> <_>` | status != \"\" [1m]))",
+              "legendFormat": "{{status}}",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              }
+            }
+          ],
+          "id": 8,
+          "gridPos": {
+            "x": 16,
+            "y": 10,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "type": "table",
+          "title": "Top 10 client IPs, last 15 minutes",
+          "description": "Requests per client IP at the Gateway, with the share refused (401, 403, 429).",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "queryType": "instant",
+              "expr": "topk(10, sum by (ip) (count_over_time({namespace=\"gateway\", container=\"nginx\"} | pattern `<ip> - <_> [<_>] \"<method> <path> <_>\" <status> <_>` | status != \"\" [15m])))",
+              "legendFormat": "{{ip}}"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "queryType": "instant",
+              "expr": "sum by (ip) (count_over_time({namespace=\"gateway\", container=\"nginx\"} | pattern `<ip> - <_> [<_>] \"<method> <path> <_>\" <status> <_>` | status != \"\" | status =~ \"401|403|429\" [15m]))",
+              "legendFormat": "{{ip}}"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "renameByName": {
+                  "Value #A": "requests",
+                  "Value #B": "refused"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "field": "requests",
+                    "desc": true
+                  }
+                ]
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true
+          },
+          "id": 9,
+          "gridPos": {
+            "x": 0,
+            "y": 18,
+            "w": 8,
+            "h": 9
+          }
+        },
+        {
+          "type": "logs",
+          "title": "Refused at the Gateway (401, 403, 429)",
+          "description": "The newest refused requests from the internet: IP, method, path, status.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "expr": "{namespace=\"gateway\", container=\"nginx\"} | pattern `<ip> - <_> [<_>] \"<method> <path> <_>\" <status> <_>` | status != \"\" | status =~ \"401|403|429\" | line_format \"{{.status}}  {{.ip}}  {{.method}} {{.path}}\""
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "wrapLogMessage": false,
+            "sortOrder": "Descending"
+          },
+          "id": 10,
+          "gridPos": {
+            "x": 8,
+            "y": 18,
+            "w": 16,
+            "h": 9
+          }
+        },
+        {
+          "id": 11,
+          "type": "row",
+          "title": "Health",
+          "collapsed": false,
+          "gridPos": {
+            "x": 0,
+            "y": 27,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "type": "stat",
+          "title": "MongoDB connected",
+          "description": "Per backend pod: 1 = connected, 0 = lost (#28). Alert in #15.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "min by (job) (mongo_connection_status)",
+              "legendFormat": "{{job}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 12,
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 6,
+            "h": 5
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Restarts in restauranty, last hour",
+          "description": "Container restarts of the app's pods. A few after a cluster start are normal (#28).",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 3
+                  },
+                  {
+                    "color": "red",
+                    "value": 10
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"restauranty\"}[1h]))",
+              "legendFormat": "",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 13,
+          "gridPos": {
+            "x": 6,
+            "y": 28,
+            "w": 6,
+            "h": 5
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Series per scrape (F18 guard)",
+          "description": "How many series each backend sends to Prometheus. Above 1,000, Prometheus drops the scrape (sampleLimit). Junk URLs must not move this number.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 700
+                  },
+                  {
+                    "color": "red",
+                    "value": 1000
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max by (job) (scrape_samples_scraped{job=~\"auth|discounts|items\"})",
+              "legendFormat": "{{job}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 14,
+          "gridPos": {
+            "x": 12,
+            "y": 28,
+            "w": 6,
+            "h": 5
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Users, items, coupons",
+          "description": "Counts from the database, refreshed every minute by the backends.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max(users_total) or vector(0)",
+              "legendFormat": "users",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "max(items_total)",
+              "legendFormat": "items",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            },
+            {
+              "refId": "C",
+              "expr": "max(coupons_total)",
+              "legendFormat": "coupons",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 15,
+          "gridPos": {
+            "x": 18,
+            "y": 28,
+            "w": 6,
+            "h": 5
+          }
+        }
+      ],
+      "templating": {
+        "list": []
+      },
+      "annotations": {
+        "list": []
+      },
+      "editable": true
+    }

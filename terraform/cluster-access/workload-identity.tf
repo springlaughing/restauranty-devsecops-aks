@@ -37,16 +37,18 @@ resource "azurerm_user_assigned_identity" "workload" {
   }
 }
 
-# "Trust the cluster's token for system:serviceaccount:restauranty:<name>."
+# "Trust the cluster's token for system:serviceaccount:<namespace>:<name>."
+# The namespace is restauranty, except for the workloads listed in
+# workload_namespaces (grafana: monitoring).
 # Any other ServiceAccount, namespace or cluster is refused by Entra ID.
 resource "azurerm_federated_identity_credential" "workload" {
   for_each = var.workload_secrets
 
-  name                      = "aks-${var.app_namespace}-${each.key}"
+  name                      = "aks-${lookup(var.workload_namespaces, each.key, var.app_namespace)}-${each.key}"
   user_assigned_identity_id = azurerm_user_assigned_identity.workload[each.key].id
   audience                  = ["api://AzureADTokenExchange"]
   issuer                    = data.azurerm_kubernetes_cluster.aks.oidc_issuer_url
-  subject                   = "system:serviceaccount:${var.app_namespace}:${each.key}"
+  subject                   = "system:serviceaccount:${lookup(var.workload_namespaces, each.key, var.app_namespace)}:${each.key}"
 }
 
 # Read access to single secrets, never the whole vault. "Key Vault Secrets

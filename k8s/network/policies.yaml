@@ -19,8 +19,8 @@
 # policy engine, Kubernetes accepts NetworkPolicies and silently ignores them.
 #
 # Kubelet health checks come from the node itself; Cilium always allows them.
-# Prometheus scraping /metrics is opened in #14, together with the monitoring
-# namespace.
+# Prometheus, in the monitoring namespace, reads /metrics of the three
+# backends (rule 6, #14).
 
 # 1. Default deny: every pod in the namespace, both directions.
 apiVersion: networking.k8s.io/v1
@@ -131,3 +131,28 @@ spec:
               - 169.254.0.0/16   # includes the Azure metadata service (169.254.169.254)
       ports:
         - port: 443
+---
+# 6. Prometheus reads /metrics of the three backends (#14). Only the
+#    Prometheus pods of the monitoring namespace, only the "http" port.
+#    Grafana, Loki and Alloy get nothing here: Alloy reads logs through the
+#    Kubernetes API, not from the pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: from-prometheus
+  namespace: restauranty
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app, operator: In, values: [auth, discounts, items] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: http

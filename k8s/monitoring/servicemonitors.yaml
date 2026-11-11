@@ -1,0 +1,30 @@
+# What Prometheus scrapes in the app (#14): /metrics of auth, discounts and
+# items, every 30 seconds, through their Services (port "http").
+# The client is a static website and has no /metrics.
+#
+# /metrics is not public: the Gateway sends /api/... to the backends and
+# everything else to the client, so /metrics from the internet reaches the
+# client's nginx, not a backend. Inside the cluster, only Prometheus may
+# reach it (k8s/network/policies.yaml, rule 6).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: restauranty-backends
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames: [restauranty]
+  selector:
+    matchExpressions:
+      - { key: app, operator: In, values: [auth, discounts, items] }
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+  # Second guard against F18 (too many label values): if one scrape brings
+  # more than 1,000 series, Prometheus throws that scrape away instead of
+  # filling its memory, and the target shows as down. Each backend has about
+  # 100 to 400 today.
+  sampleLimit: 1000
+  # "job" in Prometheus = the Service name (auth, discounts, items)
+  jobLabel: app
