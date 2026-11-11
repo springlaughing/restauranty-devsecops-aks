@@ -4715,6 +4715,12 @@ sent
 
 The message has every part of the template (entry 57): the symbol for "firing", the alert's name and severity as the title, the summary in bold, the description, and the link to the dashboard.
 
+Five minutes later, the second message: the test alert is over.
+
+![The same test alert twice: firing at 18:53, resolved at 18:58](evidence/15-alert-test-slack-resolved.png)
+
+18:53 to 18:58: exactly `resolve_timeout` (5 minutes). Nobody sent the test alert again, so Alertmanager counted it as over and, because of `send_resolved: true`, said so.
+
 It took longer than the 30 seconds of `group_wait`. That setting is only the minimum: Alertmanager's own processing and Slack's delivery come on top, and Alertmanager had restarted a few minutes earlier.
 
 **What this means for a real attack, and for the demo.** A real alert passes through several waits, one after the other:
@@ -4855,6 +4861,19 @@ http_req_failed................: 0.00%  0 out of 481
 
 When the message was sent, 35 failed logins had passed the Gateway within the last 5 minutes. With about 15 in the first minute and 10 per minute after that, 35 is reached after about 3 minutes of attack, which fits: the rule becomes true at 21 (after about 2 minutes) and must stay true for one more minute (`for: 1m`, entry 58). The message carries a count and points to the dashboard for the IP addresses; it carries no IP itself (entry 56).
 
+**The dashboard during the attack** (time range "last 5 minutes", around 19:45):
+
+![Traffic and security rows during the attack: auth's latency up to about 220 ms; at the Gateway, 429 at about 110 per minute and 401 at about 10 per minute](evidence/15-k6-grafana-traffic-security.png)
+
+- **Login attempts at the Gateway, by answer** draws the prediction: 429 jumps to about 110 per minute; 401 starts at about 15 (the burst) and then stays at 10 per minute (one every 6 seconds).
+- **Failed logins per minute** (from `auth`'s own counter) jumps between about 6 and 14. Prometheus reads the counter every 30 seconds and spreads the count over the minute, so the line is jagged, but it averages the same 10 per minute.
+- **Latency p95, backends:** `auth` climbs from a few milliseconds to about 220 ms. That is bcrypt: each failed login costs `auth` about 300 ms (below). The other backends stay flat.
+- **Server errors (5xx):** a flat 0, no longer "No data" (entry 55).
+
+![The Gateway's view: 481 requests from one IP address, all 481 refused; each one in the log as 429 POST /api/auth/login (IP hidden)](evidence/15-k6-grafana-gateway.png)
+
+The Gateway's log, in Loki, has every single try: one IP address, 481 requests, 481 refused (401 or 429). This is the issue's third point, "a Loki query showing the attack (IP, path, status)": the panels "Top 10 client IPs" and "Refused at the Gateway" are exactly that query.
+
 **What the response times show.** Half of the answers took 40 ms or less, but the slowest tenth took more than 336 ms. The fast ones are the 429s: the Gateway answers them without asking anyone. The slow ones are the 401s: they reach `auth`, which checks the password with **bcrypt**, a hash that is slow on purpose, so that guessing passwords offline is expensive too. The email used here does not exist, yet its 401s were just as slow. That is the code fix of entry 5 at work:
 
 ```js
@@ -4870,9 +4889,9 @@ Without it, an unknown email would be answered in a few milliseconds and a known
 
 **The defence, layer by layer:**
 
-- The Gateway's login limit stopped 91% of the attack before it cost `auth` anything. That also protects `auth`'s CPU: each bcrypt check costs it roughly 300 ms (most of the 336 ms above; the rest is the trip over the internet).
+- The Gateway's login limit stopped 91% of the attack before it cost `auth` anything. That also protects `auth`'s CPU: each bcrypt check costs it roughly 300 ms (most of the 336 ms above; the rest is the trip over the internet). Even the 9% that got through pushed `auth`'s p95 latency to about 220 ms; without the limit, all 481 would have reached it.
 - The alert told a person within minutes, from the 9% that got through.
-- The Gateway's log, in Loki, has every try with its IP address (the dashboard's "Refused at the Gateway" and "Top 10 client IPs").
+- The Gateway's log, in Loki, has every try with its IP address (the screenshot above).
 
 **What it does not stop.** The limit is per IP address. An attacker with many addresses (a botnet) gets 10 tries per minute **per address**. The alert would still fire, because it counts failed logins in total, not per IP. Blocking that needs more: a lock per account after a few failures, a CAPTCHA, or multi-factor login.
 
