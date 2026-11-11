@@ -99,8 +99,8 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
 - [Part 11 — monitoring](#part-11--monitoring)
   - [How monitoring works: four questions, five tools](#how-monitoring-works-four-questions-five-tools)
   - [47. Before monitoring: what runs in the cluster](#47-before-monitoring-what-runs-in-the-cluster)
-  - [48. Backend code: count requests by route, not by URL (F18)](#48-backend-code-count-requests-by-route-not-by-url-f18)
-  - [49. Backend code: measure how long each request takes](#49-backend-code-measure-how-long-each-request-takes)
+  - [48. Metrics code in the backends: count requests by route, not by URL (F18)](#48-metrics-code-in-the-backends-count-requests-by-route-not-by-url-f18)
+  - [49. Metrics code in the backends: measure how long each request takes](#49-metrics-code-in-the-backends-measure-how-long-each-request-takes)
   - [50. Design: where each monitoring part runs, and what it may do](#50-design-where-each-monitoring-part-runs-and-what-it-may-do)
   - [51. Finding: five monitoring tools could read every Secret in the cluster](#51-finding-five-monitoring-tools-could-read-every-secret-in-the-cluster)
   - [52. Grafana's login from Key Vault](#52-grafanas-login-from-key-vault)
@@ -3225,7 +3225,7 @@ The 2 restarts are the fix at work: each one is a backend that found no MongoDB 
 **What this part sets up, in order:**
 
 1. **What already runs.** A look at every pod in the cluster before monitoring adds its own (entry 47).
-2. **The backends' numbers.** Our three backend services, `auth`, `discounts` and `items`, already publish numbers for Prometheus at `/metrics`. Two changes in their code make those numbers safe and complete: one stops visitors from creating endless new numbers (F18, entry 48), one adds how long each request takes (entry 49).
+2. **The backends' metrics code.** Our three backend services, `auth`, `discounts` and `items`, each contain a small metrics module, `metrics.cjs`. It counts requests and publishes the numbers at `/metrics` for Prometheus. Two changes in that module make the numbers safe and complete: one stops visitors from creating endless new numbers (F18, entry 48), one adds how long each request takes (entry 49). What the app does for its users does not change.
 3. **The design.** Which monitoring tools, where they run, and what they may access (entry 50).
 4. **A check before installing.** The tools' default rights, read from the charts: five could read every secret in the cluster (entry 51).
 5. **Grafana's password**, from Key Vault (entry 52).
@@ -3439,9 +3439,9 @@ Now every service keeps one copy if any one node fails. Two things are still sin
 
 **Next in this part:** Prometheus, Grafana and Loki go into their own namespace, `monitoring`, and add their pods to this list.
 
-### 48. Backend code: count requests by route, not by URL (F18)
+### 48. Metrics code in the backends: count requests by route, not by URL (F18)
 
-**What changes:** the code of our three backend services, `auth`, `discounts` and `items`, in the file `backend/<service>/metrics.cjs`. No monitoring tool changes here. Each backend counts its requests and publishes the counts at `/metrics`; Prometheus reads them every 30 seconds (entry 53). This entry changes how the backends **name** those counts.
+**What changes:** the metrics code inside our three backend services, `auth`, `discounts` and `items`: the file `backend/<service>/metrics.cjs`. This kind of code is called **instrumentation**: measuring points built into an app, so that tools outside it can see what it does. It uses the library `prom-client`, counts each request, and publishes the counts at `/metrics`, where Prometheus reads them every 30 seconds (entry 53). The app's own logic (login, menu, coupons) does not change, and no monitoring tool changes here. This entry changes how the counts are **named**.
 
 **In one line:** each request is now counted under the route pattern from the code, such as `/api/items/items/:id`, not under the URL the visitor sent. 250 junk requests made 251 new counters before the fix, and 3 after it.
 
@@ -3516,9 +3516,9 @@ The 3 new series are `/metrics` itself, the 400 answers for invalid IDs, and `no
 
 **Still to do:** the same retest on AKS after the deploy, through the Gateway like a real attacker, and its result in the security assessment.
 
-### 49. Backend code: measure how long each request takes
+### 49. Metrics code in the backends: measure how long each request takes
 
-**What changes:** again the code of our three backend services, in `backend/<service>/metrics.cjs`. They get one more number at `/metrics`. Prometheus collects it (entry 53), and Grafana draws it as the "Latency p95" panel of the dashboard.
+**What changes:** again the metrics code inside the three backends, `backend/<service>/metrics.cjs` (entry 48 explains what it is). It adds one more number at `/metrics`: how long each request took. The app's own logic does not change. Prometheus collects the number (entry 53), and Grafana draws it as the "Latency p95" panel of the dashboard.
 
 **In one line:** the three backends now measure how long each request takes (`http_request_duration_seconds`), so Grafana can show the slowest 5 of every 100 requests per service.
 
