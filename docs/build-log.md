@@ -5156,9 +5156,9 @@ It should stay quiet today: the pipeline blocks CRITICAL before a deploy. It fir
 
 ### 64. The scanner checked: three corrections in one evening
 
-**In one line:** the first results of the Trivy Operator were wrong in three ways, and each was found by comparing a result with something already known. After the corrections, MongoDB shows 1 CRITICAL and about 11 HIGH, and the alert on it reached Slack.
+**In one line:** the first results of the Trivy Operator were wrong in three ways, and each was found by comparing a result with something already known. After the corrections, our four images are clean of CRITICAL and HIGH, MongoDB shows 1 CRITICAL and 11 HIGH, and the alert on it reached Slack.
 
-**State:** corrections 1 to 3 applied. The final rescan with correction 3 is running; its numbers are added below when it is done.
+**State:** done. All three corrections applied and confirmed by a final rescan (below).
 
 #### Correction 1: "filesystem" mode did not look at the operating system
 
@@ -5253,7 +5253,32 @@ items           0          1      0        0     5
 library/mongo   1          12     48       6     87
 ```
 
-Four images with different contents (nginx, and three Node.js apps with different libraries) do not share the very same findings by chance. What they share is the Trivy copy inside each scan job. The report does not say where a finding's file was (`path` is empty), so this is a conclusion from the pattern: the same library and version in unrelated images, and only Go libraries in an image without Go. The final rescan will show whether it holds: the go-jose HIGH should disappear from all three, and MongoDB should keep its own findings.
+Four images with different contents (nginx, and three Node.js apps with different libraries) do not share the very same findings by chance. What they share is the Trivy copy inside each scan job. The report does not say where a finding's file was (`path` is empty), so this is a conclusion from the pattern: the same library and version in unrelated images, and only Go libraries in an image without Go. **The experiment: one change, one prediction.** After the upgrade with `skipDirs` (and the pins of entry 65), all old jobs and reports were deleted and every image scanned again. The prediction: the shared HIGH disappears from the four app images, and MongoDB loses exactly that one HIGH and keeps everything else. The result:
+
+| Image | Before `skipDirs` | After |
+| --- | --- | --- |
+| auth | 1 HIGH, 5 UNKNOWN | 0 HIGH, 1 UNKNOWN |
+| client | 1 HIGH, 4 UNKNOWN | 0 of everything |
+| discounts | 1 HIGH, 5 UNKNOWN | 0 HIGH, 1 UNKNOWN |
+| items | 1 HIGH, 5 UNKNOWN | 0 HIGH, 1 UNKNOWN |
+| mongo | 1 CRITICAL, 12 HIGH, 87 UNKNOWN | 1 CRITICAL, 11 HIGH, 83 UNKNOWN |
+
+Exactly as predicted. MongoDB lost one HIGH (go-jose) and 4 UNKNOWN: the same four Go libraries that Trivy's copy had added to the client. Its CRITICAL stayed: it is in Go 1.24.6, MongoDB's own; Trivy is built with Go 1.27.3.
+
+**"0 of everything" again, but this time real.** The client's very first report was also all zeros, and that meant the scanner had not looked. So the same result was checked again: the report names the operating system it found, `os=alpine 3.21.10`. Trivy recognised Alpine, read its package list, and found no known issue in it. The `os` field is the scanner's own proof that it looked.
+
+The one UNKNOWN in each backend is a real finding in an Alpine package:
+
+```
+auth  os=alpine 3.24.4
+   UNKNOWN  CVE-2026-4738  zlib 1.3.2-r1 -> 1.4-r0
+```
+
+"UNKNOWN" means the CVE has no severity rating yet, which is common for a new one. A fixed version exists, so the next rebuild of the backends will most likely pick it up from the updated base image.
+
+The dashboard row, after the final rescan:
+
+![Vulnerabilities in running images: CRITICAL 1 (red), images with HIGH 1 (orange); per image, library/mongo 1 critical and 11 high, auth, client, discounts and items 0 and 0](evidence/15-trivy-dashboard.png)
 
 #### What MongoDB really has
 
@@ -5281,7 +5306,7 @@ All of them have fixed versions. They come with a newer MongoDB image; the image
 
 #### The client's libxslt: two scans, two different images
 
-The nightly scan's 2 HIGH in the client's libxslt were still open in GitHub. But the nightly scan last ran at 11:52 UTC, before the two deploys of the afternoon: it describes **yesterday's** client image. The operator scanned **today's** rebuild (commit `68e7e5e`, Alpine 3.21.10), which does not report them. Building an image again pulls its base image again, often with newer operating-system packages, so a fix can arrive without any change in the code. The next nightly run scans today's SBOM; if the rebuild fixed libxslt, the two alerts close by themselves.
+The nightly scan's 2 HIGH in the client's libxslt were still open in GitHub. But the nightly scan last ran at 11:52 UTC, before the two deploys of the afternoon: it describes **yesterday's** client image. The operator scanned **today's** rebuild (commit `68e7e5e`, Alpine 3.21.10), and found it clean. Building an image again pulls its base image again, often with newer operating-system packages, so a fix can arrive without any change in the code. The next nightly run scans today's SBOM; if the rebuild fixed libxslt, the two alerts close by themselves.
 
 **The lesson of all three.** The scanner's raw output was a claim, and three times it was wrong: it did not look, it looked slowly, and it looked at itself. Each mistake was found by comparing a result with something already known: an alert in GitHub, an nginx image that cannot contain Go, Ubuntu's `apt` that must be there. Without that, the dashboard would have shown "0 CRITICAL" today: false comfort. **Verify the verifier.**
 
