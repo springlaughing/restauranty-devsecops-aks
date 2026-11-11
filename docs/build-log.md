@@ -4070,6 +4070,10 @@ auth  auth-6bc86b8976-xvq2q  up=1
 
 All 6 backend pods: network rule 6 (entry 53, step 7) works, and the ServiceMonitor finds every pod.
 
+**Is the tunnel a risk?** The tunnel itself is small: `kubectl port-forward` listens only on `127.0.0.1` of the laptop, so nobody else on the network can reach it, and it ends with `kill %1`. While it is open, any program on the laptop can read Prometheus, which has no login of its own; its API here can only read. `--address 0.0.0.0` would open it to the whole network: never.
+
+What matters more is what the tunnel needs: a kubeconfig with the right to port-forward. Mine comes from `az aks get-credentials` on a cluster without Entra ID integration, so it is **admin**. With it, a tunnel can reach **any** pod, MongoDB included, and the network rules of #11 do not stop it: a port-forward connects from inside the pod's own network, where NetworkPolicies do not look. So the key is the kubeconfig, not the tunnel. Two copies exist: on my laptop (`~/.kube/config`) and in the pipeline's deploy job (the known gap of Part 8). Production would use Entra ID with Kubernetes RBAC (the kubeconfig then holds no secret, only a short-lived token tied to a login with MFA), give `pods/portforward` only to an admin group, grant admin rights just in time (Entra PIM), and keep audit logs of who opened which tunnel. For the threat model (#3).
+
 **3. Log in to Grafana.** The user is `admin`. The password exists only in Key Vault (entry 52), so it is read from there, straight into the Windows clipboard instead of onto the screen:
 
 ```bash
@@ -4214,7 +4218,31 @@ The cause is the histogram's buckets (entry 49). The smallest was 10 ms. When al
 buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10],
 ```
 
-Tested locally: of 20 requests to the health route of `items`, **19 took less than 1 ms**. The old buckets put all of them into "under 10 ms". Each label combination now has 15 series instead of 11; per backend that is a few dozen more, far below the limit of 1,000 per scrape (entry 53). Reaches AKS with the next deploy.
+Tested locally: of 20 requests to the health route of `items`, **19 took less than 1 ms**. The old buckets put all of them into "under 10 ms". Each label combination now has 15 series instead of 11; per backend that is a few dozen more, far below the limit of 1,000 per scrape (entry 53).
+
+**After the deploy** (pull request #56), the same query on AKS:
+
+```bash
+q 'histogram_quantile(0.95, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m])))'
+q 'sum by (le) (rate(http_request_duration_seconds_bucket{job="items"}[5m]))'
+```
+
+```
+job=discounts  0.0048
+job=auth       0.0047
+job=items      0.0047
+```
+
+The p95 is now about 4.7 ms for each backend, below the Gateway's 6 ms, as it should be. The buckets of `items` show where the requests fall:
+
+| Answered within | Share of requests |
+| --- | --- |
+| 1 ms | 10% |
+| 2.5 ms | 77% |
+| 5 ms | 98% |
+| 10 ms | 99.9% |
+
+The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside that bucket. It is still an estimate, but now within 2.5 ms instead of 10 ms. On AKS the requests are slower than on the laptop (19 of 20 under 1 ms there): shared VMs, a real network, and Prometheus and Kubernetes checking the pods at the same time.
 
 **Small fix: "No data" for server errors.** With no 5xx answers at all, the 5xx series does not exist, and the panel said "No data". During a demo, that looks broken. The query now ends with `or vector(0)`, so the panel shows a flat 0 (`scripts/build-dashboard.py`).
 
