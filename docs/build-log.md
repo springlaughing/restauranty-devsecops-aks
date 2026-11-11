@@ -4960,12 +4960,13 @@ The pattern caught every spelling. The IP table also shows a second address with
 
 **In one line:** the pipeline checks an image once, before it is deployed. But the list of known vulnerabilities grows every day, and not everything that runs comes from the pipeline. So mature teams scan twice: before the deploy, and while it runs. This is often called "shift left, shield right".
 
-**Four reasons:**
+**Five reasons:**
 
 1. **Vulnerabilities are found after the build.** An image never changes after it is built, but the list of known holes (CVEs) does, every day. An image that was clean on Monday can have a CRITICAL on Wednesday, without anyone touching it. The famous case is Log4Shell (December 2021): a hole in log4j, a Java library for writing logs, rated the highest severity. Overnight, images that had passed every scan for years were critical, and they were already running everywhere.
 2. **Not everything that runs went through the pipeline.** The pipeline scans the 4 images it builds. The cluster also runs MongoDB, NGINX, Grafana, Prometheus, Loki, cert-manager and more. They come from public registries through Helm charts, and the pipeline has never seen them. Our own example: MongoBleed (CVE-2025-14847), a hole in MongoDB that was exploited in the wild and fixed in version 8.0.17. Our cluster runs 8.0.34, so it is patched; but until now nothing in this project would have noticed if it were not.
 3. **What runs can drift from what was scanned.** Someone changes an image by hand (`kubectl edit`), an old pod keeps running, or a tag is moved to another image. The pipeline's result describes what was built, not what is running.
 4. **In an incident, the question is "where does this run?"** When the next Log4Shell is announced, a team has to answer within hours: are we affected, and where? During Log4Shell, many companies needed days just to find out where log4j was running. A scanner that watches the cluster keeps that list ready.
+5. **Two scans of "the same image" can disagree, and both can be right.** The nightly scan reads the image's SBOM, the parts list the pipeline wrote at build time: what the build tools **declared**. A scan of the running container's files reads what is **actually there**. A program copied in without a package manager can be missing from the first and visible to the second. Entry 45 met exactly that gap: Trivy's scan listed Alpine's packages and the npm packages, but no entry for the Node.js program itself, because the official Node image installs it from a download, not as an Alpine package. Whether the operator's scan of the files finds it is checked in entry 64.
 
 **Three layers, three jobs:**
 
@@ -4973,7 +4974,7 @@ The pattern caught every spelling. The IP table also shows a second address with
 | --- | --- | --- | --- |
 | Pipeline gate (Trivy, #13) | before a deploy | the 4 images we build | **blocks** the deploy on CRITICAL |
 | Nightly re-scan (#13) | every night | the 4 images, against new CVE data | **reports** in GitHub's Security tab (reason 1) |
-| Trivy Operator (this part) | whenever a pod starts | everything running in the scanned namespace | **reports** in the cluster, on the dashboard, with an alert (reasons 1 to 4) |
+| Trivy Operator (this part) | whenever a pod starts | everything running in the scanned namespace | **reports** in the cluster, on the dashboard, with an alert (reasons 1 to 5) |
 
 A scanner of running images does not stop anything: it informs, and the fix is still a rebuild and a deploy through the pipeline. Stopping an unscanned or unsigned image from starting at all is the job of an "admission controller" such as Kyverno; not part of this project. In production, the cloud's own tool often does the scanning instead: on Azure, Microsoft Defender for Containers (paid per node). The Trivy Operator is the free, open-source way to the same result.
 
