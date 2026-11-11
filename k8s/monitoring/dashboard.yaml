@@ -878,6 +878,221 @@ data:
             "w": 6,
             "h": 5
           }
+        },
+        {
+          "type": "row",
+          "title": "Vulnerabilities in running images (Trivy Operator)",
+          "collapsed": false,
+          "id": 20,
+          "gridPos": {
+            "x": 0,
+            "y": 49,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "type": "stat",
+          "title": "CRITICAL in running images",
+          "description": "Known vulnerabilities rated CRITICAL, in all images running in restauranty. The pipeline blocks CRITICAL before a deploy; this catches CVEs published after it, and images the pipeline never builds (MongoDB). Alert: RestaurantyCriticalVulnerability.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"Critical\"})) or vector(0)",
+              "legendFormat": "",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 21,
+          "gridPos": {
+            "x": 0,
+            "y": 50,
+            "w": 6,
+            "h": 8
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Images with HIGH",
+          "description": "How many running images have at least one HIGH vulnerability.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "count(max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"High\"}) > 0) or vector(0)",
+              "legendFormat": "",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              }
+            }
+          ],
+          "id": 22,
+          "gridPos": {
+            "x": 6,
+            "y": 50,
+            "w": 6,
+            "h": 8
+          }
+        },
+        {
+          "type": "table",
+          "title": "Per image",
+          "description": "Known vulnerabilities per running image, by severity. Details per CVE: kubectl describe vulnerabilityreport -n restauranty <name>",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "instant": true,
+              "format": "table",
+              "legendFormat": "{{image_repository}}",
+              "expr": "max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"Critical\"})"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "instant": true,
+              "format": "table",
+              "legendFormat": "{{image_repository}}",
+              "expr": "max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"High\"})"
+            },
+            {
+              "refId": "C",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "instant": true,
+              "format": "table",
+              "legendFormat": "{{image_repository}}",
+              "expr": "max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"Medium\"})"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "merge",
+              "options": {}
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "renameByName": {
+                  "image_repository": "image",
+                  "Value #A": "critical",
+                  "Value #B": "high",
+                  "Value #C": "medium"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "field": "critical",
+                    "desc": true
+                  }
+                ]
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true
+          },
+          "id": 23,
+          "gridPos": {
+            "x": 12,
+            "y": 50,
+            "w": 12,
+            "h": 8
+          }
         }
       ]
     }

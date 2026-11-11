@@ -220,6 +220,44 @@ board.add(number(
     "Counts from the database, refreshed every minute by the backends.",
     [("max(users_total)", "users"), ("max(items_total)", "items"), ("max(coupons_total)", "coupons")]), 6, 5)
 
+# ---------------------------------------------------------------- images
+# From the Trivy Operator (k8s/monitoring/trivy-operator-values.yaml): one
+# number per running image and severity. "max by" because both copies of a
+# backend run the same image and share one report.
+TRIVY = 'trivy_image_vulnerabilities{namespace="restauranty"%s}'
+board.row("Vulnerabilities in running images (Trivy Operator)")
+board.add(number(
+    "CRITICAL in running images",
+    "Known vulnerabilities rated CRITICAL, in all images running in restauranty. The pipeline blocks "
+    "CRITICAL before a deploy; this catches CVEs published after it, and images the pipeline never "
+    "builds (MongoDB). Alert: RestaurantyCriticalVulnerability.",
+    [('sum(max by (image_repository) (' + TRIVY % ', severity="Critical"' + ')) or vector(0)', "")],
+    colors(("green", None), ("red", 1))), 6, 8)
+board.add(number(
+    "Images with HIGH",
+    "How many running images have at least one HIGH vulnerability.",
+    [('count(max by (image_repository) (' + TRIVY % ', severity="High"' + ') > 0) or vector(0)', "")],
+    colors(("green", None), ("orange", 1))), 6, 8)
+board.add({
+    "type": "table", "title": "Per image",
+    "description": "Known vulnerabilities per running image, by severity. Details per CVE: "
+                   "kubectl describe vulnerabilityreport -n restauranty <name>",
+    "datasource": PROMETHEUS,
+    "targets": [
+        {"refId": s_, "datasource": PROMETHEUS, "instant": True, "format": "table", "legendFormat": "{{image_repository}}",
+         "expr": 'max by (image_repository) (' + TRIVY % (', severity="%s"' % sev) + ')'}
+        for s_, sev in (("A", "Critical"), ("B", "High"), ("C", "Medium"))
+    ],
+    "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": True},
+                                       "renameByName": {"image_repository": "image", "Value #A": "critical",
+                                                        "Value #B": "high", "Value #C": "medium"}}},
+        {"id": "sortBy", "options": {"sort": [{"field": "critical", "desc": True}]}},
+    ],
+    "fieldConfig": {"defaults": {}, "overrides": []}, "options": {"showHeader": True},
+}, 12, 8)
+
 # ---------------------------------------------------------------- write
 dashboard = {
     "uid": "restauranty", "title": "Restauranty: traffic and security", "tags": ["restauranty"],

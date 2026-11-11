@@ -140,3 +140,23 @@ spec:
           annotations:
             summary: "{{ $labels.persistentvolumeclaim }}: only {{ $value | humanizePercentage }} free"
             description: "MongoDB stops writing when the disk is full. Grow the PersistentVolumeClaim or clean up."
+
+    # ------------------------------------------------------------ images
+    - name: restauranty-images
+      rules:
+        # A running image has a CRITICAL vulnerability (Trivy Operator). The
+        # pipeline blocks CRITICAL before a deploy (#13), so this fires when a
+        # CVE is published AFTER the deploy, or in an image the pipeline never
+        # builds (MongoDB). A warning, not critical: nothing is broken yet,
+        # but the image should be rebuilt soon. 15 minutes, so a scan that is
+        # replaced by a newer one does not flicker.
+        - alert: RestaurantyCriticalVulnerability
+          expr: sum by (image_repository) (trivy_image_vulnerabilities{namespace="restauranty", severity="Critical"}) > 0
+          for: 15m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $labels.image_repository }}: {{ $value | printf \"%.0f\" }} CRITICAL vulnerabilities in a running image"
+            description: "Rebuild the image with fixed packages and deploy it. Details: kubectl get vulnerabilityreports -n restauranty -o wide"
+

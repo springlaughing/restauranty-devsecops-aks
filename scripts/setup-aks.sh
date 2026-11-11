@@ -19,6 +19,7 @@ RELOADER_VERSION="2.2.18"
 KPS_VERSION="93.2.0"                     # kube-prometheus-stack: Prometheus, Alertmanager, Grafana (#14)
 LOKI_VERSION="7.6.0"
 ALLOY_VERSION="1.15.0"
+TRIVY_OPERATOR_VERSION="0.38.1"              # scans running images (#15)
 
 TLS_BACKUP="restauranty-tls-backup"      # Key Vault secret: copy of the HTTPS certificate Secret
 
@@ -174,7 +175,8 @@ kubectl apply -f k8s/network/
 log "Installing monitoring: kube-prometheus-stack ${KPS_VERSION}, Loki ${LOKI_VERSION}, Alloy ${ALLOY_VERSION}"
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
 helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
-helm repo update prometheus-community grafana >/dev/null
+helm repo add aqua https://aquasecurity.github.io/helm-charts/ >/dev/null 2>&1 || true
+helm repo update prometheus-community grafana aqua >/dev/null
 kubectl apply -f k8s/monitoring/grafana-secrets.yaml -f k8s/monitoring/alertmanager-secrets.yaml
 kubectl wait externalsecret/grafana-admin externalsecret/alertmanager-slack -n monitoring \
   --for=condition=Ready --timeout=3m
@@ -191,6 +193,11 @@ kubectl apply -f k8s/monitoring/servicemonitors.yaml \
               -f k8s/monitoring/grafana-route.yaml \
               -f k8s/monitoring/dashboard.yaml \
               -f k8s/monitoring/alert-rules.yaml
+# Trivy Operator: scans the images running in restauranty (#15). Its
+# namespace, trivy-system, comes from k8s/platform/namespaces.yaml (step 3).
+helm upgrade --install trivy-operator aqua/trivy-operator \
+  --version "$TRIVY_OPERATOR_VERSION" --namespace trivy-system \
+  -f k8s/monitoring/trivy-operator-values.yaml --wait --timeout=5m
 
 # 8. Save the HTTPS certificate in Key Vault, so the next rebuild can restore it
 #    (step 3). Only the parts cert-manager checks are kept; saved again only

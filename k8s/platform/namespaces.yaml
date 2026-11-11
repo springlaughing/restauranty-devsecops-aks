@@ -43,3 +43,15 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
     # Grafana is published through the Gateway (https-grafana listener).
     gateway-access: "true"
+---
+# trivy-system: the Trivy Operator and its scan jobs (#15). A scan job starts
+# the image it scans and reads all its files as root (filesystem scanning,
+# k8s/monitoring/trivy-operator-values.yaml). "baseline" allows root, but
+# still refuses host access and privileged pods; "restricted" only warns.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trivy-system
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
