@@ -157,6 +157,6 @@ spec:
             project: restauranty
             severity: warning
           annotations:
-            summary: "{{ $labels.image_repository }}: {{ $value | printf \"%.0f\" }} CRITICAL vulnerabilities in a running image"
+            summary: "{{ $labels.image_repository }}: CRITICAL vulnerabilities in a running image: {{ $value | printf \"%.0f\" }}"
             description: "Rebuild the image with fixed packages and deploy it. Details: kubectl get vulnerabilityreports -n restauranty -o wide"
 
