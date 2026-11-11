@@ -4117,10 +4117,28 @@ nginx:
 
 **IP addresses are personal data.** Under the GDPR (the EU's data protection law), an IP address can identify a person. Loki keeps them for 7 days, and Grafana shows them only after a login. Screenshots for this repository must hide them. This goes into `SECURITY.md` (#19).
 
-**Still to do:**
+**Applied: the JSON log and the new dashboard.**
 
-- Apply the new Gateway log format: `helm upgrade` of NGINX Gateway Fabric with its values file (the setup script's step 1), then `kubectl apply -f k8s/monitoring/dashboard.yaml`.
-- Merge and deploy: the new metrics code (entries 48, 49, finding 1), then the F18 retest on AKS.
+```bash
+helm upgrade --install nginx-gateway oci://ghcr.io/nginx/charts/nginx-gateway-fabric --version 2.8.1 \
+  --namespace nginx-gateway -f k8s/platform/nginx-gateway-fabric-values.yaml --wait --timeout=5m
+curl -s -o /dev/null -w "%{http_code}\n" https://restauranty.aks.springlaughing.dev/api/auth
+kubectl logs -n gateway deploy/restauranty-nginx -c nginx --tail=3 | grep '"host"'
+kubectl apply -f k8s/monitoring/dashboard.yaml
+```
+
+The Gateway's two newest lines, a second after the upgrade (IP replaced, user agent shortened):
+
+```
+{"time":"2026-11-11T15:15:59+00:00","ip":"<my ip>","host":"grafana.aks.springlaughing.dev","method":"GET",
+ "path":"/api/frontend/assets","status":200,"bytes":225,"duration":0.006,"upstream_duration":"0.006","user_agent":"Mozilla/5.0 ..."}
+{"time":"2026-11-11T15:15:59+00:00","ip":"<my ip>","host":"restauranty.aks.springlaughing.dev","method":"GET",
+ "path":"/api/auth","status":200,"bytes":17,"duration":0.002,"upstream_duration":"0.002","user_agent":"curl/7.81.0"}
+```
+
+The first line is my browser showing Grafana, the second is the test request to the app: the same Gateway, now told apart by `host`. The dashboard's ConfigMap was `configured`, not `created`: the same dashboard (fixed id `restauranty`) with new panels, not a second copy.
+
+**Still to do:** merge and deploy the new metrics code (entries 48, 49 and finding 1), then the F18 retest on AKS.
 
 ---
 
