@@ -3990,6 +3990,7 @@ Since #11, every pod in `restauranty` refuses all traffic that no rule allows (e
 
 `scripts/setup-aks.sh` does all of this on a new or rebuilt cluster, so the hand-run steps above happen only once:
 
+- Its **step 1** installs NGINX Gateway Fabric with `k8s/platform/nginx-gateway-fabric-values.yaml`, which now includes the Gateway's JSON access log (entry 54).
 - Its **step 3** applies `k8s/platform/namespaces.yaml`, which now includes `monitoring`.
 - Its **step 5** creates `grafana-admin-password` in Key Vault if it is missing, like the MongoDB root password.
 - Its **step 6** applies `k8s/network/`, which now includes rule 6.
@@ -4016,7 +4017,7 @@ kubectl apply -f k8s/monitoring/servicemonitors.yaml \
               -f k8s/monitoring/dashboard.yaml
 ```
 
-(Shortened: the real script hides the output of `helm repo add` and refreshes the repositories.) The chart versions are variables at the top of the script: `KPS_VERSION="93.2.0"`, `LOKI_VERSION="7.6.0"`, `ALLOY_VERSION="1.15.0"`. One thing stays outside the script, because it changes Azure: the `terraform apply` for Grafana's identity (entry 52). It runs before the script, like all of `terraform/cluster-access`.
+(Shortened: the real script hides the output of `helm repo add` and refreshes the repositories.) The script applies `dashboard.yaml` as it is in git; it does not run `scripts/build-dashboard.py`. That script is only for changing the dashboard, and its output is committed with it. The chart versions are variables at the top of the script: `KPS_VERSION="93.2.0"`, `LOKI_VERSION="7.6.0"`, `ALLOY_VERSION="1.15.0"`. One thing stays outside the script, because it changes Azure: the `terraform apply` for Grafana's identity (entry 52). It runs before the script, like all of `terraform/cluster-access`.
 
 **Script or GitOps.** A script is **imperative** ("run these commands"): nothing happens until someone runs it, and nobody notices when someone changes the cluster by hand afterwards. Production teams usually make it **declarative** with GitOps: a tool such as Argo CD or Flux runs inside the cluster, watches a git repository that lists each chart with its version and values, installs it, and puts it back when someone changes it by hand. An upgrade is then a pull request that changes a version number, and the pipeline needs no rights on the cluster at all. Listed in "What is next".
 
