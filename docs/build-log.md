@@ -14,7 +14,7 @@
 
 So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are different things. Headings without a number, such as "What is Trivy", explain an idea; numbered entries record work that was done.
 
-**Parts 1 to 5 are from 9 November 2026, Parts 6 to 10 from 10 November, Part 11 from 11 November.**
+**Parts 1 to 5 are from 9 November 2026, Parts 6 to 10 from 10 November, Parts 11 and 12 from 11 November.**
 
 ---
 
@@ -116,6 +116,8 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
     - [The same steps in the setup script](#the-same-steps-in-the-setup-script)
   - [54. Check: does the data arrive?](#54-check-does-the-data-arrive)
   - [55. Retest on AKS: F18 is fixed, and a latency number that was made up](#55-retest-on-aks-f18-is-fixed-and-a-latency-number-that-was-made-up)
+- [Part 12 — alerts](#part-12--alerts)
+  - [56. Slack: a channel for the alerts, and its webhook in Key Vault](#56-slack-a-channel-for-the-alerts-and-its-webhook-in-key-vault)
 - [What is next](#what-is-next)
 
 ---
@@ -4247,6 +4249,61 @@ The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside t
 **Small fix: "No data" for server errors.** With no 5xx answers at all, the 5xx series does not exist, and the panel said "No data". During a demo, that looks broken. The query now ends with `or vector(0)`, so the panel shows a flat 0 (`scripts/build-dashboard.py`).
 
 **The lesson.** A dashboard can be wrong in a convincing way: a smooth line at a believable value. Two panels that measure the same thing from different places (the backend and the Gateway) caught it. Checking one number against another is cheap, and it found what looking at a single panel would not.
+
+---
+
+## Part 12 — alerts
+
+**Goal:** a person learns about an attack or an outage without watching the dashboard: Alertmanager sends a message to Slack. Then a k6 password-guessing run shows it working. Issue #15, branch `15-alerts`.
+
+### 56. Slack: a channel for the alerts, and its webhook in Key Vault
+
+**In one line:** alerts go to the Slack channel `#restauranty-alerts` in my own workspace, through an "incoming webhook". The webhook's address is a secret, so it went straight into Key Vault without appearing on screen, in a file or in the shell history.
+
+**Which Slack.** Two workspaces were possible: Ironhack's and my own. My own won, for three reasons:
+
+- Ironhack's workspace may not let members add apps without an admin's approval, and the webhook is an app.
+- Test attacks (k6, below) send many alerts. They should not land where other people read.
+- IP addresses are personal data (entry 54). Even so, the alert texts will carry only counts and a link to the dashboard, never IPs: the details stay behind Grafana's login.
+
+**What an incoming webhook is.** A web address that Slack creates for one channel. Whatever is sent to it with an HTTP POST appears in that channel as a message. Alertmanager uses it to post alerts. There is no password: **the address itself is the key**. Anyone who has it can post to the channel, for example fake "all clear" messages during an attack. So it is a secret, and it is treated like the JWT key and the database passwords.
+
+**Creating it** (in the browser, about 2 minutes):
+
+1. https://api.slack.com/apps → **Create New App** → **From scratch**. (The other choice, "From an app manifest", describes the whole app in a YAML file; useful when the same app is created many times, not needed here.) Name: `Restauranty Alerts`. Workspace: my own.
+2. In the app's menu, **Incoming Webhooks** → switch it on.
+3. **Add New Webhook** → choose the channel `#restauranty-alerts` → copy the webhook URL.
+
+**Into Key Vault, without showing it:**
+
+```bash
+read -rsp "Slack webhook URL: " URL; echo
+az keyvault secret set --vault-name kv-evgenia-restauranty -n alertmanager-slack-webhook \
+  --file <(printf %s "$URL") --output none
+unset URL
+```
+
+Each part has a reason:
+
+- `read -rsp` asks for the URL and keeps it in a variable. `-s` hides what is pasted, like a password prompt, so it never shows on the screen.
+- `--file <(printf %s "$URL")` hands the value to `az` through a short-lived pipe. The usual way, `--value "https://..."`, would put the secret on the command line: bash saves command lines in `~/.bash_history`, and while the command runs, every program on the machine can see its arguments (`ps aux`).
+- `unset URL` removes it from the shell's memory afterwards.
+
+**Checking it, still without showing it:**
+
+```bash
+az keyvault secret show --vault-name kv-evgenia-restauranty -n alertmanager-slack-webhook --query "attributes.created" -o tsv
+az keyvault secret show --vault-name kv-evgenia-restauranty -n alertmanager-slack-webhook --query value -o tsv | wc -c
+```
+
+```
+2026-11-11T17:24:24+00:00
+82
+```
+
+The secret exists, and it is 82 characters long: the URL (81) plus the line break that `-o tsv` adds. An empty paste would have given 1. Checking a **property** of a secret (does it exist, how long is it) instead of looking at it is a habit worth keeping, in scripts too.
+
+**Next:** Alertmanager needs to read this one secret. The same pattern as Grafana's password (entry 52): its own Azure identity with a role on `alertmanager-slack-webhook` only, a ServiceAccount, a SecretStore and an ExternalSecret.
 
 ---
 
