@@ -85,14 +85,14 @@ data:
           "gridPos": {
             "x": 0,
             "y": 1,
-            "w": 6,
+            "w": 8,
             "h": 8
           }
         },
         {
           "type": "timeseries",
-          "title": "Server errors (5xx) per second",
-          "description": "Answers with status 500-599, per service. Should stay at 0.",
+          "title": "Server errors from the backends (5xx)",
+          "description": "Answers with status 500-599 that a backend gave itself, per service and per second. Should stay at 0.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -127,9 +127,54 @@ data:
           ],
           "id": 3,
           "gridPos": {
-            "x": 6,
+            "x": 8,
             "y": 1,
-            "w": 6,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Server errors at the Gateway (502, 503, 504)",
+          "description": "Answers with status 500-599 that the Gateway gave for the app. 502/503/504 mean the Gateway could not reach a backend: pods gone, crashed, or a network rule in the way. The backends' own metrics never see these, because the requests do not arrive. Should stay at 0.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "min": 0,
+              "noValue": "0"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (status) (count_over_time({namespace=\"gateway\", container=\"nginx\"} |= `\"host\":\"restauranty.aks.springlaughing.dev\"` | json | __error__=\"\" | status=~\"5..\" [1m]))",
+              "legendFormat": "{{status}}",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              }
+            }
+          ],
+          "id": 4,
+          "gridPos": {
+            "x": 16,
+            "y": 1,
+            "w": 8,
             "h": 8
           }
         },
@@ -169,11 +214,11 @@ data:
               }
             }
           ],
-          "id": 4,
+          "id": 5,
           "gridPos": {
-            "x": 12,
-            "y": 1,
-            "w": 6,
+            "x": 0,
+            "y": 9,
+            "w": 12,
             "h": 8
           }
         },
@@ -213,11 +258,11 @@ data:
               }
             }
           ],
-          "id": 5,
+          "id": 6,
           "gridPos": {
-            "x": 18,
-            "y": 1,
-            "w": 6,
+            "x": 12,
+            "y": 9,
+            "w": 12,
             "h": 8
           }
         },
@@ -225,10 +270,10 @@ data:
           "type": "row",
           "title": "Security: who knocks, who is refused",
           "collapsed": false,
-          "id": 6,
+          "id": 7,
           "gridPos": {
             "x": 0,
-            "y": 9,
+            "y": 17,
             "w": 24,
             "h": 1
           }
@@ -269,10 +314,10 @@ data:
               }
             }
           ],
-          "id": 7,
+          "id": 8,
           "gridPos": {
             "x": 0,
-            "y": 10,
+            "y": 18,
             "w": 8,
             "h": 8
           }
@@ -313,10 +358,10 @@ data:
               }
             }
           ],
-          "id": 8,
+          "id": 9,
           "gridPos": {
             "x": 8,
-            "y": 10,
+            "y": 18,
             "w": 8,
             "h": 8
           }
@@ -357,10 +402,10 @@ data:
               }
             }
           ],
-          "id": 9,
+          "id": 10,
           "gridPos": {
             "x": 16,
-            "y": 10,
+            "y": 18,
             "w": 8,
             "h": 8
           }
@@ -401,11 +446,69 @@ data:
               }
             }
           ],
-          "id": 10,
+          "id": 11,
           "gridPos": {
             "x": 0,
-            "y": 18,
+            "y": 26,
             "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Day-one leak: requests for the user list",
+          "description": "Requests for /api/auth/users that the Gateway refused (403), in the dashboard's time range. Before the fixes, this path gave every user's password hash to anyone (finding F11). Nobody legitimate asks for it now, so every request here is someone probing. Any spelling counts: the block ignores case.",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "0",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "loki",
+                "uid": "loki"
+              },
+              "queryType": "instant",
+              "expr": "sum(count_over_time({namespace=\"gateway\", container=\"nginx\"} |= `\"host\":\"restauranty.aks.springlaughing.dev\"` | json | __error__=\"\" | path=~\"(?i)/api/auth/users.*\" | status=\"403\" [$__range]))"
+            }
+          ],
+          "id": 12,
+          "gridPos": {
+            "x": 8,
+            "y": 26,
+            "w": 6,
             "h": 8
           }
         },
@@ -475,11 +578,11 @@ data:
           "options": {
             "showHeader": true
           },
-          "id": 11,
+          "id": 13,
           "gridPos": {
-            "x": 8,
-            "y": 18,
-            "w": 16,
+            "x": 14,
+            "y": 26,
+            "w": 10,
             "h": 8
           }
         },
@@ -506,10 +609,10 @@ data:
             "wrapLogMessage": false,
             "sortOrder": "Descending"
           },
-          "id": 12,
+          "id": 14,
           "gridPos": {
             "x": 0,
-            "y": 26,
+            "y": 34,
             "w": 24,
             "h": 9
           }
@@ -518,10 +621,10 @@ data:
           "type": "row",
           "title": "Health",
           "collapsed": false,
-          "id": 13,
+          "id": 15,
           "gridPos": {
             "x": 0,
-            "y": 35,
+            "y": 43,
             "w": 24,
             "h": 1
           }
@@ -575,10 +678,10 @@ data:
               }
             }
           ],
-          "id": 14,
+          "id": 16,
           "gridPos": {
             "x": 0,
-            "y": 36,
+            "y": 44,
             "w": 6,
             "h": 5
           }
@@ -636,10 +739,10 @@ data:
               }
             }
           ],
-          "id": 15,
+          "id": 17,
           "gridPos": {
             "x": 6,
-            "y": 36,
+            "y": 44,
             "w": 6,
             "h": 5
           }
@@ -697,10 +800,10 @@ data:
               }
             }
           ],
-          "id": 16,
+          "id": 18,
           "gridPos": {
             "x": 12,
-            "y": 36,
+            "y": 44,
             "w": 6,
             "h": 5
           }
@@ -768,10 +871,10 @@ data:
               }
             }
           ],
-          "id": 17,
+          "id": 19,
           "gridPos": {
             "x": 18,
-            "y": 36,
+            "y": 44,
             "w": 6,
             "h": 5
           }

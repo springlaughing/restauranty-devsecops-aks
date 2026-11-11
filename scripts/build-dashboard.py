@@ -57,12 +57,16 @@ class Layout:
             self.x, self.y, self.row_height = 0, self.y + self.row_height, 0
 
 
-def graph(title, description, source, queries, unit="short"):
-    """A time series panel. queries: list of (query, legend)."""
+def graph(title, description, source, queries, unit="short", no_value=None):
+    """A time series panel. queries: list of (query, legend).
+    no_value: text to show when the query finds nothing (instead of "No data")."""
+    defaults = {"unit": unit, "min": 0}
+    if no_value is not None:
+        defaults["noValue"] = no_value
     return {
         "type": "timeseries", "title": title, "description": description,
         "datasource": source,
-        "fieldConfig": {"defaults": {"unit": unit, "min": 0}, "overrides": []},
+        "fieldConfig": {"defaults": defaults, "overrides": []},
         "options": {"legend": {"showLegend": True, "displayMode": "list", "placement": "bottom"},
                     "tooltip": {"mode": "multi"}},
         "targets": [{"refId": chr(65 + i), "expr": q, "legendFormat": legend, "datasource": source}
@@ -83,6 +87,18 @@ def number(title, description, queries, steps=None):
     }
 
 
+def log_count(title, description, query, steps):
+    """A stat panel from Loki: how many log lines match, in the dashboard's time range."""
+    return {
+        "type": "stat", "title": title, "description": description, "datasource": LOKI,
+        "fieldConfig": {"defaults": {"noValue": "0", "thresholds": {"mode": "absolute", "steps": steps}},
+                        "overrides": []},
+        "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+                    "colorMode": "value", "graphMode": "none", "textMode": "auto"},
+        "targets": [{"refId": "A", "datasource": LOKI, "queryType": "instant", "expr": query}],
+    }
+
+
 def colors(*steps):
     """Threshold colors: colors(("green", None), ("red", 10)) = green below 10, red from 10."""
     return [{"color": c, "value": v} for c, v in steps]
@@ -95,26 +111,33 @@ board.row("Traffic: how busy, how broken, how slow")
 board.add(graph(
     "Requests per second",
     "Requests that reached a backend, per service.",
-    PROMETHEUS, [("sum by (job) (rate(http_requests_total[1m]))", "{{job}}")]), 6)
+    PROMETHEUS, [("sum by (job) (rate(http_requests_total[1m]))", "{{job}}")]), 8)
 board.add(graph(
-    "Server errors (5xx) per second",
-    "Answers with status 500-599, per service. Should stay at 0.",
+    "Server errors from the backends (5xx)",
+    "Answers with status 500-599 that a backend gave itself, per service and per second. Should stay at 0.",
     # "or vector(0)": with no 5xx at all, the series does not exist and the
     # panel would say "No data", which looks broken. Show a flat 0 instead.
-    PROMETHEUS, [('sum by (job) (rate(http_requests_total{statusCode=~"5.."}[1m])) or vector(0)', "{{job}}")]), 6)
+    PROMETHEUS, [('sum by (job) (rate(http_requests_total{statusCode=~"5.."}[1m])) or vector(0)', "{{job}}")]), 8)
+board.add(graph(
+    "Server errors at the Gateway (502, 503, 504)",
+    "Answers with status 500-599 that the Gateway gave for the app. 502/503/504 mean the Gateway could "
+    "not reach a backend: pods gone, crashed, or a network rule in the way. The backends' own metrics "
+    "never see these, because the requests do not arrive. Should stay at 0.",
+    LOKI, [(f'sum by (status) (count_over_time({GATEWAY} | status=~"5.." [1m]))', "{{status}}")],
+    no_value="0"), 8)
 board.add(graph(
     "Latency p95, backends",
     "95 of 100 requests were answered faster than this by the backend itself (5-minute window).",
     PROMETHEUS,
     [("histogram_quantile(0.95, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m])))", "{{job}}")],
-    unit="s"), 6)
+    unit="s"), 12)
 board.add(graph(
     "Latency p95, at the Gateway",
     "95 of 100 requests for the app were answered faster than this, as the visitor sees it: "
     "the Gateway's time, including the backend.",
     LOKI,
     [(f"quantile_over_time(0.95, {GATEWAY} | unwrap duration | __error__=\"\" [5m]) by (host)", "app")],
-    unit="s"), 6)
+    unit="s"), 12)
 
 # ---------------------------------------------------------------- security
 board.row("Security: who knocks, who is refused")
@@ -139,6 +162,13 @@ board.add(graph(
     "Gateway answers per minute, by status",
     "Every request for the app from the internet. 403 = blocked path (user list), 429 = over a rate limit.",
     LOKI, [(f"sum by (status) (count_over_time({GATEWAY} [1m]))", "{{status}}")]), 8)
+board.add(log_count(
+    "Day-one leak: requests for the user list",
+    "Requests for /api/auth/users that the Gateway refused (403), in the dashboard's time range. Before "
+    "the fixes, this path gave every user's password hash to anyone (finding F11). Nobody legitimate asks "
+    "for it now, so every request here is someone probing. Any spelling counts: the block ignores case.",
+    f'sum(count_over_time({GATEWAY} | path=~"(?i)/api/auth/users.*" | status="403" [$__range]))',
+    colors(("green", None), ("red", 1))), 6)
 board.add({
     "type": "table", "title": "Top 10 client IPs, last 15 minutes",
     "description": "Requests for the app per client IP, and how many were refused (401, 403, 429).",
@@ -156,7 +186,7 @@ board.add({
         {"id": "sortBy", "options": {"sort": [{"field": "requests", "desc": True}]}},
     ],
     "fieldConfig": {"defaults": {}, "overrides": []}, "options": {"showHeader": True},
-}, 16)
+}, 10)
 board.add({
     "type": "logs", "title": "Refused at the Gateway (401, 403, 429)",
     "description": "The newest refused requests for the app: status, IP, method, path.",
