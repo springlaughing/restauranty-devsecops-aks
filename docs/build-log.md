@@ -123,6 +123,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [59. Applying the alerts, and a test message to Slack](#59-applying-the-alerts-and-a-test-message-to-slack)
   - [60. Installing k6: a supply-chain check, on my own laptop](#60-installing-k6-a-supply-chain-check-on-my-own-laptop)
   - [61. The attack: password guessing with k6, and the alert in Slack](#61-the-attack-password-guessing-with-k6-and-the-alert-in-slack)
+  - [62. Two more panels: the day-one leak, and the Gateway's own errors](#62-two-more-panels-the-day-one-leak-and-the-gateways-own-errors)
 - [What is next](#what-is-next)
 
 ---
@@ -3941,7 +3942,8 @@ Changes made in Grafana's editor are lost on the next restart of Grafana. Produc
 Traffic:
 
 - **Requests per second** (Prometheus): how busy is each service? `sum by (job) (rate(http_requests_total[1m]))`: the requests counted by each backend, per second, summed per service.
-- **Server errors (5xx) per second** (Prometheus): is something broken? The same counter, only status codes 500 to 599.
+- **Server errors from the backends (5xx)** (Prometheus): is something broken? The same counter, only status codes 500 to 599.
+- **Server errors at the Gateway (502, 503, 504)** (Loki): can the Gateway reach the backends? Added in entry 62.
 - **Latency p95, backends** (Prometheus): is the backend slow? The p95 from the histogram of entry 49.
 - **Latency p95, at the Gateway** (Loki): is the app slow as a visitor sees it? The p95 of the `duration` field in the Gateway's log: the backend's time plus the Gateway's own (entry 54).
 
@@ -3951,6 +3953,7 @@ Security:
 - **Login attempts at the Gateway, by answer** (Loki): every login from the internet, split into 401 (wrong password, from `auth`), 429 (over the login limit, from the Gateway: `auth` never sees these) and 200 (success).
 - **Refused tokens per minute** (Prometheus): is someone sending no token or a forged one? The 401 answers on `no_route` (entry 48).
 - **Gateway answers per minute, by status** (Loki): what do visitors of the app get? 403 is the blocked user list, 429 is over a limit.
+- **Day-one leak: requests for the user list** (Loki): is someone probing for the leak of finding F11? Added in entry 62.
 - **Top 10 client IPs, last 15 minutes** (Loki): who sends the most, and how much of it is refused?
 - **Refused at the Gateway** (Loki): the newest refused requests, with status, IP, method and path.
 
@@ -4268,6 +4271,7 @@ The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside t
 3. **When alerts fire:** nine rules for attacks, the app and MongoDB, each with its code and the reason for its threshold (entry 58).
 4. **Applying and testing** them, with a test message to Slack (entry 59).
 5. **The attack:** installing k6 (entry 60), then password guessing against the real login, and the alert in Slack (entry 61).
+6. **Two more dashboard panels:** the day-one leak, and the Gateway's own server errors (entry 62).
 
 ### 56. Slack: a channel for the alerts, and its webhook in Key Vault
 
@@ -4901,6 +4905,54 @@ Without it, an unknown email would be answered in a few milliseconds and a known
 
 **What it does not stop.** The limit is per IP address. An attacker with many addresses (a botnet) gets 10 tries per minute **per address**. The alert would still fire, because it counts failed logins in total, not per IP. Blocking that needs more: a lock per account after a few failures, a CAPTCHA, or multi-factor login.
 
+### 62. Two more panels: the day-one leak, and the Gateway's own errors
+
+**In one line:** the dashboard gets two panels from the Gateway's log. One counts requests for the user list, the path that leaked every password hash on day one. The other counts server errors that the Gateway gives itself when it cannot reach a backend. No new alerts: these are for watching and for the demo.
+
+**Why a panel and not an alert.** An alert on log lines needs Loki's own rule engine (the "ruler"), configured and connected to Alertmanager. For the demo, seeing the event is enough; the Prometheus alerts (entry 58) already cover the attacks with the most volume. The ruler stays in "What is next".
+
+**Which status codes are watched, and where:**
+
+| Status | Means | Watched by |
+| --- | --- | --- |
+| 401 on login | wrong password | Prometheus (panel and alert), Loki (panel) |
+| 401 on `no_route` | missing or forged token | Prometheus (panel and alert) |
+| 403 | the blocked user list | Loki: status panel, log panel, **new: "Day-one leak"** |
+| 429 | over a rate limit | Loki: status panel, login panel, log panel |
+| 404 | unknown path, mostly scanners | Loki: status panel |
+| 5xx from a backend | a backend failed on a request | Prometheus (panel and alert) |
+| 5xx from the Gateway | the Gateway could not reach a backend | **new: "Server errors at the Gateway"** |
+
+Other codes, such as 400 (bad input in a form), are visible in the status panel and need nothing of their own.
+
+**Panel 1: "Day-one leak: requests for the user list."** A big number: how many requests for `/api/auth/users` the Gateway refused with 403, in the dashboard's time range. Red from the first one. Before the fixes, this path gave anyone every user with their password hash (finding F11). Since #10 the Gateway refuses it in any spelling (entry 27), and the frontend does not use it. So nobody legitimate asks for it: every request here is someone probing for a known leak.
+
+```
+sum(count_over_time(<Gateway, app host> | path=~"(?i)/api/auth/users.*" | status="403" [$__range]))
+```
+
+`(?i)` makes the pattern ignore upper and lower case, like the block itself; `.*` also catches `/api/auth/users/123` and query strings. `$__range` is Grafana's name for the selected time range.
+
+**Panel 2: "Server errors at the Gateway (502, 503, 504)."** When the Gateway cannot reach a backend, it answers 502, 503 or 504 itself. The backends' metrics never see these, because the requests never arrive. The worst case is a mistake of my own: a changed network rule that blocks the Gateway from a backend. The pods stay healthy, Prometheus still scrapes them (it has its own rule 6), every alert stays green, and every user gets an error. Only the Gateway's log knows. The panel shows a flat 0, not "No data", when nothing is wrong: "No data" could also mean the query is broken.
+
+The old panel "Server errors (5xx) per second" is now called "Server errors from the backends (5xx)", so the two are not confused.
+
+**The test:** the day-one leak, in three spellings, as an attacker would try to get around the block:
+
+```bash
+kubectl apply -f k8s/monitoring/dashboard.yaml
+APP=https://restauranty.aks.springlaughing.dev
+for p in /api/auth/users /api/auth/USERS /api/auth/Users/123; do
+  curl -s -o /dev/null -w "$p  %{http_code}\n" "$APP$p"
+done
+```
+
+All three got 403, and the panel turned red:
+
+![The day-one leak panel shows 3 in red; the log lists GET /api/auth/users, /USERS and /Users/123, each refused with 403 (IP addresses hidden)](evidence/15-day-one-leak-panel.png)
+
+The pattern caught every spelling. The IP table also shows a second address with 6 requests that were not mine: most likely another scanner from the internet (entry 54).
+
 ---
 
 ## What is next
@@ -4913,5 +4965,6 @@ Without it, an unknown email would be answered in a few milliseconds and a known
 | Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
 | Reliability, outside this project's security focus: a readiness check that asks MongoDB's state (fast errors instead of 10 s waits, entry 46); MongoDB as a replica set for high availability | — |
 | Reliability: spread the app pods over all 3 nodes and zones. Today all of them run on one node (entry 47). Fix: a strict spread rule (`DoNotSchedule`) or the descheduler; a second Gateway pod | — |
+| Alerts from the logs: Loki's ruler, connected to Alertmanager, for the day-one leak (any 403 on the user list) and the Gateway's own 5xx (entry 62) | #15 |
 | GitOps with Argo CD or Flux: platform charts and app manifests installed from git by a controller in the cluster; no `helm` or `kubectl` from laptops or the pipeline, drift put back automatically, and the deploy identity no longer needs admin rights (entries 35, 53) | — |
 | Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
