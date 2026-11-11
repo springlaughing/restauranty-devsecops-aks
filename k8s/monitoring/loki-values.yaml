@@ -1,0 +1,70 @@
+# Loki (#14): stores the logs of the pods, so they can be searched in Grafana.
+# One single instance with a disk: enough for a demo cluster. Production would
+# run Loki's separate read, write and backend parts, with Azure Blob storage.
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false                  # one user (us), so no tenants
+  # The chart already runs Loki as a normal user, without capabilities, with
+  # a read-only file system. It leaves out the seccomp filter (a limit on
+  # which kernel calls the container may make); added here. Helm merges this
+  # into the chart's other settings, it does not replace them.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2026-11-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    retention_period: 168h             # 7 days, like Prometheus
+  compactor:
+    retention_enabled: true            # the compactor deletes logs older than that
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClass: managed-csi-zrs
+    size: 10Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+# The parts of the scalable mode, the caches, the extra NGINX in front and
+# the self-test: not needed for one instance.
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+gateway:
+  enabled: false
+lokiCanary:
+  enabled: false
+test:
+  enabled: false
+
+# Loki's helper loads alert rules from ConfigMaps and Secrets in every
+# namespace. This project keeps its alert rules in Prometheus (#15): off, and
+# Loki's rights stay in its own namespace.
+sidecar:
+  rules:
+    enabled: false
+rbac:
+  namespaced: true

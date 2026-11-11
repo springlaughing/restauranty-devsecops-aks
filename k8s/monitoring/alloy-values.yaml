@@ -1,0 +1,103 @@
+# Grafana Alloy (#14): collects the logs of the pods and sends them to Loki.
+#
+# It reads the logs through the Kubernetes API (loki.source.kubernetes), the
+# same way as "kubectl logs". The usual way, a copy on every node reading the
+# log files from the node's disk, needs access to the node itself. One copy
+# through the API is enough for a cluster this size.
+#
+# Its rights: read pods and their logs, in the namespaces listed here only
+# (one Role per namespace, no ClusterRole). The chart's default would let
+# Alloy read every Secret in the cluster (the JWT key, the database
+# passwords, the HTTPS private key), for features this project does not use.
+# The same list is in discovery.kubernetes below.
+rbac:
+  namespaces:
+    - restauranty
+    - gateway
+    - nginx-gateway
+    - cert-manager
+    - external-secrets
+    - reloader
+    - monitoring
+  rules:
+    - apiGroups: [""]
+      resources: ["pods", "pods/log"]
+      verbs: ["get", "list", "watch"]
+
+controller:
+  type: deployment
+  replicas: 1
+  # A small writable folder for Alloy's working files (--storage.path),
+  # because the rest of its file system is read-only (below).
+  volumes:
+    extra:
+      - name: storage
+        emptyDir: {}
+
+alloy:
+  # The chart runs Alloy as root, with every Linux capability. Reading logs
+  # through the Kubernetes API needs neither: Alloy runs as its own user
+  # (473, "alloy" in the image), cannot gain privileges, has no capabilities,
+  # a seccomp filter, and cannot change its own files. The same settings as
+  # the app pods ("restricted" profile).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 473
+    runAsGroup: 473
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+  mounts:
+    extra:
+      - name: storage
+        mountPath: /tmp/alloy
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  configMap:
+    content: |
+      // The pods of these namespaces: the app, the Gateway and the
+      // platform tools. Not kube-system (AKS's own pods).
+      discovery.kubernetes "pods" {
+        role = "pod"
+        namespaces {
+          names = ["restauranty", "gateway", "nginx-gateway", "cert-manager", "external-secrets", "reloader", "monitoring"]
+        }
+      }
+
+      // Labels in Loki: a few, with few values each. Request details (IP,
+      // path, status) stay in the log line and are read at query time.
+      discovery.relabel "pods" {
+        targets = discovery.kubernetes.pods.targets
+
+        rule {
+          source_labels = ["__meta_kubernetes_namespace"]
+          target_label  = "namespace"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_name"]
+          target_label  = "pod"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_container_name"]
+          target_label  = "container"
+        }
+        rule {
+          source_labels = ["__meta_kubernetes_pod_label_app"]
+          target_label  = "app"
+        }
+      }
+
+      loki.source.kubernetes "pods" {
+        targets    = discovery.relabel.pods.output
+        forward_to = [loki.write.default.receiver]
+      }
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.monitoring.svc:3100/loki/api/v1/push"
+        }
+      }

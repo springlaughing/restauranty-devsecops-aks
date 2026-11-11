@@ -42,5 +42,14 @@ variable "workload_secrets" {
     discounts = ["jwt-public-key", "mongo-password"]
     items     = ["jwt-public-key", "mongo-password", "cloud-name", "cloud-api-key", "cloud-api-secret"]
     mongodb   = ["mongo-root-password", "mongo-password"]
+    grafana   = ["grafana-admin-password"] # Grafana's login (#14), in the monitoring namespace
+  }
+}
+
+variable "workload_namespaces" {
+  description = "Namespace of a workload's ServiceAccount, for workloads outside app_namespace."
+  type        = map(string)
+  default = {
+    grafana = "monitoring"
   }
 }

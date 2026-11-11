@@ -1,0 +1,30 @@
+# F18 retest, local (11 November 2026, build log entry 48)
+#
+# The real items service (app.js, routes, token check), started twice: with metrics.cjs
+# from main (old) and from branch 14-monitoring (new). No MongoDB, so a request that
+# needs the database ends in a 500: that tests the error path.
+#
+# Requests: 3 normal ones (health 200; no token 401; valid token, database down 500),
+# then 250 junk: 200 to /api/items/items/junk-<n> (half with a valid token) and
+# 50 to /junk-<n>. Then count the http_requests_total series in /metrics.
+
+## Old code: route label = the URL as sent (first 8 of 254 series)
+http_requests_total{method="GET",route="/api/items",statusCode="200"} 1
+http_requests_total{method="GET",route="/api/items/items/abc",statusCode="401"} 1
+http_requests_total{method="GET",route="/api/items/items/6730f1aa6730f1aa6730f1aa",statusCode="500"} 1
+http_requests_total{method="GET",route="/metrics",statusCode="200"} 1
+http_requests_total{method="GET",route="/api/items/items/junk-0",statusCode="400"} 1
+http_requests_total{method="GET",route="/api/items/items/junk-1",statusCode="401"} 1
+http_requests_total{method="GET",route="/api/items/items/junk-2",statusCode="400"} 1
+http_requests_total{method="GET",route="/api/items/items/junk-3",statusCode="401"} 1
+...
+series before the 250 junk requests: 3, after: 254
+
+## New code: route label = the route pattern from the code (all series)
+http_requests_total{method="GET",route="/api/items",statusCode="200"} 1
+http_requests_total{method="GET",route="no_route",statusCode="401"} 101
+http_requests_total{method="GET",route="/api/items/items/:id",statusCode="500"} 1
+http_requests_total{method="GET",route="/metrics",statusCode="200"} 1
+http_requests_total{method="GET",route="/api/items/items/:id",statusCode="400"} 100
+http_requests_total{method="GET",route="no_route",statusCode="404"} 50
+series before the 250 junk requests: 3, after: 6
