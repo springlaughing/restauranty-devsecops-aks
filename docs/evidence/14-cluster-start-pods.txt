@@ -1,0 +1,137 @@
+# Cluster start on 11 November 2026: all pods, twice (build log, entry 47)
+
+## 1. About 3 minutes after the nodes came back (az aks start, then kubectl get pods -A)
+## The backends are still recovering: 0/1 and CrashLoopBackOff. The list was cut off at mongodb-0.
+
+$ az aks start --resource-group rg-evgenia-k8s-dev --name aks-evgenia-k8s-dev
+$ kubectl get pods -A
+NAMESPACE          NAME                                                  READY   STATUS             RESTARTS      AGE
+cert-manager       cert-manager-6784c9f6fb-7qmvd                         1/1     Running            0             14h
+cert-manager       cert-manager-cainjector-7c84589448-cvpr5              1/1     Running            0             14h
+cert-manager       cert-manager-webhook-7949787cd9-t7zf7                 1/1     Running            0             14h
+external-secrets   external-secrets-5b577d47f5-6nxzp                     1/1     Running            0             14h
+external-secrets   external-secrets-cert-controller-56c6d7984f-7k76g     1/1     Running            0             14h
+external-secrets   external-secrets-webhook-85b48984b9-jhpf2             1/1     Running            0             14h
+gateway            restauranty-nginx-85c5954cc8-cgvgl                    1/1     Running            0             14h
+kube-system        azure-cns-8nf7s                                       1/1     Running            0             3m4s
+kube-system        azure-cns-st5st                                       1/1     Running            0             3m12s
+kube-system        azure-cns-zdzgn                                       1/1     Running            0             3m20s
+kube-system        azure-ip-masq-agent-726ln                             1/1     Running            0             3m12s
+kube-system        azure-ip-masq-agent-snc6c                             1/1     Running            0             3m20s
+kube-system        azure-ip-masq-agent-tzzxm                             1/1     Running            0             3m4s
+kube-system        azure-wi-webhook-controller-manager-57ccd5fdf-5b5l8   1/1     Running            0             14h
+kube-system        azure-wi-webhook-controller-manager-57ccd5fdf-xcqz5   1/1     Running            0             14h
+kube-system        cilium-g5jzk                                          3/3     Running            0             3m20s
+kube-system        cilium-kfm46                                          3/3     Running            0             3m4s
+kube-system        cilium-lvsst                                          3/3     Running            0             3m12s
+kube-system        cilium-operator-7c87fd9bf-4jps2                       1/1     Running            0             3m12s
+kube-system        cilium-operator-7c87fd9bf-mbnzk                       1/1     Running            0             3m11s
+kube-system        cloud-node-manager-48tzt                              1/1     Running            0             3m12s
+kube-system        cloud-node-manager-5q6mq                              1/1     Running            0             3m4s
+kube-system        cloud-node-manager-fznnt                              1/1     Running            0             3m20s
+kube-system        coredns-5bf45f87d-jv6dt                               1/1     Running            0             14h
+kube-system        coredns-5bf45f87d-smwnb                               1/1     Running            0             14h
+kube-system        coredns-autoscaler-7467554f77-dmnp6                   1/1     Running            0             14h
+kube-system        csi-azuredisk-node-557vh                              3/3     Running            0             3m4s
+kube-system        csi-azuredisk-node-7gf2w                              3/3     Running            0             3m12s
+kube-system        csi-azuredisk-node-xm2jk                              3/3     Running            0             3m20s
+kube-system        csi-azurefile-node-ltbrf                              4/4     Running            0             3m4s
+kube-system        csi-azurefile-node-lxlrd                              4/4     Running            0             3m12s
+kube-system        csi-azurefile-node-nr4wn                              4/4     Running            0             3m20s
+kube-system        konnectivity-agent-56449f6bbc-2x6ns                   1/1     Running            0             14h
+kube-system        konnectivity-agent-56449f6bbc-gqs5r                   1/1     Running            0             14h
+kube-system        konnectivity-agent-autoscaler-5b658f6697-w9cjz        1/1     Running            0             14h
+kube-system        metrics-server-866c8cb87d-ktt8p                       2/2     Running            0             14h
+kube-system        metrics-server-866c8cb87d-p4g5p                       2/2     Running            0             14h
+nginx-gateway      nginx-gateway-nginx-gateway-fabric-6ccd569b75-cpcqz   1/1     Running            0             14h
+reloader           reloader-reloader-df6cd89c-44bv8                      1/1     Running            0             14h
+restauranty        auth-9cc8f67d6-4htpq                                  0/1     Running            2 (20s ago)   14h
+restauranty        auth-9cc8f67d6-5dpj9                                  0/1     Running            2 (18s ago)   14h
+restauranty        client-5976bbc778-kbq96                               1/1     Running            0             14h
+restauranty        client-5976bbc778-m9hrz                               1/1     Running            0             14h
+restauranty        discounts-54784b8d64-trrrh                            0/1     Running            2 (18s ago)   14h
+restauranty        discounts-54784b8d64-zlfmk                            1/1     Running            2 (39s ago)   14h
+restauranty        items-7d66c5464b-85zqn                                1/1     Running            2 (38s ago)   14h
+restauranty        items-7d66c5464b-bc94q                                0/1     CrashLoopBackOff   2 (18s ago)   14h
+restauranty        mongodb-0
+
+## 2. A few minutes later: every pod ready, with the node it runs on
+
+$ kubectl get pods -A -o wide   (columns shortened)
+NAMESPACE          NAME                                                  READY   RESTARTS   NODE
+cert-manager       cert-manager-6784c9f6fb-7qmvd                         true    0          aks-system-11635412-vmss000008
+cert-manager       cert-manager-cainjector-7c84589448-cvpr5              true    0          aks-system-11635412-vmss000008
+cert-manager       cert-manager-webhook-7949787cd9-t7zf7                 true    0          aks-system-11635412-vmss000008
+external-secrets   external-secrets-5b577d47f5-6nxzp                     true    0          aks-system-11635412-vmss000008
+external-secrets   external-secrets-cert-controller-56c6d7984f-7k76g     true    0          aks-system-11635412-vmss000008
+external-secrets   external-secrets-webhook-85b48984b9-jhpf2             true    0          aks-system-11635412-vmss000008
+gateway            restauranty-nginx-85c5954cc8-cgvgl                    true    0          aks-system-11635412-vmss000008
+kube-system        azure-cns-8nf7s                                       true    0          aks-system-11635412-vmss000006
+kube-system        azure-cns-st5st                                       true    0          aks-system-11635412-vmss000007
+kube-system        azure-cns-zdzgn                                       true    0          aks-system-11635412-vmss000008
+kube-system        azure-ip-masq-agent-726ln                             true    0          aks-system-11635412-vmss000007
+kube-system        azure-ip-masq-agent-snc6c                             true    0          aks-system-11635412-vmss000008
+kube-system        azure-ip-masq-agent-tzzxm                             true    0          aks-system-11635412-vmss000006
+kube-system        azure-wi-webhook-controller-manager-57ccd5fdf-5b5l8   true    0          aks-system-11635412-vmss000008
+kube-system        azure-wi-webhook-controller-manager-57ccd5fdf-xcqz5   true    0          aks-system-11635412-vmss000008
+kube-system        cilium-g5jzk                                          true    0          aks-system-11635412-vmss000008
+kube-system        cilium-kfm46                                          true    0          aks-system-11635412-vmss000006
+kube-system        cilium-lvsst                                          true    0          aks-system-11635412-vmss000007
+kube-system        cilium-operator-7c87fd9bf-4jps2                       true    0          aks-system-11635412-vmss000007
+kube-system        cilium-operator-7c87fd9bf-mbnzk                       true    0          aks-system-11635412-vmss000008
+kube-system        cloud-node-manager-48tzt                              true    0          aks-system-11635412-vmss000007
+kube-system        cloud-node-manager-5q6mq                              true    0          aks-system-11635412-vmss000006
+kube-system        cloud-node-manager-fznnt                              true    0          aks-system-11635412-vmss000008
+kube-system        coredns-5bf45f87d-jv6dt                               true    0          aks-system-11635412-vmss000008
+kube-system        coredns-5bf45f87d-smwnb                               true    0          aks-system-11635412-vmss000008
+kube-system        coredns-autoscaler-7467554f77-dmnp6                   true    0          aks-system-11635412-vmss000008
+kube-system        csi-azuredisk-node-557vh                              true    0          aks-system-11635412-vmss000006
+kube-system        csi-azuredisk-node-7gf2w                              true    0          aks-system-11635412-vmss000007
+kube-system        csi-azuredisk-node-xm2jk                              true    0          aks-system-11635412-vmss000008
+kube-system        csi-azurefile-node-ltbrf                              true    0          aks-system-11635412-vmss000006
+kube-system        csi-azurefile-node-lxlrd                              true    0          aks-system-11635412-vmss000007
+kube-system        csi-azurefile-node-nr4wn                              true    0          aks-system-11635412-vmss000008
+kube-system        konnectivity-agent-56449f6bbc-2x6ns                   true    0          aks-system-11635412-vmss000008
+kube-system        konnectivity-agent-56449f6bbc-gqs5r                   true    0          aks-system-11635412-vmss000008
+kube-system        konnectivity-agent-autoscaler-5b658f6697-w9cjz        true    0          aks-system-11635412-vmss000008
+kube-system        metrics-server-866c8cb87d-ktt8p                       true    0          aks-system-11635412-vmss000008
+kube-system        metrics-server-866c8cb87d-p4g5p                       true    0          aks-system-11635412-vmss000008
+nginx-gateway      nginx-gateway-nginx-gateway-fabric-6ccd569b75-cpcqz   true    0          aks-system-11635412-vmss000008
+reloader           reloader-reloader-df6cd89c-44bv8                      true    0          aks-system-11635412-vmss000008
+restauranty        auth-9cc8f67d6-4htpq                                  true    2          aks-system-11635412-vmss000008
+restauranty        auth-9cc8f67d6-5dpj9                                  true    2          aks-system-11635412-vmss000008
+restauranty        client-5976bbc778-kbq96                               true    0          aks-system-11635412-vmss000008
+restauranty        client-5976bbc778-m9hrz                               true    0          aks-system-11635412-vmss000008
+restauranty        discounts-54784b8d64-trrrh                            true    2          aks-system-11635412-vmss000008
+restauranty        discounts-54784b8d64-zlfmk                            true    2          aks-system-11635412-vmss000008
+restauranty        items-7d66c5464b-85zqn                                true    2          aks-system-11635412-vmss000008
+restauranty        items-7d66c5464b-bc94q                                true    3          aks-system-11635412-vmss000008
+restauranty        mongodb-0                                             true    0          aks-system-11635412-vmss000008
+
+$ kubectl get nodes -L topology.kubernetes.io/zone
+NAME                             STATUS   ROLES    AGE   VERSION   ZONE
+aks-system-11635412-vmss000006   Ready    <none>   11m   v1.36.5   germanywestcentral-2
+aks-system-11635412-vmss000007   Ready    <none>   11m   v1.36.5   germanywestcentral-3
+aks-system-11635412-vmss000008   Ready    <none>   12m   v1.36.5   germanywestcentral-1
+
+$ kubectl logs -n restauranty items-7d66c5464b-bc94q --previous | tail -3
+Server listening on http://localhost:3003
+MongoDB disconnected
+Error connecting to mongo: getaddrinfo ENOTFOUND mongodb. Exiting, so the container restarts.
+
+## 3. Container start times (UTC): the pod objects are 14 h old, the containers are new
+auth-9cc8f67d6-4htpq  pod created 2026-11-10T22:16:02Z  container started 2026-11-11T13:03:23Z  restarts 2
+auth-9cc8f67d6-5dpj9  pod created 2026-11-10T22:15:58Z  container started 2026-11-11T13:03:25Z  restarts 2
+client-5976bbc778-kbq96  pod created 2026-11-10T22:16:03Z  container started 2026-11-11T13:02:32Z  restarts 0
+client-5976bbc778-m9hrz  pod created 2026-11-10T22:15:58Z  container started 2026-11-11T13:02:32Z  restarts 0
+discounts-54784b8d64-trrrh  pod created 2026-11-10T22:15:59Z  container started 2026-11-11T13:03:25Z  restarts 2
+discounts-54784b8d64-zlfmk  pod created 2026-11-10T22:16:03Z  container started 2026-11-11T13:03:06Z  restarts 2
+items-7d66c5464b-85zqn  pod created 2026-11-10T22:15:58Z  container started 2026-11-11T13:03:05Z  restarts 2
+items-7d66c5464b-bc94q  pod created 2026-11-10T22:16:03Z  container started 2026-11-11T13:03:36Z  restarts 3
+mongodb-0  pod created 2026-11-10T22:16:01Z  container started 2026-11-11T13:02:50Z  restarts 0
+
+## 4. The app works
+$ curl -s -o /dev/null -w "website %{http_code}\n" https://restauranty.aks.springlaughing.dev/
+website 200
+$ curl -s -w "  HTTP %{http_code}\n" -X POST https://restauranty.aks.springlaughing.dev/api/auth/login -H "Content-Type: application/json" -d '{"email":"nobody@example.com","password":"wrong"}'
+{"message":"Email or Password Incorrect"}  HTTP 401

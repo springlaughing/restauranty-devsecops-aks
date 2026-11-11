@@ -14,7 +14,7 @@
 
 So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are different things. Headings without a number, such as "What is Trivy", explain an idea; numbered entries record work that was done.
 
-**Parts 1 to 5 are from 9 November 2026, Parts 6 to 10 from 10 November.**
+**Parts 1 to 5 are from 9 November 2026, Parts 6 to 10 from 10 November, Part 11 from 11 November.**
 
 ---
 
@@ -96,6 +96,9 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
 - [Part 10 — backends recover by themselves after a cluster restart](#part-10--backends-recover-by-themselves-after-a-cluster-restart)
   - [46. Fix: a backend that cannot reach MongoDB at start exits, and Kubernetes restarts it](#46-fix-a-backend-that-cannot-reach-mongodb-at-start-exits-and-kubernetes-restarts-it)
   - [What #28 changes](#what-28-changes)
+- [Part 11 — monitoring](#part-11--monitoring)
+  - [47. Before monitoring: what runs in the cluster](#47-before-monitoring-what-runs-in-the-cluster)
+  - [48. Code fix: metrics labelled by route, not by URL (F18)](#48-code-fix-metrics-labelled-by-route-not-by-url-f18)
 - [What is next](#what-is-next)
 
 ---
@@ -3200,6 +3203,265 @@ The 2 restarts are the fix at work: each one is a backend that found no MongoDB 
 
 ---
 
+## Part 11 — monitoring
+
+**Goal:** see what happens in the cluster and in the app, and get an alert when someone attacks it. Issue #14, branch `14-monitoring`.
+
+### 47. Before monitoring: what runs in the cluster
+
+**In one line:** after `az aks start` on 11 November, 48 pods run on 3 nodes. This entry says what each one does. The same list shows the #28 fix working after a real cluster start, and it shows that all app pods sit on one node.
+
+**Why start here.** Monitoring adds its own pods (Prometheus, Grafana, Loki). Before adding them, it helps to know what is already there, and who put it there.
+
+```bash
+az aks start --resource-group rg-evgenia-k8s-dev --name aks-evgenia-k8s-dev
+kubectl get pods -A                   # every pod in every namespace
+kubectl get pods -n restauranty       # only the app
+```
+
+Full outputs: [evidence/14-cluster-start-pods.txt](evidence/14-cluster-start-pods.txt).
+
+#### How to read the list
+
+| Column | Means |
+| --- | --- |
+| `NAMESPACE` | A folder for Kubernetes objects. It groups them and lets rules (access rights, network rules) apply to one group. |
+| `READY` `1/1` | Containers in the pod that are ready, out of all containers in the pod. Some pods have helpers next to the main program, so `3/3` or `4/4` is normal. |
+| `STATUS` | `Running`: the container is running. `CrashLoopBackOff`: it stopped with an error, and Kubernetes waits a little before it tries again. |
+| `RESTARTS` | How often a container stopped and Kubernetes started it again. |
+| `AGE` | How old the **pod** is: the record in Kubernetes. Not how long the program in it has been running (see below). |
+
+There are two kinds of names:
+
+| Name looks like | Made by | Copies |
+| --- | --- | --- |
+| `cilium-g5jzk`: one short random part | a **DaemonSet** | exactly one on each node, so 3 here |
+| `coredns-5bf45f87d-jv6dt`: two random parts | a **Deployment** | as many as asked for, on any node |
+| `mongodb-0`: a number | a **StatefulSet** | fixed names, each with its own disk |
+
+#### Who installed what
+
+| Namespace | Pods | Installed by |
+| --- | --- | --- |
+| `kube-system` | 30 | AKS itself. Azure keeps them up to date. |
+| `cert-manager`, `external-secrets`, `nginx-gateway`, `gateway`, `reloader` | 9 | me, with `scripts/setup-aks.sh` (Parts 4 and 5) |
+| `restauranty` | 9 | me, with the pipeline (Part 8) |
+
+#### The app: namespace `restauranty`
+
+| Pod | Copies | What it does |
+| --- | --- | --- |
+| `auth` | 2 | sign-up, login, user accounts |
+| `discounts` | 2 | coupons and campaigns |
+| `items` | 2 | menu items, dietary labels, orders |
+| `client` | 2 | an nginx web server that sends the React website to the browser |
+| `mongodb-0` | 1 | the database, with its data on an Azure disk |
+
+#### The platform: installed by me
+
+| Namespace | Pod | What it does | Why this project needs it |
+| --- | --- | --- | --- |
+| `gateway` | `restauranty-nginx` | The front door. An NGINX web server that gets every request at the public IP address. It ends HTTPS, blocks the user list, limits logins and floods, and sends each request to the right service. | All traffic from the internet (#7, #10) |
+| `nginx-gateway` | `nginx-gateway-fabric` | The front door's manager. It reads the Gateway and route objects in Kubernetes and writes them as NGINX settings. It never gets a request from a user. | Routes and limits live in git as YAML, not as NGINX files |
+| `cert-manager` | `cert-manager` | Gets the HTTPS certificate from Let's Encrypt and renews it before it runs out. | HTTPS (#7) |
+| | `cert-manager-webhook` | Checks every new certificate request object. Broken ones are refused at once. | |
+| | `cert-manager-cainjector` | Puts certificate data into the webhook settings, so the Kubernetes API trusts the webhook. | |
+| `external-secrets` | `external-secrets` | Reads secrets from Key Vault and writes them as Kubernetes Secrets: JWT keys, database password, Cloudinary keys. | No secret in git (#8) |
+| | `external-secrets-webhook` | Checks every new "copy this secret" object. | |
+| | `external-secrets-cert-controller` | Makes and renews the certificate of that webhook. | |
+| `reloader` | `reloader` | When a Secret changes, it restarts the pods that use it, so they read the new value. | Key rotation (#16) |
+
+The two webhook pods follow a common pattern: before Kubernetes saves an object, it asks the tool "is this object correct?". The tool answers through its webhook.
+
+#### The cluster itself: namespace `kube-system`, installed by AKS
+
+**One on every node (DaemonSets):**
+
+| Pod | What it does |
+| --- | --- |
+| `cilium` (3 containers) | Carries network traffic between pods and **enforces the NetworkPolicies**. Without it, the 5 network rules from #11 would be text that nothing checks. |
+| `azure-cns` | Gives every pod an IP address from the Azure network. |
+| `azure-ip-masq-agent` | Traffic that leaves the cluster (to Cloudinary, to Let's Encrypt) goes out with the node's address, so the answer can come back. |
+| `cloud-node-manager` | Keeps each node's record in Kubernetes in step with its Azure VM: IP address, zone, and whether the VM still exists. |
+| `csi-azuredisk-node` (3 containers) | Attaches Azure disks to the node, so a pod can use them. MongoDB's data disk comes through here. |
+| `csi-azurefile-node` (4 containers) | The same for Azure Files shares. This project does not use them; AKS installs it anyway. |
+
+**Some copies on any node (Deployments):**
+
+| Pod | Copies | What it does |
+| --- | --- | --- |
+| `coredns` | 2 | The cluster's phone book (DNS). It turns a service name such as `mongodb` into an IP address. When this name could not be found yet, the backends crashed (`ENOTFOUND mongodb`, #28). |
+| `coredns-autoscaler` | 1 | Adds `coredns` copies when the cluster grows. |
+| `cilium-operator` | 2 | Cluster-wide housekeeping for Cilium, for example cleaning up after deleted pods. |
+| `konnectivity-agent` | 2 | A tunnel from the nodes to the Kubernetes control plane, which Azure runs outside my network. `kubectl logs`, `kubectl exec` and `port-forward` travel through it. |
+| `konnectivity-agent-autoscaler` | 1 | Adds tunnel copies when the cluster grows. |
+| `metrics-server` | 2 | CPU and memory of every pod, for `kubectl top` and for scaling. It keeps only the **current** value: no history, no alerts. That is what Prometheus adds in this part. |
+| `azure-wi-webhook-controller-manager` | 2 | Workload Identity: lets a Kubernetes service account sign in to Azure as an Azure identity. External Secrets uses this to read Key Vault (#8). |
+
+`kubectl get daemonsets -n kube-system` also lists `azure-cns-win`, `csi-azuredisk-node-win` and a few more with 0 pods. They are for Windows nodes. This cluster has only Linux nodes, so they stay empty.
+
+#### What the list showed after the start
+
+**1. The backends recovered without help: #28 after a real start.** Entry 46 forced the problem on purpose. This time it was a real start. About 3 minutes after the nodes came back, the list showed:
+
+```
+auth-9cc8f67d6-4htpq         0/1     Running            2 (20s ago)   14h
+discounts-54784b8d64-trrrh   0/1     Running            2 (18s ago)   14h
+items-7d66c5464b-bc94q       0/1     CrashLoopBackOff   2 (18s ago)   14h
+```
+
+| Shows | Means |
+| --- | --- |
+| `0/1 Running` | The program runs again, but its health check has not passed yet. Kubernetes sends it no users until then. |
+| `CrashLoopBackOff` | It stopped (no MongoDB yet). Kubernetes waits a little before the next try. |
+| `2 (18s ago)` | It has stopped twice, the last time 18 seconds ago. |
+
+The stopped container's log says why:
+
+```
+$ kubectl logs -n restauranty items-7d66c5464b-bc94q --previous
+Error connecting to mongo: getaddrinfo ENOTFOUND mongodb. Exiting, so the container restarts.
+```
+
+The timeline, from Kubernetes (times UTC):
+
+| Time | What happened |
+| --- | --- |
+| 13:00:12 to 13:00:28 | The 3 nodes are back |
+| 13:02:50 | MongoDB starts |
+| 13:03:36 | The last backend starts, and this time it connects |
+
+A few minutes later every pod was `1/1`, the website answered 200, and a wrong login got the right answer, 401. **No manual restart.** Before #28, every backend would have stayed broken until someone ran `kubectl rollout restart`.
+
+**2. `AGE 14h` and `RESTARTS 0` do not mean "ran for 14 hours".** The `client` pods show both. But their containers started at 13:02:32 today, after the nodes came back:
+
+```
+client-5976bbc778-kbq96  pod created 2026-11-10T22:16:03Z  container started 2026-11-11T13:02:32Z  restarts 0
+```
+
+The pod record survived the stop. The program inside was started fresh. A container started again after its node restarted was not counted as a restart here. To see when a program really started:
+
+```bash
+kubectl get pod <name> -n restauranty -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}'
+```
+
+**3. Found: all app pods run on one node.** All 9 pods in `restauranty`, the Gateway, and most platform pods run on `aks-system-11635412-vmss000008`, in zone `germanywestcentral-1`. The other two nodes run only the one-per-node pods.
+
+| Node | Zone | App pods |
+| --- | --- | --- |
+| `vmss000006` | germanywestcentral-2 | 0 |
+| `vmss000007` | germanywestcentral-3 | 0 |
+| `vmss000008` | germanywestcentral-1 | **9 of 9** |
+
+*Why it matters.* Each backend has 2 copies, so that one can fail while the other serves. That only helps if the copies are on different nodes. Here, if node 8 fails, the whole app is down at once. Kubernetes then waits about 5 minutes before it gives up on the node and starts the pods elsewhere.
+
+*Why it happened.* The manifests ask Kubernetes to spread the two copies over different nodes, but only as a wish (`whenUnsatisfiable: ScheduleAnyway`): if no other node is free, it places them together anyway. And Kubernetes places a pod once. It never moves a running pod by itself. All 9 pods were created within 5 seconds, at 22:16 on 10 November. The likely cause, not proven: at that moment node 8 was the only node ready, for example during a cluster start.
+
+*Not fixed now.* This is about availability, not about security, which is this project's focus. Listed in "What is next", with the fix: make the rule strict (`DoNotSchedule`), or run the descheduler, a tool that moves pods to spread them again. A quick fix for today is `kubectl rollout restart deployment -n restauranty`: the new pods are placed with all 3 nodes ready.
+
+*Spread by hand, the same day.* `kubectl rollout restart deployment -n restauranty` made new pods, and with all 3 nodes ready, Kubernetes spread them:
+
+```
+$ kubectl get pods -n restauranty -o wide    (columns shortened)
+NAME                         READY   STATUS    NODE
+auth-6bc86b8976-62dbv        1/1     Running   aks-system-11635412-vmss000007
+auth-6bc86b8976-xvq2q        1/1     Running   aks-system-11635412-vmss000006
+client-6d64979757-7xrdr      1/1     Running   aks-system-11635412-vmss000008
+client-6d64979757-nvcgj      1/1     Running   aks-system-11635412-vmss000007
+discounts-6bb9dc7946-hr57d   1/1     Running   aks-system-11635412-vmss000006
+discounts-6bb9dc7946-jmdc9   1/1     Running   aks-system-11635412-vmss000007
+items-7df9c5b45b-9kk8n       1/1     Running   aks-system-11635412-vmss000007
+items-7df9c5b45b-qvjkq       1/1     Running   aks-system-11635412-vmss000006
+mongodb-0                    1/1     Running   aks-system-11635412-vmss000008
+```
+
+| Node | Zone | App pods |
+| --- | --- | --- |
+| `vmss000006` | germanywestcentral-2 | auth, discounts, items |
+| `vmss000007` | germanywestcentral-3 | auth, client, discounts, items |
+| `vmss000008` | germanywestcentral-1 | client, mongodb-0 |
+
+Now every service keeps one copy if any one node fails. Two things are still single: MongoDB (one copy by design; its zone-redundant disk can move to another zone) and the Gateway pod, `restauranty-nginx` (one copy). The spread is not permanent either: the next start can pack the pods again, so the strict rule stays in "What is next".
+
+**Next in this part:** Prometheus, Grafana and Loki go into their own namespace, `monitoring`, and add their pods to this list.
+
+### 48. Code fix: metrics labelled by route, not by URL (F18)
+
+**In one line:** each request is now counted under the route pattern from the code, such as `/api/items/items/:id`, not under the URL the visitor sent. 250 junk requests made 251 new counters before the fix, and 3 after it.
+
+**The problem** (finding F18, [security assessment, test 7c](security-assessment.md#test-7c-can-junk-requests-fill-up-the-monitoring)). Each backend counts its requests for Prometheus in `http_requests_total`. Each count has labels, and one of them, `route`, was the full URL:
+
+```
+http_requests_total{method="GET", route="/api/items/items/junk-1", statusCode="401"} 1
+```
+
+Prometheus keeps every different label value as its own **time series**: a separate list of numbers in its memory. An attacker who sends millions of made-up URLs creates millions of series, until Prometheus slows down or crashes. Then the dashboards and alerts stop working, during the attack. This is called **high cardinality**: too many different label values. It must be fixed before Prometheus reads these counters, or the first thing it monitors is a weakness in itself.
+
+**Why the Gateway's flood limit (entry 27) is not enough.** It slows the attacker down, but every request under the limit still makes one more series. Only a fixed set of labels stops the growth.
+
+**The fix.** In `backend/*/metrics.cjs`, the same change in all three backends:
+
+| Request | `route` label before | `route` label after |
+| --- | --- | --- |
+| `/api/items/items/6730f1...` | `/api/items/items/6730f1...` | `/api/items/items/:id` |
+| `/api/items/items/junk-1` | `/api/items/items/junk-1` | `/api/items/items/:id` |
+| `/api/items/orders/1` without a token | `/api/items/orders/1` | `no_route` (the token check runs before any route) |
+| `/junk-123` | `/junk-123` | `no_route` |
+
+Now the code decides how many labels exist (about 30 routes), not the visitor.
+
+**A trap on the way.** Express, the web framework, knows the pattern (`req.route.path`) only in pieces. The first part (`/api/items/items`, in `req.baseUrl`) is erased when an error leaves the router. A first test on a small Express app showed it:
+
+```
+200 /api/items/items/abc      ->  "/api/items/items" + "/:id"
+500 /api/items/items/boom/1   ->  ""                 + "/boom/:id"     <- first part lost
+```
+
+Reading the pattern when the response is sent would label every 500 wrongly. So the code notes the full pattern at the moment Express picks the route:
+
+```js
+function routePattern(req) {
+  let route;
+  let pattern = 'no_route';
+  Object.defineProperty(req, 'route', {     // runs when Express sets req.route
+    configurable: true,
+    enumerable: true,
+    get() { return route; },
+    set(value) {
+      route = value;
+      pattern = req.baseUrl + value.path;   // here req.baseUrl is still complete
+    },
+  });
+  return () => pattern;
+}
+```
+
+**Tested locally.** The real items service (its routes and token check), once with the old `metrics.cjs` and once with the new one. There was no MongoDB, so a request that needs the database ends in a 500, which tests the error case too. Then 250 junk requests: 200 to `/api/items/items/junk-<n>` (half with a valid token) and 50 to `/junk-<n>`. Full output: [evidence/14-f18-metrics-labels-local.txt](evidence/14-f18-metrics-labels-local.txt).
+
+| | Series before the junk | After 250 junk requests | New |
+| --- | --- | --- | --- |
+| Old code | 3 | 254 | **251**: one per junk URL |
+| New code | 3 | 6 | **3**: a fixed set (see below) |
+
+All series with the new code:
+
+```
+http_requests_total{method="GET",route="/api/items",statusCode="200"} 1
+http_requests_total{method="GET",route="no_route",statusCode="401"} 101
+http_requests_total{method="GET",route="/api/items/items/:id",statusCode="500"} 1
+http_requests_total{method="GET",route="/metrics",statusCode="200"} 1
+http_requests_total{method="GET",route="/api/items/items/:id",statusCode="400"} 100
+http_requests_total{method="GET",route="no_route",statusCode="404"} 50
+```
+
+The 3 new series are `/metrics` itself, the 400 answers for invalid IDs, and `no_route` with 404. A million more junk requests would only make these numbers bigger, not add lines. The 500 is labelled with the full pattern, so the trap above is handled.
+
+**What is lost.** A dashboard can no longer show which made-up URL an attacker tried. That is on purpose: a URL is input from the visitor, and it belongs in the **logs** (Loki, later in this part), not in metric labels. The rule: labels only take values from a short, fixed list.
+
+**Still to do:** the same retest on AKS after the deploy, through the Gateway like a real attacker, and its result in the security assessment.
+
+---
+
 ## What is next
 
 | Task | Issue |
@@ -3209,4 +3471,5 @@ The 2 restarts are the fix at work: each one is a backend that found no MongoDB 
 | Monitoring, alerts, the attack demo; a Grafana panel for vulnerabilities (Trivy Operator), if time allows | #14, #15 |
 | Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
 | Reliability, outside this project's security focus: a readiness check that asks MongoDB's state (fast errors instead of 10 s waits, entry 46); MongoDB as a replica set for high availability | — |
+| Reliability: spread the app pods over all 3 nodes and zones. Today all of them run on one node (entry 47). Fix: a strict spread rule (`DoNotSchedule`) or the descheduler; a second Gateway pod | — |
 | Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
