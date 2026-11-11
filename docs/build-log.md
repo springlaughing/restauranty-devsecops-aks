@@ -114,6 +114,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
     - [Step 6: scrape targets, Grafana's address, the dashboard](#step-6-scrape-targets-grafanas-address-the-dashboard)
     - [Step 7: network rule 6, Prometheus may scrape the backends](#step-7-network-rule-6-prometheus-may-scrape-the-backends)
     - [The same steps in the setup script](#the-same-steps-in-the-setup-script)
+  - [54. Check: does the data arrive?](#54-check-does-the-data-arrive)
 - [What is next](#what-is-next)
 
 ---
@@ -3230,6 +3231,7 @@ The 2 restarts are the fix at work: each one is a backend that found no MongoDB 
 4. **A check before installing.** The tools' default rights, read from the charts: five could read every secret in the cluster (entry 51).
 5. **Grafana's password**, from Key Vault (entry 52).
 6. **The install, step by step:** the namespace, Prometheus with Grafana, Loki, Alloy, the scrape targets, the dashboard and one network rule, and where these commands live in the setup script (entry 53).
+7. **The check that data arrives**, and what the first look at the dashboard found (entry 54).
 
 The explainer below says what each monitoring tool does. Entries 48 and 49 use its words (metric, label, time series).
 
@@ -3709,7 +3711,7 @@ The Secret `grafana-admin` then held exactly two keys, `admin-password` and `adm
 
 **In one line:** the monitoring tools are installed with Helm, the backends become scrape targets, Grafana gets its address on the internet, and one network rule opens for Prometheus. Seven steps, run by hand once, and written into the setup script for every rebuild.
 
-**State:** all seven steps done, and Alloy and Loki hardened. The check that data arrives in Grafana follows.
+**State:** all seven steps done, and Alloy and Loki hardened. Entry 54 checks that the data arrives.
 
 **The order matters:**
 
@@ -3912,42 +3914,58 @@ The chart had already created 8 ServiceMonitors of its own (Prometheus, Alertman
 
 Better, later: sign-in through Entra ID instead of a password (#17).
 
-**`dashboard.yaml`: "Restauranty: traffic and security".** It is generated as JSON and stored as a ConfigMap. Grafana's dashboard loader reads every ConfigMap in `monitoring` with the label `grafana_dashboard`, so the dashboard comes back after every rebuild. A change made in Grafana's editor is lost on the next restart: export the JSON and put it into the file. It has three rows.
+**`dashboard.yaml`: "Restauranty: traffic and security".**
 
-*Traffic*, from Prometheus:
+*How it is built.* The dashboard is a JSON document: Grafana's own format, which lists every panel with its position, type and query. Writing that JSON by hand is long and error-prone (about 500 lines), so a short Python script writes it: `scripts/build-dashboard.py`. The script describes each panel in a few lines (title, description, query) and writes `k8s/monitoring/dashboard.yaml`, a ConfigMap that holds the JSON. Grafana's dashboard loader reads every ConfigMap in `monitoring` with the label `grafana_dashboard`, so the dashboard comes back by itself after every rebuild.
 
-- **Requests per second**: how busy is each service?
-- **Server errors (5xx) per second**: is something broken?
-- **Latency p95**: is it slow? (entry 49)
+To change the dashboard, change the script, then:
 
-*Security*:
+```bash
+python3 scripts/build-dashboard.py              # writes k8s/monitoring/dashboard.yaml
+kubectl apply -f k8s/monitoring/dashboard.yaml  # Grafana loads it within a minute
+```
 
-- **Failed logins per minute** (Prometheus): is someone guessing passwords? These are the 401 answers from `auth` on `/api/auth/login`.
-- **Refused tokens per minute** (Prometheus): is someone sending no token, or a forged one? These are 401 answers on `no_route`.
-- **Gateway answers per minute, by status** (Loki): what do strangers get? 403 is the blocked user list, 429 is over a limit.
+Changes made in Grafana's editor are lost on the next restart of Grafana. Production teams do the same in other ways: the Grafonnet or Grafana Foundation SDK libraries, or Terraform's Grafana provider. The idea is the same: the dashboard lives in git and goes through review like code.
+
+*The panels, row by row,* with the question each one answers and where its number comes from. A PromQL query reads Prometheus; a LogQL query reads Loki.
+
+Traffic:
+
+- **Requests per second** (Prometheus): how busy is each service? `sum by (job) (rate(http_requests_total[1m]))`: the requests counted by each backend, per second, summed per service.
+- **Server errors (5xx) per second** (Prometheus): is something broken? The same counter, only status codes 500 to 599.
+- **Latency p95, backends** (Prometheus): is the backend slow? The p95 from the histogram of entry 49.
+- **Latency p95, at the Gateway** (Loki): is the app slow as a visitor sees it? The p95 of the `duration` field in the Gateway's log: the backend's time plus the Gateway's own (entry 54).
+
+Security:
+
+- **Failed logins per minute** (Prometheus): is someone guessing passwords? The 401 answers of `auth` on `/api/auth/login`.
+- **Login attempts at the Gateway, by answer** (Loki): every login from the internet, split into 401 (wrong password, from `auth`), 429 (over the login limit, from the Gateway: `auth` never sees these) and 200 (success).
+- **Refused tokens per minute** (Prometheus): is someone sending no token or a forged one? The 401 answers on `no_route` (entry 48).
+- **Gateway answers per minute, by status** (Loki): what do visitors of the app get? 403 is the blocked user list, 429 is over a limit.
 - **Top 10 client IPs, last 15 minutes** (Loki): who sends the most, and how much of it is refused?
-- **Refused at the Gateway** (Loki): the newest refused requests, with IP, method, path and status.
+- **Refused at the Gateway** (Loki): the newest refused requests, with status, IP, method and path.
 
-*Health*:
+Health:
 
 - **MongoDB connected** (Prometheus): has a backend lost the database? (#28)
-- **Restarts in restauranty, last hour** (kube-state-metrics): are pods crashing?
+- **Restarts in restauranty, last hour** (kube-state-metrics, through Prometheus): are pods crashing?
 - **Series per scrape** (Prometheus): the F18 guard. Junk URLs must not move this number.
 - **Users, items, coupons** (Prometheus): counts from the database.
 
-**Why the Gateway's log matters most for security.** Requests refused at the Gateway (403, 429) never reach a backend, so the backends' metrics never see them. Only the Gateway's access log does. It writes one line per request, in NGINX's standard format:
+**Why the Gateway's log matters most for security.** Requests refused at the Gateway (403, 429) never reach a backend, so the backends' metrics never see them. Only the Gateway's access log does. Since entry 54 it writes one JSON line per request:
 
 ```
-<ip> - - [11/Nov/2026:13:29:11 +0000] "GET /api/items/junk-logcheck HTTP/2.0" 404 39 "-" "curl/7.81.0"
+{"time":"2026-11-11T16:30:12+00:00","ip":"<ip>","host":"restauranty.aks.springlaughing.dev","method":"POST",
+ "path":"/api/auth/login","status":401,"bytes":42,"duration":0.012,"upstream_duration":"0.012","user_agent":"curl/7.81.0"}
 ```
 
-Loki stores the line as it is. The dashboard's queries cut it into fields when they run, with a pattern:
+Every Loki panel starts with the same query part, which keeps only the app's requests and reads the fields by name:
 
 ```
-{namespace="gateway", container="nginx"} | pattern `<ip> - <_> [<_>] "<method> <path> <_>" <status> <_>`
+{namespace="gateway", container="nginx"} |= `"host":"restauranty.aks.springlaughing.dev"` | json | __error__=""
 ```
 
-This follows the same rule as the metric labels in entry 48: values that come from visitors, like the IP and the path, stay inside the log line and never become labels.
+From left to right: the Gateway's log stream; only lines for the app's host name; read the JSON fields (`ip`, `status`, `path`, ...); drop lines that are not JSON (NGINX's own messages). This follows the rule of entry 48: values that come from visitors, like the IP and the path, stay inside the log line. Loki reads them when a query runs, and they never become labels.
 
 #### Step 7: network rule 6, Prometheus may scrape the backends
 
@@ -4001,6 +4019,108 @@ kubectl apply -f k8s/monitoring/servicemonitors.yaml \
 (Shortened: the real script hides the output of `helm repo add` and refreshes the repositories.) The chart versions are variables at the top of the script: `KPS_VERSION="93.2.0"`, `LOKI_VERSION="7.6.0"`, `ALLOY_VERSION="1.15.0"`. One thing stays outside the script, because it changes Azure: the `terraform apply` for Grafana's identity (entry 52). It runs before the script, like all of `terraform/cluster-access`.
 
 **Script or GitOps.** A script is **imperative** ("run these commands"): nothing happens until someone runs it, and nobody notices when someone changes the cluster by hand afterwards. Production teams usually make it **declarative** with GitOps: a tool such as Argo CD or Flux runs inside the cluster, watches a git repository that lists each chart with its version and values, installs it, and puts it back when someone changes it by hand. An upgrade is then a pull request that changes a version number, and the pipeline needs no rights on the cluster at all. Listed in "What is next".
+
+### 54. Check: does the data arrive?
+
+**In one line:** yes. Prometheus reaches all 6 backend pods, Loki has the Gateway's log, and Grafana shows the dashboard on the internet. The first look at the dashboard found three things: a panel that missed the first failed logins, Grafana's own traffic mixed into the security panels, and strangers from the internet already knocking.
+
+**Why a separate check.** "All pods are Running" proves only that the tools started. It does not prove that Prometheus can reach the backends through the network rules, that Alloy delivers to Loki, or that the dashboard's queries match the real data. Each of these can fail while every pod looks healthy.
+
+**1. Make some traffic.** Three wrong logins, one request for the blocked user list, and Grafana's login page:
+
+```bash
+APP=https://restauranty.aks.springlaughing.dev
+for i in 1 2 3; do
+  curl -s -o /dev/null -w "login %{http_code}\n" -X POST $APP/api/auth/login \
+    -H 'Content-Type: application/json' -d '{"email":"nobody@example.com","password":"wrong"}'
+done
+curl -s -o /dev/null -w "user list %{http_code}\n" $APP/api/auth/users
+curl -s -o /dev/null -w "grafana %{http_code}\n" https://grafana.aks.springlaughing.dev/login
+```
+
+```
+login 401
+login 401
+login 401
+user list 403
+grafana 200
+```
+
+**2. Does Prometheus reach the backends?** Prometheus makes one metric by itself for every target: `up`, which is 1 if the last scrape worked and 0 if not. It is the quickest way to tell "Prometheus cannot reach the target" from "the dashboard's query is wrong"; both look like an empty panel. Prometheus is not on the internet, so the query goes through a tunnel from the laptop (`port-forward`):
+
+```bash
+kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090:9090 >/dev/null &
+sleep 3
+curl -s 'localhost:9090/api/v1/query' --data-urlencode 'query=up{job=~"auth|discounts|items"}' \
+  | jq -r '.data.result[] | "\(.metric.job)  \(.metric.pod)  up=\(.value[1])"'
+kill %1
+```
+
+```
+discounts  discounts-6bb9dc7946-hr57d  up=1
+items  items-7df9c5b45b-qvjkq  up=1
+auth  auth-6bc86b8976-62dbv  up=1
+items  items-7df9c5b45b-9kk8n  up=1
+discounts  discounts-6bb9dc7946-jmdc9  up=1
+auth  auth-6bc86b8976-xvq2q  up=1
+```
+
+All 6 backend pods: network rule 6 (entry 53, step 7) works, and the ServiceMonitor finds every pod.
+
+**3. Log in to Grafana.** The user is `admin`. The password exists only in Key Vault (entry 52), so it is read from there, straight into the Windows clipboard instead of onto the screen:
+
+```bash
+az keyvault secret show --vault-name kv-evgenia-restauranty -n grafana-admin-password \
+  --query value -o tsv | tr -d '\n' | clip.exe
+```
+
+**4. What the dashboard showed:**
+
+- **Gateway answers by status** and **Refused at the Gateway** showed the three `POST /api/auth/login` 401s and the `GET /api/auth/users` 403, with the time and my IP address. So Alloy → Loki → Grafana works.
+- **Requests per second** and **MongoDB connected** showed data from Prometheus.
+- **Refused tokens per minute** and **Latency p95, backends** were empty, as expected: they need the new metrics code (entries 48, 49), which reaches AKS only with the next deploy.
+- **Failed logins per minute** stayed at 0. Not expected: finding 1.
+
+**Finding 1: the first failed logins were not counted.** The three 401s reached `auth`: the Gateway's log showed them. But the panel stayed flat. The reason is a known trap of Prometheus counters:
+
+- A counter for one set of labels (here: login, 401) is created at the moment of the first such request, already with the value 1.
+- Prometheus reads counters every 30 seconds and measures the **rise** between two readings (`increase()`).
+- Its first reading of the new counter already saw 1, or even 3. There was no earlier reading of 0 to compare with, so it saw no rise.
+
+During a long attack, only the first few tries go missing. In a short demo with 3 tries, the panel shows nothing, and the alert in #15 would miss the start of an attack. **The fix:** `auth` now creates the login counters (status 200 and 401) at 0 when it starts, in `backend/auth/metrics.cjs`. Tested locally, both exist right after start:
+
+```
+http_requests_total{method="POST",route="/api/auth/login",statusCode="200"} 0
+http_requests_total{method="POST",route="/api/auth/login",statusCode="401"} 0
+```
+
+It reaches AKS with the next deploy. The new panel **Login attempts at the Gateway** does not have this trap: Loki counts log lines, not counters.
+
+**Finding 2: Grafana's own traffic was in the security panels.** "Gateway answers by status" showed about 100 answers with status 200 per minute, much more than the test traffic. Most of it was my browser loading Grafana: `grafana.aks.springlaughing.dev` goes through the same Gateway, and NGINX's standard log line has no host name. One `POST /login` 401 in the panel was most likely my own Grafana login, not the app.
+
+**The fix:** the Gateway now writes its log as JSON, with the host name, in `k8s/platform/nginx-gateway-fabric-values.yaml`. NGINX Gateway Fabric 2.8 has a setting for this (`nginx.config.logging.accessLog`):
+
+```yaml
+nginx:
+  config:
+    logging:
+      accessLog:
+        escape: json
+        format: '{"time":"$time_iso8601","ip":"$remote_addr","host":"$host","method":"$request_method","path":"$request_uri","status":$status,"bytes":$body_bytes_sent,"duration":$request_time,"upstream_duration":"$upstream_response_time","user_agent":"$http_user_agent"}'
+```
+
+- `host` lets every Loki panel keep only the app's requests (step 6).
+- `duration` is the time each request took at the Gateway. That gives the new panel "Latency p95, at the Gateway": the latency as a visitor sees it, which issue #14 asked for ("Gateway metrics for latency").
+- `escape: json` matters for security: the path and the user agent come from the visitor. Without escaping, a path with a `"` in it could end the field early and add a fake one, such as a different `ip`. With it, such characters are written as `\"`.
+
+**Finding 3: strangers are already knocking.** Next to my own IP address, the "Top 10 client IPs" table showed addresses I do not know, and "Gateway answers by status" showed answers with status 501 ("not implemented", NGINX's answer to unknown request methods). These are internet scanners: programs that try every public IP address for known weak spots. Any public IP gets them within hours. Good material for the demo: the monitoring shows real visitors, not only test traffic.
+
+**IP addresses are personal data.** Under the GDPR (the EU's data protection law), an IP address can identify a person. Loki keeps them for 7 days, and Grafana shows them only after a login. Screenshots for this repository must hide them. This goes into `SECURITY.md` (#19).
+
+**Still to do:**
+
+- Apply the new Gateway log format: `helm upgrade` of NGINX Gateway Fabric with its values file (the setup script's step 1), then `kubectl apply -f k8s/monitoring/dashboard.yaml`.
+- Merge and deploy: the new metrics code (entries 48, 49, finding 1), then the F18 retest on AKS.
 
 ---
 
