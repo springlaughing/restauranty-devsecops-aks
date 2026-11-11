@@ -127,6 +127,9 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [Why scan what is running, not only what is built](#why-scan-what-is-running-not-only-what-is-built)
   - [SBOMs and hashes: what is inside, and is it exactly that](#sboms-and-hashes-what-is-inside-and-is-it-exactly-that)
   - [63. Trivy Operator: the design, and three rights checked](#63-trivy-operator-the-design-and-three-rights-checked)
+  - [64. The scanner checked: three corrections in one evening](#64-the-scanner-checked-three-corrections-in-one-evening)
+  - [Can a security tool be trusted?](#can-a-security-tool-be-trusted)
+  - [65. Trusting the scanner: pinned images, and what a poisoned Trivy could do here](#65-trusting-the-scanner-pinned-images-and-what-a-poisoned-trivy-could-do-here)
 - [What is next](#what-is-next)
 
 ---
@@ -4277,7 +4280,7 @@ The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside t
 4. **Applying and testing** them, with a test message to Slack (entry 59).
 5. **The attack:** installing k6 (entry 60), then password guessing against the real login, and the alert in Slack (entry 61).
 6. **Two more dashboard panels:** the day-one leak, and the Gateway's own server errors (entry 62).
-7. **Scanning what runs:** why scan running images too, and the Trivy Operator (entry 63).
+7. **Scanning what runs:** why scan running images too, and the Trivy Operator (entry 63); three corrections to the scanner (entry 64); whether a security tool can be trusted, and pinning it (entry 65).
 
 ### 56. Slack: a channel for the alerts, and its webhook in Key Vault
 
@@ -5133,6 +5136,187 @@ It should stay quiet today: the pipeline blocks CRITICAL before a deploy. It fir
 
 **What this proves in the demo: Demo A.** The client's base image has 2 HIGH (in libxslt, entry 43). The operator should show them for `client`. Merging the Dependabot pull request #39 (a newer nginx base) and deploying should bring the client's row to 0, in GitHub's Security tab and on the dashboard.
 
+### 64. The scanner checked: three corrections in one evening
+
+**In one line:** the first results of the Trivy Operator were wrong in three ways, and each was found by comparing a result with something already known. After the corrections, MongoDB shows 1 CRITICAL and about 11 HIGH, and the alert on it reached Slack.
+
+**State:** corrections 1 to 3 applied. The final rescan with correction 3 is running; its numbers are added below when it is done.
+
+#### Correction 1: "filesystem" mode did not look at the operating system
+
+The first install used `command: filesystem` (entry 63, decision 1). The first reports:
+
+```
+$ kubectl get vulnerabilityreports -n restauranty -o wide        (shortened)
+REPOSITORY      TAG       CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+client          68e7e5e   0          0      0        0     0
+library/mongo   8.0.34    0          2      42       6     0
+```
+
+Two things did not fit. The client showed **0 of everything**, even LOW and UNKNOWN, although the nightly scan had found 2 HIGH in its base image the day before. And a real image with not a single known issue of any severity is very unlikely: "all zeros" usually means the scanner found nothing to check.
+
+In Trivy, "filesystem" scanning is meant for a project folder: it reads lock files and checks programs, but not the operating system's package list. For a container's whole file system, Trivy has another mode, **rootfs**, which checks both. One word in the values file:
+
+```yaml
+trivy:
+  command: rootfs        # was: filesystem
+```
+
+After the upgrade, the old reports were deleted (`kubectl delete vulnerabilityreports -n restauranty --all`), so that every image was scanned again. MongoDB, before and after:
+
+| | filesystem | rootfs |
+| --- | --- | --- |
+| CRITICAL | 0 | **1** |
+| HIGH | 2 | **12** |
+| MEDIUM | 42 | 48 |
+| LOW | 6 | 6 |
+| UNKNOWN | 0 | 87 |
+
+Every report now names the operating system it found (`os=alpine 3.24.4`, `os=ubuntu 24.04`). The first "2 HIGH" was only what the programs bundled in MongoDB's image contained; its Ubuntu packages had not been checked at all.
+
+The same upgrade gave the operator's own pod the settings the install warning had named: non-root (user 10000) and seccomp. The next upgrade printed no Pod Security warning.
+
+#### Correction 2: "missing" scans were only slow
+
+After the first install, only 2 of the 5 images had a report, and no new scan jobs appeared for minutes. It looked as if auth, discounts and items were being skipped. They were not: the operator works in rounds, 2 scan jobs at a time (`scanJobsConcurrentLimit: 2`), with a pause of about 5 minutes between rounds. Its log shows it:
+
+```
+19:51:04  "Starting operator"  ... "target namespaces":["restauranty"]
+19:56:04  (scan job for discounts created)
+19:56:18  (scan job for client created)
+```
+
+So all 5 images take about 15 minutes. The lesson: give an operator time before calling something missing, and read its log for its rhythm.
+
+The same log also shows two warnings that are expected:
+
+```
+"would violate PodSecurity \"restricted:latest\": runAsNonRoot != true ..., runAsUser=0 (containers ..., \"discounts\" must not set runAsUser=0)"
+```
+
+They are about the **scan jobs**, which run as root on purpose (entry 63). `trivy-system` only warns about "restricted" and enforces "baseline", which allows root, so the jobs start. A warning that is understood and accepted is fine; the dangerous kind is one that people have learned to ignore without knowing why.
+
+#### Correction 3: Trivy found itself
+
+With rootfs, three different images reported **the same HIGH**:
+
+```
+client     HIGH  CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+discounts  HIGH  CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+mongodb    HIGH  CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+```
+
+go-jose is a library of the Go programming language. And every finding in the client was a Go library:
+
+```
+client  HIGH     CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+client  UNKNOWN  GO-2026-5932     golang.org/x/crypto v0.57.0
+client  UNKNOWN  CVE-2026-78661   golang.org/x/net v0.60.0
+client  UNKNOWN  CVE-2026-97045   golang.org/x/net v0.60.0
+client  UNKNOWN  CVE-2026-97054   stdlib v1.27.3
+```
+
+The client is nginx on Alpine: it contains no Go program. But in rootfs mode, the scan job copies **the Trivy program itself** into the scanned container, and then scans the whole file system. Trivy is written in Go, built with a recent Go (1.27.3), and uses exactly these libraries. So Trivy was reporting its own copy. The fix: skip the folder where the operator puts it.
+
+```yaml
+trivy:
+  skipDirs: "/var/trivyoperator"
+```
+
+The report does not say where a finding's file was (`path` is empty), so this is a conclusion from the pattern: the same library and version in unrelated images, and only Go libraries in an image without Go. The final rescan will show whether it holds: the go-jose HIGH should disappear from all three, and MongoDB should keep its own findings.
+
+#### What MongoDB really has
+
+```
+mongodb: os=ubuntu 24.04
+   CRITICAL  CVE-2025-68121   stdlib v1.24.6        -> 1.24.13, 1.25.7, 1.26.0-rc.3
+   HIGH      CVE-2026-32281   stdlib v1.24.6        -> 1.25.9, 1.26.2
+   ... (5 more in stdlib v1.24.6)
+   HIGH      CVE-2026-109518  apt 2.8.3             -> 2.8.4ubuntu0.1
+   HIGH      CVE-2026-109518  libapt-pkg6.0t64 2.8.3 -> 2.8.4ubuntu0.1
+   HIGH      CVE-2026-59869   js-yaml 3.13.1        -> 3.15.0, 4.3.0
+   HIGH      CVE-2026-84375   js-yaml 3.13.1        -> 4.3.2, 3.15.2
+   HIGH      GHSA-5p4m-2wfm-xmqj  js-yaml 3.13.1    -> 4.3.1, 3.15.1
+```
+
+- The CRITICAL is in **Go's standard library, version 1.24.6**: not in the database itself, but in a Go program that the official MongoDB image contains. It is MongoDB's own, not Trivy's: Trivy is built with Go 1.27.3.
+- `apt` is Ubuntu's package manager. The "filesystem" scan never saw it.
+- `js-yaml` is a JavaScript library, most likely part of MongoDB's command-line shell, which is written in Node.js.
+
+All of them have fixed versions. They come with a newer MongoDB image; the image tag is set in `k8s/app/mongodb.yaml`.
+
+**The alert, for real.** About 15 minutes after MongoDB's report showed the CRITICAL, `RestaurantyCriticalVulnerability` reached Slack. Nobody planted a test case: this was a real finding, in an image that nothing in this project had ever scanned (reason 2).
+
+![Slack: RestaurantyCriticalVulnerability (warning), "library/mongo: 1 CRITICAL vulnerabilities in a running image", with the next step and the dashboard link](evidence/15-trivy-alert-slack.png)
+
+#### The client's libxslt: two scans, two different images
+
+The nightly scan's 2 HIGH in the client's libxslt were still open in GitHub. But the nightly scan last ran at 11:52 UTC, before the two deploys of the afternoon: it describes **yesterday's** client image. The operator scanned **today's** rebuild (commit `68e7e5e`, Alpine 3.21.10), which does not report them. Building an image again pulls its base image again, often with newer operating-system packages, so a fix can arrive without any change in the code. The next nightly run scans today's SBOM; if the rebuild fixed libxslt, the two alerts close by themselves.
+
+**The lesson of all three.** The scanner's raw output was a claim, and three times it was wrong: it did not look, it looked slowly, and it looked at itself. Each mistake was found by comparing a result with something already known: an alert in GitHub, an nginx image that cannot contain Go, Ubuntu's `apt` that must be there. Without that, the dashboard would have shown "0 CRITICAL" today: false comfort. **Verify the verifier.**
+
+### Can a security tool be trusted?
+
+**In one line:** not by default, and not because it is called a security tool. Trivy itself was attacked in March 2026. The answer is the same as for any other software: pin exactly what runs, give it only the rights it needs, and keep an independent check.
+
+**The question.** Trivy is supposed to protect. In March 2026 it was attacked successfully (Part 9, "Pinning"). And the Trivy Operator runs inside the cluster, with rights. Is it trustworthy?
+
+**The honest answer.** No tool can be made fully trustworthy, security tools included. What can be decided is **how much damage it could do if it turned out to be bad**, and **whether what runs is what was meant to run**. That is "assume breach", applied to the defenders' own tools: the same thinking as entry 51, where five monitoring tools could read every Secret.
+
+**Security tools are high-value targets precisely because they're trusted and widely installed.** One poisoned scanner reaches thousands of pipelines and clusters at once, which is why attackers went after Trivy in the first place. The defenses are the same as for any dependency: pin what you run, give it the least rights it needs, and keep an independent check. Being a "security" tool earns it no exemption.
+
+### 65. Trusting the scanner: pinned images, and what a poisoned Trivy could do here
+
+**In one line:** the cluster pulled both Trivy images by version name, not by fingerprint, so the March 2026 attack would have reached it, while the pipeline was safe. Both are now pinned by digest. What a poisoned Trivy could still do is listed below, with the next fix.
+
+**State:** pins committed; applied with the next `helm upgrade` of the operator.
+
+**The gap.** The chart names both images by tag, and has no setting for a digest:
+
+```
+mirror.gcr.io/aquasec/trivy-operator:0.36.1     the operator
+mirror.gcr.io/aquasec/trivy:0.76.1              the scanner in every scan job
+```
+
+In March 2026 the attackers did not only change the tags of the Trivy GitHub Action; they also published poisoned Trivy Docker images (Part 9). The pipeline was safe from that, because it names Trivy as `aquasec/trivy:0.76.1@sha256:790fd66d…`. The cluster was not: if the tag `0.76.1` had been pointed at a poisoned image, the next scan job would have pulled and run it. On this point, the operator broke the rule the pipeline follows.
+
+**The fix: the digest goes into the tag.** A Docker image name may carry both, `<repository>:<tag>@sha256:<digest>`; the digest wins, and the tag is only there for people reading it. In `k8s/monitoring/trivy-operator-values.yaml`:
+
+```yaml
+image:
+  tag: "0.36.1@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9"
+trivy:
+  image:
+    tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+```
+
+The digests were not taken on trust either. Each was asked from two registries, Docker Hub and `mirror.gcr.io` (the copy of Docker Hub the chart uses), and they matched. Trivy's also matches the pin in `ci-cd.yaml`, so the cluster runs exactly the Trivy that the pipeline already trusts:
+
+```
+aquasec/trivy-operator:0.36.1  docker.io=sha256:05191a51…  mirror.gcr.io=sha256:05191a51…
+aquasec/trivy:0.76.1           docker.io=sha256:790fd66d…  mirror.gcr.io=sha256:790fd66d…
+ci-cd.yaml:                    aquasec/trivy:0.76.1@sha256:790fd66d…
+```
+
+The operator 0.36.1 was built on 29 October 2026 (its own start log says so), 13 days before: older than the pipeline's rule of "at least a week".
+
+**What a poisoned Trivy could do in this cluster, today.** Thanks to the narrowed rights (entries 51 and 63), much less than with the chart's defaults:
+
+| A bad operator or scan job could… | It could not… |
+| --- | --- |
+| read the settings of workloads (image names, environment variables written in the manifests) | read Secrets outside `trivy-system`: the cluster-wide right is off (entry 63, decision 2) |
+| start pods in `trivy-system`, as root | use `nodes/proxy`, or get host access: "baseline" refuses it |
+| read the files of the app's images (the code, which is public anyway) | get the running pods' secrets: a scan job starts the image fresh, without its Secrets, and without a Kubernetes token (`scanJobAutomountServiceAccountToken: false`) |
+| **send data to the internet**: `trivy-system` has no network rules | reach MongoDB or the backends: the rules in `restauranty` let in only the backends, the Gateway and Prometheus (#11) |
+
+**Three defenses, three states:**
+
+1. **Pin what runs.** Done above.
+2. **The least rights it needs.** Mostly done: the Secret right and `nodes/proxy` are off, the scope is one namespace. Open: **network rules for `trivy-system`**. Scan jobs need only DNS and HTTPS to the internet, to download Trivy's vulnerability database; nothing inside the cluster. That is the pattern of `items` → Cloudinary (#11). Not done this week: the operator itself must still reach the Kubernetes API, and Prometheus must reach the operator, so the rules need testing. In "What is next".
+3. **An independent check.** Done: the nightly scan in GitHub reads SBOMs, the operator reads files in the cluster. If one were poisoned or simply wrong, the other would disagree. Entry 64 is that disagreement at work: it found two mistakes in the scanner.
+
+**For the threat model (#3):** story 10, "a poisoned package or image", with the project's own security tool as the example. Who watches the watchers? Nobody fully; so the watchers get as little power as possible.
+
 ---
 
 ## What is next
@@ -5146,5 +5330,7 @@ It should stay quiet today: the pipeline blocks CRITICAL before a deploy. It fir
 | Reliability, outside this project's security focus: a readiness check that asks MongoDB's state (fast errors instead of 10 s waits, entry 46); MongoDB as a replica set for high availability | — |
 | Reliability: spread the app pods over all 3 nodes and zones. Today all of them run on one node (entry 47). Fix: a strict spread rule (`DoNotSchedule`) or the descheduler; a second Gateway pod | — |
 | Alerts from the logs: Loki's ruler, connected to Alertmanager, for the day-one leak (any 403 on the user list) and the Gateway's own 5xx (entry 62) | #15 |
+| Network rules for `trivy-system`: scan jobs may reach only DNS and HTTPS on the internet (for the vulnerability database), nothing in the cluster; the operator keeps the Kubernetes API, Prometheus keeps the operator (entry 65) | #15 |
+| A newer MongoDB image: its Go 1.24.6 (1 CRITICAL), apt and js-yaml have fixed versions (entry 64) | — |
 | GitOps with Argo CD or Flux: platform charts and app manifests installed from git by a controller in the cluster; no `helm` or `kubectl` from laptops or the pipeline, drift put back automatically, and the deploy identity no longer needs admin rights (entries 35, 53) | — |
 | Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
