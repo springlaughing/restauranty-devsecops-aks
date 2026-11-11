@@ -54,11 +54,49 @@ prometheus:
             requests:
               storage: 10Gi
 
+# Alertmanager (#15): receives the alerts that fire in Prometheus, groups
+# them, and sends them on.
 alertmanager:
   alertmanagerSpec:
     resources:
       requests: { cpu: 10m, memory: 64Mi }
       limits: { memory: 128Mi }
+    # The Slack webhook, as a file: /etc/alertmanager/secrets/alertmanager-slack/
+    # (written by External Secrets, k8s/monitoring/alertmanager-secrets.yaml).
+    secrets:
+      - alertmanager-slack
+  config:
+    global:
+      resolve_timeout: 5m
+    # Who gets which alert. Only this project's own rules (label
+    # project=restauranty, k8s/monitoring/alert-rules.yaml) go to Slack.
+    # The chart's ~100 standard Kubernetes rules still fire and show in
+    # Alertmanager and Grafana, but they do not post to the channel: during
+    # a demo, every message there should be about the app.
+    route:
+      receiver: "null"
+      group_by: [alertname, job]
+      group_wait: 30s          # wait for more alerts of the same group, then send one message
+      group_interval: 5m       # news about a group at most every 5 minutes
+      repeat_interval: 4h      # remind if an alert is still firing
+      routes:
+        - receiver: slack
+          matchers:
+            - project = "restauranty"
+    receivers:
+      - name: "null"
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#restauranty-alerts"
+            send_resolved: true          # also say when it is over
+            title: '{{ if eq .Status "firing" }}:rotating_light:{{ else }}:white_check_mark:{{ end }} {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+            # Counts and services only: no IP addresses in Slack (build log, entry 56).
+            text: >-
+              {{ range .Alerts }}*{{ .Annotations.summary }}*
+              {{ .Annotations.description }}
+              {{ end }}
+              <https://grafana.aks.springlaughing.dev/d/restauranty|Open the dashboard>
 
 # kube-state-metrics turns the state of Kubernetes objects into metrics
 # (replicas wanted vs ready, pod restarts, ...). The chart lets it list every

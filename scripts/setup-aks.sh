@@ -115,6 +115,12 @@ if ! kv_exists grafana-admin-password; then
   az keyvault secret set --vault-name "$KEY_VAULT" -n grafana-admin-password \
     --file <(openssl rand -hex 24 | tr -d '\n') --output none
 fi
+# The Slack webhook for alerts (#15) is made in Slack, not here: stop if missing.
+if ! kv_exists alertmanager-slack-webhook; then
+  echo "  alertmanager-slack-webhook missing in Key Vault: alerts would have nowhere to go."
+  echo "  Create a Slack incoming webhook and store it (see docs/build-log.md, entry 56)."
+  exit 1
+fi
 # The app password goes into the MongoDB URL, so it must need no URL escaping.
 if ! kv mongo-password | grep -qE '^[0-9a-f]+$'; then
   echo "  mongo-password in Key Vault is not hex: it would break MONGODB_URI. Replace it with:"
@@ -163,13 +169,15 @@ log "Applying the network rules"
 kubectl apply -f k8s/network/
 
 # 7. Monitoring (#14): Prometheus, Alertmanager and Grafana, Loki for logs,
-#    Alloy to collect them. Grafana's login first, so its pod can start.
+#    Alloy to collect them. Grafana's login and Alertmanager's Slack webhook
+#    first, so their pods can start. Alert rules (#15) at the end.
 log "Installing monitoring: kube-prometheus-stack ${KPS_VERSION}, Loki ${LOKI_VERSION}, Alloy ${ALLOY_VERSION}"
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
 helm repo add grafana https://grafana.github.io/helm-charts >/dev/null 2>&1 || true
 helm repo update prometheus-community grafana >/dev/null
-kubectl apply -f k8s/monitoring/grafana-secrets.yaml
-kubectl wait externalsecret/grafana-admin -n monitoring --for=condition=Ready --timeout=3m
+kubectl apply -f k8s/monitoring/grafana-secrets.yaml -f k8s/monitoring/alertmanager-secrets.yaml
+kubectl wait externalsecret/grafana-admin externalsecret/alertmanager-slack -n monitoring \
+  --for=condition=Ready --timeout=3m
 helm upgrade --install kps prometheus-community/kube-prometheus-stack \
   --version "$KPS_VERSION" --namespace monitoring \
   -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
@@ -181,7 +189,8 @@ helm upgrade --install alloy grafana/alloy \
   -f k8s/monitoring/alloy-values.yaml --wait --timeout=5m
 kubectl apply -f k8s/monitoring/servicemonitors.yaml \
               -f k8s/monitoring/grafana-route.yaml \
-              -f k8s/monitoring/dashboard.yaml
+              -f k8s/monitoring/dashboard.yaml \
+              -f k8s/monitoring/alert-rules.yaml
 
 # 8. Save the HTTPS certificate in Key Vault, so the next rebuild can restore it
 #    (step 3). Only the parts cert-manager checks are kept; saved again only
