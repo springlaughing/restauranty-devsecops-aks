@@ -99,7 +99,9 @@ board.add(graph(
 board.add(graph(
     "Server errors (5xx) per second",
     "Answers with status 500-599, per service. Should stay at 0.",
-    PROMETHEUS, [('sum by (job) (rate(http_requests_total{statusCode=~"5.."}[1m]))', "{{job}}")]), 6)
+    # "or vector(0)": with no 5xx at all, the series does not exist and the
+    # panel would say "No data", which looks broken. Show a flat 0 instead.
+    PROMETHEUS, [('sum by (job) (rate(http_requests_total{statusCode=~"5.."}[1m])) or vector(0)', "{{job}}")]), 6)
 board.add(graph(
     "Latency p95, backends",
     "95 of 100 requests were answered faster than this by the backend itself (5-minute window).",
