@@ -3709,7 +3709,7 @@ The Secret `grafana-admin` then held exactly two keys, `admin-password` and `adm
 
 **In one line:** the monitoring tools are installed with Helm, the backends become scrape targets, Grafana gets its address on the internet, and one network rule opens for Prometheus. Seven steps, run by hand once, and written into the setup script for every rebuild.
 
-**State:** steps 1 to 5 done (Prometheus with Grafana, Loki and Alloy run). The hardening of Alloy and Loki, and steps 6 and 7, follow.
+**State:** all seven steps done, and Alloy and Loki hardened. The check that data arrives in Grafana follows.
 
 **The order matters:**
 
@@ -3854,6 +3854,28 @@ Both values files now give their pods the same settings as the app pods in `rest
 
 Before applying, the rendered files were checked for the four rules of the warnings: no gaps left in Alloy, its config reloader, or Loki.
 
+**Applied** with the same two `helm upgrade --install` commands as steps 4 and 5. This time **neither printed a Pod Security warning**: Kubernetes itself confirmed that both pods now meet the strictest profile.
+
+A trap while checking: `kubectl logs deploy/alloy` printed `Found 2 pods, using pod/alloy-6c54b7cbcf-rzmbq`, the **old** pod. During a rolling update, Kubernetes starts the new pod first and stops the old one when the new one is ready, so for a moment both run. The first check read the wrong pod. Selecting by label reads the current one:
+
+```
+$ kubectl get pods -n monitoring -l app.kubernetes.io/name=alloy
+alloy-58f679d77f-7qkjk   2/2     Running   0          7m58s
+
+$ kubectl logs -n monitoring -l app.kubernetes.io/name=alloy -c alloy --tail=200 | grep -ciE "forbidden|permission denied|read-only|error"
+0
+
+$ kubectl logs -n monitoring -l app.kubernetes.io/name=alloy -c alloy --tail=5        (shortened)
+level=info msg="opened log stream" ... target=cert-manager/cert-manager-webhook-7949787cd9-t7zf7:cert-manager-webhook
+level=info msg="opened log stream" ... target=gateway/restauranty-nginx-85c5954cc8-cgvgl:nginx
+
+$ kubectl get pod -n monitoring -l app.kubernetes.io/name=alloy -o jsonpath='{.items[0].spec.containers[?(@.name=="alloy")].securityContext}'
+{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,
+ "runAsGroup":473,"runAsNonRoot":true,"runAsUser":473,"seccompProfile":{"type":"RuntimeDefault"}}
+```
+
+Alloy works as user 473 with a read-only file system, and it reads the Gateway's access log (`gateway/...:nginx`), the source of the security panels.
+
 #### Step 6: scrape targets, Grafana's address, the dashboard
 
 ```bash
@@ -3862,7 +3884,19 @@ kubectl apply -f k8s/monitoring/servicemonitors.yaml \
               -f k8s/monitoring/dashboard.yaml
 ```
 
-Three files, three jobs.
+Three files, three jobs. Result:
+
+```
+servicemonitor.monitoring.coreos.com/restauranty-backends created
+httproute.gateway.networking.k8s.io/grafana created
+configmap/restauranty-dashboard created
+
+$ kubectl get httproute -n monitoring
+NAME      HOSTNAMES                            AGE
+grafana   ["grafana.aks.springlaughing.dev"]   3s
+```
+
+The chart had already created 8 ServiceMonitors of its own (Prometheus, Alertmanager, Grafana, the operator, kube-state-metrics, the kubelet, the Kubernetes API server, CoreDNS). `restauranty-backends` is the ninth, and the only one for the app.
 
 **`servicemonitors.yaml`: what Prometheus scrapes, and a second guard for F18.** It picks the Services in `restauranty` whose label `app` is `auth`, `discounts` or `items`, and names Prometheus's `job` after that label. The line `sampleLimit: 1000` means: if one scrape brings more than 1,000 series, Prometheus throws that scrape away and marks the target as down, instead of filling its memory. Each backend sends about 100 to 400 series. The code fix (entry 48) closes the known hole; the limit protects Prometheus from the next one.
 
@@ -3920,6 +3954,17 @@ This follows the same rule as the metric labels in entry 48: values that come fr
 ```bash
 kubectl apply -f k8s/network/policies.yaml
 ```
+
+```
+networkpolicy.networking.k8s.io/default-deny unchanged
+networkpolicy.networking.k8s.io/from-gateway configured
+networkpolicy.networking.k8s.io/mongodb-from-backends configured
+networkpolicy.networking.k8s.io/backends-to-mongodb-and-dns configured
+networkpolicy.networking.k8s.io/items-to-internet-https configured
+networkpolicy.networking.k8s.io/from-prometheus created
+```
+
+`from-prometheus` is new. The four `configured` rules did not change: in git, the only difference to `main` is the new rule (`git diff main -- k8s/network/policies.yaml`). `kubectl apply` compares with a copy of the last applied version that it keeps on each object, and the pipeline also applies `k8s/network/`. A slightly different copy, for example from another `kubectl` version, is enough to print `configured`.
 
 Since #11, every pod in `restauranty` refuses all traffic that no rule allows (entry 21). The new rule opens exactly one more path: from the Prometheus pods (label `app.kubernetes.io/name: prometheus`) in the namespace `monitoring`, to `auth`, `discounts` and `items`, on their port `http` (3001, 3002, 3003). Grafana, Loki and Alloy get no path into `restauranty`; Alloy reads logs through the Kubernetes API, not from the pods. The client and MongoDB stay closed to Prometheus.
 
