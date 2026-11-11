@@ -121,6 +121,8 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [57. Alertmanager: where the alerts go](#57-alertmanager-where-the-alerts-go)
   - [58. The alert rules](#58-the-alert-rules)
   - [59. Applying the alerts, and a test message to Slack](#59-applying-the-alerts-and-a-test-message-to-slack)
+  - [60. Installing k6: a supply-chain check, on my own laptop](#60-installing-k6-a-supply-chain-check-on-my-own-laptop)
+  - [61. The attack: password guessing with k6, and the alert in Slack](#61-the-attack-password-guessing-with-k6-and-the-alert-in-slack)
 - [What is next](#what-is-next)
 
 ---
@@ -4265,6 +4267,7 @@ The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside t
 2. **Where alerts go:** Alertmanager's route to Slack, with its own Azure identity (entry 57).
 3. **When alerts fire:** nine rules for attacks, the app and MongoDB, each with its code and the reason for its threshold (entry 58).
 4. **Applying and testing** them, with a test message to Slack (entry 59).
+5. **The attack:** installing k6 (entry 60), then password guessing against the real login, and the alert in Slack (entry 61).
 
 ### 56. Slack: a channel for the alerts, and its webhook in Key Vault
 
@@ -4725,6 +4728,153 @@ It took longer than the 30 seconds of `group_wait`. That setting is only the min
 | **From the first wrong password to the Slack message** | **about 3 to 5 min** |
 
 Each wait has a reason: the `for:` time and the threshold keep a single odd minute from raising an alarm, and grouping turns a burst of alerts into one message. For the demo: start the attack, show the dashboard (the 401 and 429 curves move within a minute) while explaining the waits, then show the message.
+
+### 60. Installing k6: a supply-chain check, on my own laptop
+
+**In one line:** k6, the load-testing tool for the attack, came from k6's own package repository. `apt` first refused it twice, both times correctly: once because the key was missing, once because it could not read the key. The fixes are a lesson in how package signing works.
+
+**Why it matters.** k6 runs on my laptop with my rights. A tampered copy could do anything there, including reading `~/.kube/config`, the admin key to the cluster (entry 54). So it should come from a source whose packages are signed, and the signature should really be checked.
+
+**How package signing works, in short.** k6 signs its package list with a private key. My laptop needs the matching **public key** to check that signature. `apt` is told: "trust packages from `dl.k6.io` only if they are signed with this key". If the key is missing or wrong, `apt` refuses the whole repository.
+
+**Which key is the right one?** k6's key has the fingerprint `C5AD17C747E3415A3642D57D77C6C491D6AC1D69`. A fingerprint is a short, unique summary of a key; comparing it is how one checks a key without trusting where it came from. Two independent sources were compared: the key that k6's package server publishes (`https://dl.k6.io/key.gpg`) and the fingerprint written in the install instructions. They matched:
+
+```
+$ curl -fsSL https://dl.k6.io/key.gpg | gpg --show-keys --with-fingerprint
+pub   rsa4096 2021-03-12 [SC] [expires: 2033-03-10]
+      C5AD 17C7 47E3 415A 3642  D57D 77C6 C491 D6AC 1D69
+uid   k6.io (key for signing binaries) <security@k6.io>
+```
+
+**Refusal 1: the key never arrived.** The first attempt used an older instruction: fetch the key by its fingerprint from a public key server.
+
+```
+gpg: keyserver receive failed: Connection timed out
+...
+Err:3 https://dl.k6.io/deb stable InRelease
+  The following signatures couldn't be verified because the public key is not available: NO_PUBKEY C780D0BDB1A69C86
+E: The repository 'https://dl.k6.io/deb stable InRelease' is not signed.
+```
+
+The key server did not answer, so the keyring file stayed empty, and `apt` refused the repository. The ID in the error, `C780D0BDB1A69C86`, is not the fingerprint above, and that is fine: a key is a main key plus **subkeys** with separate jobs. The main key (`…1D69`, marked `[SC]`) vouches for its subkeys; the subkey `…9C86` (marked `[S]`, for signing) signs the packages day to day. `gpg --show-keys --with-subkey-fingerprints` lists both:
+
+```
+pub   rsa4096/77C6C491D6AC1D69 [SC]   C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+sub   rsa4096/1E7959CE7A3B0C10 [E]
+sub   rsa4096/C780D0BDB1A69C86 [S]    <- the subkey in apt's error
+```
+
+**Refusal 2: the key was there, but nobody could read it.** The current instruction from k6's documentation downloads the key from k6's own server instead:
+
+```bash
+curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+```
+
+`apt` still said `NO_PUBKEY`, and reading the file failed with `Permission denied`. The empty file from the first attempt had been created by root with gpg's private permissions, and writing the key into it kept them:
+
+```
+-rw------- 1 root root 3950 Nov 11 19:36 /usr/share/keyrings/k6-archive-keyring.gpg
+```
+
+`apt` reads keyrings as an unprivileged user (`_apt`), so for `apt` the key did not exist. The fix: delete the file, write the key fresh, and make it readable for everyone:
+
+```bash
+sudo rm /usr/share/keyrings/k6-archive-keyring.gpg
+curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+sudo chmod 644 /usr/share/keyrings/k6-archive-keyring.gpg
+sudo apt-get update && sudo apt-get install -y k6
+```
+
+```
+-rw-r--r-- 1 root root 3950 Nov 11 19:37 /usr/share/keyrings/k6-archive-keyring.gpg
+Get:3 https://dl.k6.io/deb stable InRelease [4149 B]
+Get:1 https://dl.k6.io/deb stable/main amd64 k6 amd64 2.3.0 [29.2 MB]
+Setting up k6 (2.3.0) ...
+k6 v2.3.0 (commit/e088784614, go1.26.8, linux/amd64)
+```
+
+`644` means: everyone may **read**, only root may **write**. Reading is fine for a public key. Writing must stay with root: if a normal user could change this file, they could add their own key and make `apt` install packages they signed.
+
+**The lesson.** Both refusals were `apt` doing its job: it would rather install nothing than install something it cannot verify. It is the same idea as the pipeline's pinned actions and image digests (Part 9), on my own laptop.
+
+The attack script was written for k6 1.x, and the package was k6 2.3. `k6 inspect` reads a script and its settings without running it; it loaded cleanly.
+
+### 61. The attack: password guessing with k6, and the alert in Slack
+
+**In one line:** k6 tried 481 passwords in 4 minutes from one IP address. The Gateway refused 436 of them (91%) with 429 before they reached `auth`; the other 45 got 401. The alert "35 failed logins in 5 minutes" reached Slack. This is step 5 of the Friday demo, and its backup.
+
+**The script,** `scripts/k6/login-guessing.js`: one attacker (my laptop, one IP address) tries a new random password twice per second, for 4 minutes, against one email address. The email does not need to exist: an unknown email and a wrong password get the same answer (entry 5). The important settings:
+
+```js
+export const options = {
+  scenarios: {
+    guessing: {
+      executor: 'constant-arrival-rate', // a fixed pace, however fast the answers come
+      rate: 2,
+      timeUnit: '1s',                    // 2 tries per second = 120 per minute
+      duration: '4m',
+      preAllocatedVUs: 5,
+    },
+  },
+};
+```
+
+`constant-arrival-rate` keeps the pace fixed. A normal k6 loop waits for each answer before the next try, so a slow server would slow the attacker down; with a fixed pace, the numbers can be predicted. The script counts the answers in three counters: 401, 429, and anything else.
+
+**The prediction.** The Gateway's login limit (entry 27) lets one IP address through 10 times per minute, with a burst of 5 answered at once. Over 4 minutes: about 1 + 5 at the start, then one every 6 seconds, so about 45 to 50 tries reach `auth`; the rest, about 430, get 429.
+
+```bash
+k6 run scripts/k6/login-guessing.js
+```
+
+**The result** (shortened):
+
+```
+checks_succeeded...: 100.00% 481 out of 481
+✓ refused (401 or 429)
+
+answers_401_wrong_password.....: 45
+answers_429_rate_limited.......: 436
+
+http_req_duration..............: avg=104.9ms  min=21.22ms med=40.3ms  max=712.31ms p(90)=336.02ms p(95)=354.09ms
+http_req_failed................: 0.00%  0 out of 481
+```
+
+| | Predicted | Measured |
+| --- | --- | --- |
+| Tries | 480 | 481 |
+| Reached `auth`, wrong password (401) | about 45 to 50 | **45** |
+| Refused by the Gateway (429) | about 430 | **436** |
+| Any other answer | 0 | **0** |
+
+`http_req_failed: 0.00%` does not mean the attack worked: the script tells k6 that 401 and 429 are the expected answers, so none counts as a failed request.
+
+**The alert,** at 19:45 local time, while k6 was still running:
+
+![Slack: RestaurantyLoginGuessing (warning), 35 failed logins in 5 minutes, with the description and the link to the dashboard](evidence/15-k6-alert-slack.png)
+
+When the message was sent, 35 failed logins had passed the Gateway within the last 5 minutes. With about 15 in the first minute and 10 per minute after that, 35 is reached after about 3 minutes of attack, which fits: the rule becomes true at 21 (after about 2 minutes) and must stay true for one more minute (`for: 1m`, entry 58). The message carries a count and points to the dashboard for the IP addresses; it carries no IP itself (entry 56).
+
+**What the response times show.** Half of the answers took 40 ms or less, but the slowest tenth took more than 336 ms. The fast ones are the 429s: the Gateway answers them without asking anyone. The slow ones are the 401s: they reach `auth`, which checks the password with **bcrypt**, a hash that is slow on purpose, so that guessing passwords offline is expensive too. The email used here does not exist, yet its 401s were just as slow. That is the code fix of entry 5 at work:
+
+```js
+if (!foundUser) {
+  // Same work and same answer as a wrong password
+  bcrypt.compareSync(password, DUMMY_HASH);
+  res.status(401).json({ message: LOGIN_FAILED });
+  return;
+}
+```
+
+Without it, an unknown email would be answered in a few milliseconds and a known one in about 300, and an attacker could tell from the timing alone which emails have an account. This run proves on AKS that the timing gives nothing away.
+
+**The defence, layer by layer:**
+
+- The Gateway's login limit stopped 91% of the attack before it cost `auth` anything. That also protects `auth`'s CPU: each bcrypt check costs it roughly 300 ms (most of the 336 ms above; the rest is the trip over the internet).
+- The alert told a person within minutes, from the 9% that got through.
+- The Gateway's log, in Loki, has every try with its IP address (the dashboard's "Refused at the Gateway" and "Top 10 client IPs").
+
+**What it does not stop.** The limit is per IP address. An attacker with many addresses (a botnet) gets 10 tries per minute **per address**. The alert would still fire, because it counts failed logins in total, not per IP. Blocking that needs more: a lock per account after a few failures, a CAPTCHA, or multi-factor login.
 
 ---
 
