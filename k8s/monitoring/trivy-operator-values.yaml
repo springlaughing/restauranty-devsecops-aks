@@ -5,6 +5,16 @@
 # Build log: "Why scan what is running", entry 63.
 # Installed by scripts/setup-aks.sh into its own namespace, trivy-system.
 
+# Both images pinned by digest, like every tool in the pipeline (build log,
+# Part 9, "Pinning"). The chart pulls them by tag and has no digest setting,
+# so the digest goes into the tag: <repository>:<tag>@sha256:<digest>.
+# Without this, a changed tag (the Trivy attack of March 2026 also poisoned
+# its Docker images) would reach the cluster with the next scan.
+# Digests checked on Docker Hub and on mirror.gcr.io (the same); Trivy's is
+# also the one ci-cd.yaml pins (build log, entry 65).
+image:
+  tag: "0.36.1@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9"
+
 # Only the app's namespace: our 4 images and MongoDB.
 targetNamespaces: "restauranty"
 
@@ -39,6 +49,8 @@ serviceMonitor:
   interval: 60s
 
 trivy:
+  image:
+    tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
   # "image" would make Trivy pull each image from the registry itself, with
   # its own login. Our registry has none to give: the nodes pull with the
   # kubelet's AcrPull identity (entry 12). "rootfs" starts the image as a
