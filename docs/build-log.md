@@ -5034,7 +5034,9 @@ Name, version and the place to download it, as in an SBOM, plus `integrity`: the
 | Can be looked up in a CVE list | yes | no: a fingerprint says nothing about vulnerabilities |
 | Can be fooled by a moved or reused name | yes | no |
 
-Names and versions can lie. In the Trivy attack of March 2026 (Part 9, "Pinning"), attackers changed what the version name `trivy-action@0.28.0` points to: the name stayed the same, but behind it was now their own code, which stole the secrets of every pipeline that ran it. A parts list would still have said "trivy-action 0.28.0"; only the commit hash showed that the code was different. And a hash alone cannot tell whether something is vulnerable: nobody can look up `sha512-Bdcs…` in a list of CVEs. So:
+Names and versions can lie. A version name like `trivy-action@0.28.0` is a label that points to one specific version of the code (Part 9, "Pinning"). A label can be changed to point somewhere else. That's what attackers did in March 2026: they changed the label so it pointed to code they had written themselves, code that stole the secrets of every pipeline that ran it. The label still said `0.28.0`, and a parts list would still have said "trivy-action 0.28.0". Nothing looked different. Only the commit hash showed that the code behind the name had changed.
+
+And the other way round: a hash alone cannot tell whether something is vulnerable. Nobody can look up `sha512-Bdcs…` in a list of CVEs. So:
 
 - the **SBOM** says what to look up in the vulnerability lists;
 - the **hash** proves that what runs is exactly what was looked up.
