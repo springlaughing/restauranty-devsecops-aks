@@ -5347,6 +5347,16 @@ ci-cd.yaml:                    aquasec/trivy:0.76.1@sha256:790fd66d…
 
 The operator 0.36.1 was built on 29 October 2026 (its own start log says so), 13 days before: older than the pipeline's rule of "at least a week" (Part 9).
 
+**Did the pin change what runs?** Kubernetes records the fingerprint of the image each pod actually runs (`imageID`), even when it was asked for by label only. Before the upgrade:
+
+```
+$ kubectl get pods -n trivy-system -l app.kubernetes.io/name=trivy-operator \
+    -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+mirror.gcr.io/aquasec/trivy-operator@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9
+```
+
+The same digest as the pin. So the pin changes nothing about **what** runs; it guarantees that it stays that way. `image` in a pod's spec is what was asked for, perhaps only a label; `imageID` in its status is what was really pulled, always as a digest. Comparing the two is the quickest way to check what a cluster really runs.
+
 ---
 
 ## What is next
