@@ -4708,6 +4708,10 @@ sent
 
 **Result:** the message appeared in `#restauranty-alerts` after about 1 to 2 minutes (my estimate, watching the channel). So the whole second half of the path works: Alertmanager's route, the webhook read from the file, Key Vault through Alertmanager's own identity, and Slack.
 
+![The test alert in #restauranty-alerts: "RestaurantyTest (warning)", the summary in bold, the description, and a link to the dashboard](evidence/15-alert-test-slack.png)
+
+The message has every part of the template (entry 57): the symbol for "firing", the alert's name and severity as the title, the summary in bold, the description, and the link to the dashboard.
+
 It took longer than the 30 seconds of `group_wait`. That setting is only the minimum: Alertmanager's own processing and Slack's delivery come on top, and Alertmanager had restarted a few minutes earlier.
 
 **What this means for a real attack, and for the demo.** A real alert passes through several waits, one after the other:
