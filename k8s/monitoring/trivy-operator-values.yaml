@@ -49,6 +49,12 @@ trivy:
   # (client showed 0 of everything; build log, entry 64).
   command: rootfs
   ignoreUnfixed: false                # report everything; the dashboard shows CRITICAL and HIGH
+  # In rootfs mode, the scan job copies the Trivy program into the scanned
+  # container, into /var/trivyoperator, and then scans the whole file system:
+  # Trivy found ITSELF. Its own Go libraries (go-jose, golang.org/x/crypto,
+  # x/net, Go 1.27.3) showed up as HIGH and UNKNOWN in images that contain
+  # no Go at all, such as the nginx client (build log, entry 64). Skip it.
+  skipDirs: "/var/trivyoperator"
 
 # The operator's own pod: the chart already drops all capabilities, forbids
 # privilege escalation and makes its file system read-only; it leaves out
