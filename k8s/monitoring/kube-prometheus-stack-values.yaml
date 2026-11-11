@@ -121,10 +121,18 @@ grafana:
     name: grafana-server
   testFramework:
     enabled: false
-  # Grafana's helper loads dashboards from ConfigMaps. By default it may read
-  # ConfigMaps and Secrets in every namespace; it only needs this one.
+  # Grafana's helpers load dashboards and data sources from ConfigMaps with a
+  # label. By default they may read ConfigMaps and Secrets in every namespace,
+  # and the dashboard helper searches all of them. Here: this namespace only,
+  # and ConfigMaps only (dashboards and data sources hold no secrets).
   rbac:
     namespaced: true
+  sidecar:
+    dashboards:
+      searchNamespace: null            # null = only Grafana's own namespace
+      resource: configmap
+    datasources:
+      resource: configmap
   # The admin login comes from Key Vault through External Secrets
   # (grafana-secrets.yaml), never from a default or a value in git.
   admin:
