@@ -5267,7 +5267,7 @@ The nightly scan's 2 HIGH in the client's libxslt were still open in GitHub. But
 
 ### 65. Trusting the scanner: pinned images, and what a poisoned Trivy could do here
 
-**In one line:** the cluster pulled both Trivy images by version name, not by fingerprint, so the March 2026 attack would have reached it, while the pipeline was safe. Both are now pinned by digest. What a poisoned Trivy could still do is listed below, with the next fix.
+**In one line:** the cluster pulled both Trivy images by version name, not by fingerprint, so an attack like the one of March 2026 would have reached it, while the pipeline would have been safe. Both are now pinned by digest. What a poisoned Trivy could still do is listed below, with the next fix.
 
 **State:** pins committed; applied with the next `helm upgrade` of the operator.
 
@@ -5278,7 +5278,7 @@ mirror.gcr.io/aquasec/trivy-operator:0.36.1     the operator
 mirror.gcr.io/aquasec/trivy:0.76.1              the scanner in every scan job
 ```
 
-In March 2026 the attackers did not only change the tags of the Trivy GitHub Action; they also published poisoned Trivy Docker images (Part 9). The pipeline was safe from that, because it names Trivy as `aquasec/trivy:0.76.1@sha256:790fd66d…`. The cluster was not: if the tag `0.76.1` had been pointed at a poisoned image, the next scan job would have pulled and run it. On this point, the operator broke the rule the pipeline follows.
+In March 2026 the attackers did not only change the tags of the Trivy GitHub Action; they also published poisoned Trivy Docker images (Part 9). This project started later, but the question is the same for any future attack. The pipeline would be safe from it, because it names Trivy as `aquasec/trivy:0.76.1@sha256:790fd66d…`. The cluster would not: if the tag `0.76.1` were pointed at a poisoned image, the next scan job would pull and run it. On this point, the operator broke the rule the pipeline follows.
 
 **The fix: the digest goes into the tag.** A Docker image name may carry both, `<repository>:<tag>@sha256:<digest>`; the digest wins, and the tag is only there for people reading it. In `k8s/monitoring/trivy-operator-values.yaml`:
 
