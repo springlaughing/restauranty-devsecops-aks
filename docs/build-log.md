@@ -5241,7 +5241,19 @@ trivy:
   skipDirs: "/var/trivyoperator"
 ```
 
-The report does not say where a finding's file was (`path` is empty), so this is a conclusion from the pattern: the same library and version in unrelated images, and only Go libraries in an image without Go. The final rescan will show whether it holds: the go-jose HIGH should disappear from all three, and MongoDB should keep its own findings.
+Once all five images had been scanned in rootfs mode (after a restart of the operator), the pattern was complete:
+
+```
+$ kubectl get vulnerabilityreports -n restauranty -o wide        (shortened, 22:04)
+REPOSITORY      CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+auth            0          1      0        0     5
+client          0          1      0        0     4
+discounts       0          1      0        0     5
+items           0          1      0        0     5
+library/mongo   1          12     48       6     87
+```
+
+Four images with different contents (nginx, and three Node.js apps with different libraries) do not share the very same findings by chance. What they share is the Trivy copy inside each scan job. The report does not say where a finding's file was (`path` is empty), so this is a conclusion from the pattern: the same library and version in unrelated images, and only Go libraries in an image without Go. The final rescan will show whether it holds: the go-jose HIGH should disappear from all three, and MongoDB should keep its own findings.
 
 #### What MongoDB really has
 
