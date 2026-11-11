@@ -5355,7 +5355,23 @@ $ kubectl get pods -n trivy-system -l app.kubernetes.io/name=trivy-operator \
 mirror.gcr.io/aquasec/trivy-operator@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9
 ```
 
-The same digest as the pin. So the pin changes nothing about **what** runs; it guarantees that it stays that way. `image` in a pod's spec is what was asked for, perhaps only a label; `imageID` in its status is what was really pulled, always as a digest. Comparing the two is the quickest way to check what a cluster really runs.
+The same digest as the pin. But that is only what was pulled **the last time**. What the pod **asks for**, and so what every future pull gets, is a different field:
+
+```
+$ kubectl get pods -n trivy-system -l app.kubernetes.io/name=trivy-operator \
+    -o jsonpath='{.items[0].spec.containers[0].image}'                     # what the operator pod asks for
+mirror.gcr.io/aquasec/trivy-operator:0.36.1
+$ kubectl get configmap trivy-operator-trivy-config -n trivy-system \
+    -o jsonpath='{.data.trivy\.repository}:{.data.trivy\.tag}'             # what every scan job asks for
+mirror.gcr.io/aquasec/trivy:0.76.1
+$ kubectl get pods -n trivy-system -l app.kubernetes.io/name=trivy-operator \
+    -o jsonpath='{.items[0].spec.containers[0].imagePullPolicy}'           # when Kubernetes pulls again
+IfNotPresent
+```
+
+Asked by label, got a hash. `IfNotPresent` means a node pulls only when it does not have the image yet. Every scan job is a new pod, on any of the 3 nodes, and the operator moves to another node after a restart or `az aks stop` and `start`. Each time a node without the image needs it, Kubernetes asks the registry "what does `0.76.1` point to **now**?" and runs whatever it gets. If the label had been changed, today's hash would not stop that, because nothing asks for it.
+
+So the pin changes nothing about **what** runs today; it guarantees that it stays that way, for every future pull. `image` in a pod's spec is what was asked for, perhaps only a label; `imageID` in its status is what was really pulled, always as a digest. Comparing the two is the quickest way to check what a cluster really runs.
 
 ---
 
