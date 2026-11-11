@@ -1,0 +1,95 @@
+# Trivy Operator (#15): scans the images that are RUNNING for known
+# vulnerabilities, again whenever a new pod starts. The pipeline scans what it
+# builds before the deploy (#13); this answers "is what runs now still safe?",
+# also for images the pipeline never builds, such as MongoDB.
+# Build log: "Why scan what is running", entry 63.
+# Installed by scripts/setup-aks.sh into its own namespace, trivy-system.
+
+# Both images pinned by digest, like every tool in the pipeline (build log,
+# Part 9, "Pinning"). The chart pulls them by tag and has no digest setting,
+# so the digest goes into the tag: <repository>:<tag>@sha256:<digest>.
+# Without this, a changed tag (the Trivy attack of March 2026 also poisoned
+# its Docker images) would reach the cluster with the next scan.
+# Digests checked on Docker Hub and on mirror.gcr.io (the same); Trivy's is
+# also the one ci-cd.yaml pins (build log, entry 65).
+image:
+  tag: "0.36.1@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9"
+
+# Only the app's namespace: our 4 images and MongoDB.
+targetNamespaces: "restauranty"
+
+operator:
+  # Vulnerabilities only. The other scanners (configuration audit, RBAC
+  # assessment, infrastructure, compliance, secrets in images) are off: each
+  # adds reports and rights this project does not use yet.
+  vulnerabilityScannerEnabled: true
+  sbomGenerationEnabled: false
+  configAuditScannerEnabled: false
+  rbacAssessmentScannerEnabled: false
+  infraAssessmentScannerEnabled: false
+  clusterComplianceEnabled: false
+  exposedSecretScannerEnabled: false
+  # One label per CVE id would make one time series per CVE: the high
+  # cardinality problem of finding F18. Counts per image and severity only.
+  metricsVulnIdEnabled: false
+  # The chart's default lets the operator read, create and change Secrets in
+  # every namespace, and use every node's kubelet API (nodes/proxy), so that
+  # it can read image-pull Secrets for private registries. In filesystem mode
+  # (below) the node pulls the image with its own identity, so no Secret is
+  # needed: off. Same check as for the monitoring tools (build log, entry 51).
+  accessGlobalSecretsAndServiceAccount: false
+  scanJobsConcurrentLimit: 2          # small cluster: at most 2 scans at a time
+  scanJobTTL: 10m                     # finished scan jobs are deleted after 10 minutes
+
+# Prometheus reads the counts. The ServiceMonitor must live in monitoring:
+# the Prometheus Operator watches only that namespace (build log, entry 51).
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  interval: 60s
+
+trivy:
+  image:
+    tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+  # "image" would make Trivy pull each image from the registry itself, with
+  # its own login. Our registry has none to give: the nodes pull with the
+  # kubelet's AcrPull identity (entry 12). "rootfs" starts the image as a
+  # normal container (the node pulls it) and scans its whole file system:
+  # the operating system's packages (Alpine, Ubuntu) and the programs.
+  # "filesystem" was tried first: it is meant for a project folder and
+  # checks only programs and lock files, so it missed every OS package
+  # (client showed 0 of everything; build log, entry 64).
+  command: rootfs
+  ignoreUnfixed: false                # report everything; the dashboard shows CRITICAL and HIGH
+  # In rootfs mode, the scan job copies the Trivy program into the scanned
+  # container, into /var/trivyoperator, and then scans the whole file system:
+  # Trivy found ITSELF. Its own Go libraries (go-jose, golang.org/x/crypto,
+  # x/net, Go 1.27.3) showed up as HIGH and UNKNOWN in images that contain
+  # no Go at all, such as the nginx client (build log, entry 64). Skip it.
+  skipDirs: "/var/trivyoperator"
+
+# The operator's own pod: the chart already drops all capabilities, forbids
+# privilege escalation and makes its file system read-only; it leaves out
+# non-root and seccomp, which the install's Pod Security warning named.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+
+trivyOperator:
+  # Root-filesystem scanning must read every file in the image, so the scan
+  # container runs as root (the chart says so). Everything else stays
+  # locked: no privilege escalation, no Linux capabilities, read-only file
+  # system, seccomp. The scan jobs run in trivy-system, not in restauranty,
+  # and stop after the scan.
+  scanJobPodTemplateContainerSecurityContext:
+    runAsUser: 0
+    allowPrivilegeEscalation: false
+    privileged: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault

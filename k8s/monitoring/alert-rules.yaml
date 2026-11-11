@@ -1,0 +1,162 @@
+# Restauranty's alert rules (#15). Prometheus checks each rule every 30
+# seconds. A rule "fires" when its query returns something for longer than
+# its "for:" time; then Alertmanager sends it to Slack (only rules with the
+# label project: restauranty, see kube-prometheus-stack-values.yaml).
+#
+# severity: critical = the app or its data is in danger now
+#           warning  = someone should look soon (an attack, a slow trend)
+#
+# No rule puts an IP address into its labels or texts: alerts carry counts,
+# the details stay in Grafana behind its login (build log, entry 56).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: restauranty
+  namespace: monitoring
+spec:
+  groups:
+    # ------------------------------------------------------------ attacks
+    - name: restauranty-attacks
+      rules:
+        # Password guessing. The Gateway lets one IP try 10 logins per
+        # minute (burst 5), so one attacker produces about 15 wrong
+        # passwords in the first minute and 10 per minute after that. More
+        # than 20 in 5 minutes: one attacker crosses it within about 2
+        # minutes; a person who mistyped a few times never does.
+        # The login counters start at 0 (build log, entry 54), so the first
+        # failed logins of an attack are counted too.
+        - alert: RestaurantyLoginGuessing
+          expr: sum(increase(http_requests_total{job="auth", route="/api/auth/login", statusCode="401"}[5m])) > 20
+          for: 1m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $value | printf \"%.0f\" }} failed logins in 5 minutes"
+            description: "Someone is guessing passwords. The Gateway limits each IP to 10 logins per minute; see 'Login attempts at the Gateway' for the 429s and 'Refused at the Gateway' for the IPs."
+
+        # Requests to protected routes with no token or a refused one: a
+        # forged token, an expired one, or someone probing the API. In the
+        # metrics, missing and forged tokens look the same (401 on no_route);
+        # the backends' logs tell them apart.
+        - alert: RestaurantyRefusedTokens
+          expr: sum by (job) (increase(http_requests_total{route="no_route", statusCode="401"}[5m])) > 50
+          for: 1m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }}: {{ $value | printf \"%.0f\" }} requests refused for a missing or bad token in 5 minutes"
+            description: "Someone is calling the API without a valid login: probing, or trying forged tokens."
+
+        # F18's second guard: a backend suddenly sends many more series.
+        # Normal is 150 to 170 per backend; at 1,000 Prometheus drops the
+        # scrape (sampleLimit) and the backend goes dark. Warn well before.
+        - alert: RestaurantyMetricsGrowing
+          expr: max by (job) (scrape_samples_scraped{job=~"auth|discounts|items"}) > 700
+          for: 5m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }} sends {{ $value | printf \"%.0f\" }} series per scrape"
+            description: "Normal is about 150 to 170. At 1,000 Prometheus stops reading this backend. A label may be taking values from visitors again (finding F18)."
+
+    # ------------------------------------------------------------ the app
+    - name: restauranty-app
+      rules:
+        # More than 5% of a backend's answers are server errors, for 5
+        # minutes. A share, not a count: a busy backend may have a few.
+        - alert: RestaurantyServerErrors
+          expr: |
+            sum by (job) (rate(http_requests_total{job=~"auth|discounts|items", statusCode=~"5.."}[5m]))
+              / sum by (job) (rate(http_requests_total{job=~"auth|discounts|items"}[5m])) > 0.05
+          for: 5m
+          labels:
+            project: restauranty
+            severity: critical
+          annotations:
+            summary: "{{ $labels.job }}: {{ $value | humanizePercentage }} of answers are server errors"
+            description: "Something is broken in {{ $labels.job }}. Check its logs in Grafana (Explore, Loki, app={{ $labels.job }})."
+
+        # One backend pod cannot be scraped: crashed, stuck, or cut off.
+        - alert: RestaurantyBackendPodDown
+          expr: up{job=~"auth|discounts|items"} == 0
+          for: 2m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }}: pod {{ $labels.pod }} does not answer Prometheus"
+            description: "The other copy still serves users. Check: kubectl get pods -n restauranty"
+
+        # A whole service has no ready pod: users get errors now.
+        - alert: RestaurantyServiceDown
+          expr: kube_deployment_status_replicas_available{namespace="restauranty"} == 0
+          for: 2m
+          labels:
+            project: restauranty
+            severity: critical
+          annotations:
+            summary: "{{ $labels.deployment }} has no ready pod"
+            description: "Every request to {{ $labels.deployment }} fails. Check: kubectl get pods -n restauranty"
+
+    # ------------------------------------------------------------ MongoDB
+    - name: restauranty-mongodb
+      rules:
+        # A backend has lost its database connection (#28: after a cluster
+        # start; or MongoDB itself is down). Restarts fix the first case by
+        # themselves; this alert catches what a restart cannot fix.
+        - alert: RestaurantyMongoDisconnected
+          expr: min by (job) (mongo_connection_status) == 0
+          for: 2m
+          labels:
+            project: restauranty
+            severity: critical
+          annotations:
+            summary: "{{ $labels.job }} has no connection to MongoDB"
+            description: "Logins and data requests fail. Check: kubectl get pods -n restauranty (mongodb-0) and the backend's log."
+
+        - alert: RestaurantyMongoDown
+          expr: kube_statefulset_status_replicas_ready{namespace="restauranty", statefulset="mongodb"} < 1
+          for: 2m
+          labels:
+            project: restauranty
+            severity: critical
+          annotations:
+            summary: "MongoDB is not ready"
+            description: "All data is unavailable. Check: kubectl describe pod mongodb-0 -n restauranty"
+
+        # MongoDB's disk is more than 80% full. The disk can grow
+        # (allowVolumeExpansion), but only after someone acts.
+        - alert: RestaurantyMongoDiskFilling
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace="restauranty"}
+              / kubelet_volume_stats_capacity_bytes{namespace="restauranty"} < 0.20
+          for: 10m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $labels.persistentvolumeclaim }}: only {{ $value | humanizePercentage }} free"
+            description: "MongoDB stops writing when the disk is full. Grow the PersistentVolumeClaim or clean up."
+
+    # ------------------------------------------------------------ images
+    - name: restauranty-images
+      rules:
+        # A running image has a CRITICAL vulnerability (Trivy Operator). The
+        # pipeline blocks CRITICAL before a deploy (#13), so this fires when a
+        # CVE is published AFTER the deploy, or in an image the pipeline never
+        # builds (MongoDB). A warning, not critical: nothing is broken yet,
+        # but the image should be rebuilt soon. 15 minutes, so a scan that is
+        # replaced by a newer one does not flicker.
+        - alert: RestaurantyCriticalVulnerability
+          expr: sum by (image_repository) (trivy_image_vulnerabilities{namespace="restauranty", severity="Critical"}) > 0
+          for: 15m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $labels.image_repository }}: CRITICAL vulnerabilities in a running image: {{ $value | printf \"%.0f\" }}"
+            description: "Rebuild the image with fixed packages and deploy it. Details: kubectl get vulnerabilityreports -n restauranty -o wide"
+

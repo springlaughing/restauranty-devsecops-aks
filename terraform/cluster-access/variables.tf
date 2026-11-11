@@ -38,11 +38,12 @@ variable "workload_secrets" {
   description = "Which Key Vault secrets each workload may read. One identity per key, named like its ServiceAccount."
   type        = map(list(string))
   default = {
-    auth      = ["jwt-private-key", "mongo-password"]
-    discounts = ["jwt-public-key", "mongo-password"]
-    items     = ["jwt-public-key", "mongo-password", "cloud-name", "cloud-api-key", "cloud-api-secret"]
-    mongodb   = ["mongo-root-password", "mongo-password"]
-    grafana   = ["grafana-admin-password"] # Grafana's login (#14), in the monitoring namespace
+    auth         = ["jwt-private-key", "mongo-password"]
+    discounts    = ["jwt-public-key", "mongo-password"]
+    items        = ["jwt-public-key", "mongo-password", "cloud-name", "cloud-api-key", "cloud-api-secret"]
+    mongodb      = ["mongo-root-password", "mongo-password"]
+    grafana      = ["grafana-admin-password"]     # Grafana's login (#14), in the monitoring namespace
+    alertmanager = ["alertmanager-slack-webhook"] # where alerts are sent (#15), in the monitoring namespace
   }
 }
 
@@ -50,6 +51,7 @@ variable "workload_namespaces" {
   description = "Namespace of a workload's ServiceAccount, for workloads outside app_namespace."
   type        = map(string)
   default = {
-    grafana = "monitoring"
+    grafana      = "monitoring"
+    alertmanager = "monitoring"
   }
 }

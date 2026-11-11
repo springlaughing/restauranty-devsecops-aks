@@ -14,7 +14,7 @@
 
 So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are different things. Headings without a number, such as "What is Trivy", explain an idea; numbered entries record work that was done.
 
-**Parts 1 to 5 are from 9 November 2026, Parts 6 to 10 from 10 November, Part 11 from 11 November.**
+**Parts 1 to 5 are from 9 November 2026, Parts 6 to 10 from 10 November, Parts 11 and 12 from 11 November.**
 
 ---
 
@@ -116,6 +116,20 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
     - [The same steps in the setup script](#the-same-steps-in-the-setup-script)
   - [54. Check: does the data arrive?](#54-check-does-the-data-arrive)
   - [55. Retest on AKS: F18 is fixed, and a latency number that was made up](#55-retest-on-aks-f18-is-fixed-and-a-latency-number-that-was-made-up)
+- [Part 12 — alerts](#part-12--alerts)
+  - [56. Slack: a channel for the alerts, and its webhook in Key Vault](#56-slack-a-channel-for-the-alerts-and-its-webhook-in-key-vault)
+  - [57. Alertmanager: where the alerts go](#57-alertmanager-where-the-alerts-go)
+  - [58. The alert rules](#58-the-alert-rules)
+  - [59. Applying the alerts, and a test message to Slack](#59-applying-the-alerts-and-a-test-message-to-slack)
+  - [60. Installing k6: a supply-chain check, on my own laptop](#60-installing-k6-a-supply-chain-check-on-my-own-laptop)
+  - [61. The attack: password guessing with k6, and the alert in Slack](#61-the-attack-password-guessing-with-k6-and-the-alert-in-slack)
+  - [62. Two more panels: the day-one leak, and the Gateway's own errors](#62-two-more-panels-the-day-one-leak-and-the-gateways-own-errors)
+  - [Why scan what is running, not only what is built](#why-scan-what-is-running-not-only-what-is-built)
+  - [SBOMs and hashes: what is inside, and is it exactly that](#sboms-and-hashes-what-is-inside-and-is-it-exactly-that)
+  - [63. Trivy Operator: the design, and three rights checked](#63-trivy-operator-the-design-and-three-rights-checked)
+  - [64. The scanner checked: three corrections in one evening](#64-the-scanner-checked-three-corrections-in-one-evening)
+  - [Can a security tool be trusted?](#can-a-security-tool-be-trusted)
+  - [65. Pinning the scanner: both Trivy images by digest](#65-pinning-the-scanner-both-trivy-images-by-digest)
 - [What is next](#what-is-next)
 
 ---
@@ -2771,13 +2785,33 @@ Each pull request is normal: it goes through every gate before it can be merged.
 
 ### Pinning: why a version tag is not enough
 
-**In one line:** every tool and action in the pipeline is fixed to its exact bytes (a SHA or digest), not to a version name, because in March 2026 the version names of a security scanner were moved to malware.
+**In one line:** every tool and action in the pipeline is fixed to its exact bytes (a SHA or digest), not to a version name, because in March 2026 attackers changed the version names of a security scanner to point to their own code.
 
-**The real case.** On 19 March 2026, attackers used stolen credentials of the Trivy project. They moved 76 of the 77 version tags of the Trivy GitHub Action (`aquasecurity/trivy-action`) to code that read the secrets of every pipeline that ran it, and published a poisoned Trivy release, v0.69.4, for about 3 hours. Poisoned Docker images followed on 22 and 23 March. It is tracked as CVE-2026-33634, rated critical, and is on CISA's list of vulnerabilities used in real attacks. Pipelines that named the action by commit SHA kept running the old, clean code. ([StepSecurity](https://www.stepsecurity.io/blog/trivy-compromised-a-second-time---malicious-v0-69-4-release), [Endor Labs](https://www.endorlabs.com/vulnerability/cve-2026-33634), [CVE record](https://cveawg.mitre.org/api/cve/CVE-2026-33634))
+**What a version tag is.** A version name like `trivy-action@0.28.0` is a label. In git, this kind of label is called a **tag**, and a tag simply points to one specific version of the code (one commit). When a pipeline says "use `trivy-action@0.28.0`", GitHub looks up where that label points, and runs that code.
+
+**The real case.** A label can be changed to point somewhere else. That's what the attackers did on 19 March 2026. With stolen credentials of the Trivy project, they changed the labels (76 of the 77 version tags of the Trivy GitHub Action, `aquasecurity/trivy-action`) so they pointed to new code they had written themselves, code that read the secrets of every pipeline that ran it. The label still said `0.28.0`. Nothing looked different. But every pipeline using that name now ran the attackers' code. They also published a poisoned Trivy release, v0.69.4, for about 3 hours. Poisoned Docker images followed on 22 and 23 March. It is tracked as CVE-2026-33634, rated critical, and is on CISA's list of vulnerabilities used in real attacks. Pipelines that named the action by commit SHA kept running the old, clean code. ([StepSecurity](https://www.stepsecurity.io/blog/trivy-compromised-a-second-time---malicious-v0-69-4-release), [Endor Labs](https://www.endorlabs.com/vulnerability/cve-2026-33634), [CVE record](https://cveawg.mitre.org/api/cve/CVE-2026-33634))
+
+**What should have been done?** Two groups had something to do.
+
+The **publisher**, the Trivy project, could have:
+
+1. **Protected the keys to publishing.** The attackers used stolen credentials. Publishing with short-lived tokens (OIDC, as this project's pipeline does for Azure) instead of long-lived passwords or tokens leaves nothing lasting to steal. Two-factor login with hardware keys for the maintainers helps too.
+2. **Made version labels unchangeable.** GitHub can refuse changes to tags (tag rules) and offers "immutable releases", which cannot be changed once published. With those, a stolen login still could not point `0.28.0` at new code.
+3. **Signed what it publishes.** If every release and image is signed (for example with Sigstore's cosign), users can check the signature before running it, and a poisoned image without a valid signature is refused.
+4. **Watched its own tags.** 76 tags changing at once is a loud signal, if someone is listening.
+
+The **users** of Trivy could have:
+
+1. **Named the action by its commit hash, and Trivy's images by digest.** In a workflow file, the Trivy GitHub Action was used with a line like `uses: aquasecurity/trivy-action@0.28.0`: the label. Written with the commit hash instead, `uses: aquasecurity/trivy-action@<the 40-character hash of the version they had used>  # 0.28.0`, the line names that exact version of the code; the comment only keeps the version readable for people. When the attackers changed where the label `0.28.0` pointed, pipelines written this way still ran the code behind their hash: the old, clean version. The same for Docker images: `aquasec/trivy:0.76.1@sha256:790fd66d…` instead of only `aquasec/trivy:0.76.1`. That alone kept them safe. How this project does it, with real lines from its pipeline: the table and the list "What the pipeline does" just below. (This project does not use the Trivy action at all: it runs Trivy as a Docker image, pinned by digest.)
+2. **Waited before adopting a new version.** Poisoned releases are usually found within hours or days. This project's rule: at least a week old.
+3. **Given the job that runs a tool as few secrets as possible.** The malware stole secrets; a job with nothing to steal loses nothing. In this pipeline, the scanner jobs have no Azure sign-in (no `id-token`), and no passwords are stored anywhere (OIDC, entry 30). Even a poisoned scanner would have found very little.
+4. **Verified signatures,** where the publisher signs.
+
+The same question for the Trivy Operator in the cluster: "Can a security tool be trusted?" (Part 12).
 
 | How a tool is named | Example | Can someone change what I get? |
 | --- | --- | --- |
-| A tag on an action | `trivy-action@0.28.0` | Yes. A tag is a label; the owner, or a thief, can move it |
+| A tag on an action | `trivy-action@0.28.0` | Yes. A tag is a label; the owner, or a thief, can point it to other code |
 | A tag on an image | `aquasec/trivy:0.76.1` | Yes, tags can be overwritten |
 | A commit SHA or image digest | `aquasec/trivy:0.76.1@sha256:790fd66d…` | **No.** It is a hash of the contents. Other contents give another hash, and Docker refuses them |
 
@@ -3934,7 +3968,8 @@ Changes made in Grafana's editor are lost on the next restart of Grafana. Produc
 Traffic:
 
 - **Requests per second** (Prometheus): how busy is each service? `sum by (job) (rate(http_requests_total[1m]))`: the requests counted by each backend, per second, summed per service.
-- **Server errors (5xx) per second** (Prometheus): is something broken? The same counter, only status codes 500 to 599.
+- **Server errors from the backends (5xx)** (Prometheus): is something broken? The same counter, only status codes 500 to 599.
+- **Server errors at the Gateway (502, 503, 504)** (Loki): can the Gateway reach the backends? Added in entry 62.
 - **Latency p95, backends** (Prometheus): is the backend slow? The p95 from the histogram of entry 49.
 - **Latency p95, at the Gateway** (Loki): is the app slow as a visitor sees it? The p95 of the `duration` field in the Gateway's log: the backend's time plus the Gateway's own (entry 54).
 
@@ -3944,6 +3979,7 @@ Security:
 - **Login attempts at the Gateway, by answer** (Loki): every login from the internet, split into 401 (wrong password, from `auth`), 429 (over the login limit, from the Gateway: `auth` never sees these) and 200 (success).
 - **Refused tokens per minute** (Prometheus): is someone sending no token or a forged one? The 401 answers on `no_route` (entry 48).
 - **Gateway answers per minute, by status** (Loki): what do visitors of the app get? 403 is the blocked user list, 429 is over a limit.
+- **Day-one leak: requests for the user list** (Loki): is someone probing for the leak of finding F11? Added in entry 62.
 - **Top 10 client IPs, last 15 minutes** (Loki): who sends the most, and how much of it is refused?
 - **Refused at the Gateway** (Loki): the newest refused requests, with status, IP, method and path.
 
@@ -4250,15 +4286,1158 @@ The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside t
 
 ---
 
+## Part 12 — alerts
+
+**Goal:** a person learns about an attack or an outage without watching the dashboard: Alertmanager sends a message to Slack. Then a k6 password-guessing run shows it working. Issue #15, branch `15-alerts`.
+
+**What this part sets up, in order:**
+
+1. **A Slack channel** for the alerts, and its webhook in Key Vault (entry 56).
+2. **Where alerts go:** Alertmanager's route to Slack, with its own Azure identity (entry 57).
+3. **When alerts fire:** nine rules for attacks, the app and MongoDB, each with its code and the reason for its threshold (entry 58).
+4. **Applying and testing** them, with a test message to Slack (entry 59).
+5. **The attack:** installing k6 (entry 60), then password guessing against the real login, and the alert in Slack (entry 61).
+6. **Two more dashboard panels:** the day-one leak, and the Gateway's own server errors (entry 62).
+7. **Scanning what runs:** why scan running images too, and the Trivy Operator (entry 63); three corrections to the scanner (entry 64); whether a security tool can be trusted, and pinning it (entry 65).
+
+### 56. Slack: a channel for the alerts, and its webhook in Key Vault
+
+**In one line:** alerts go to the Slack channel `#restauranty-alerts` in my own workspace, through an "incoming webhook". The webhook's address is a secret, so it went straight into Key Vault without appearing on screen, in a file or in the shell history.
+
+**Which Slack.** Two workspaces were possible: Ironhack's and my own. My own won, for three reasons:
+
+- Ironhack's workspace may not let members add apps without an admin's approval, and the webhook is an app.
+- Test attacks (k6, below) send many alerts. They should not land where other people read.
+- IP addresses are personal data (entry 54). Even so, the alert texts will carry only counts and a link to the dashboard, never IPs: the details stay behind Grafana's login.
+
+**What an incoming webhook is.** A web address that Slack creates for one channel. Whatever is sent to it with an HTTP POST appears in that channel as a message. Alertmanager uses it to post alerts. There is no password: **the address itself is the key**. Anyone who has it can post to the channel, for example fake "all clear" messages during an attack. So it is a secret, and it is treated like the JWT key and the database passwords.
+
+**Creating it** (in the browser, about 2 minutes):
+
+1. https://api.slack.com/apps → **Create New App** → **From scratch**. (The other choice, "From an app manifest", describes the whole app in a YAML file; useful when the same app is created many times, not needed here.) Name: `Restauranty Alerts`. Workspace: my own.
+2. In the app's menu, **Incoming Webhooks** → switch it on.
+3. **Add New Webhook** → choose the channel `#restauranty-alerts` → copy the webhook URL.
+
+**Into Key Vault, without showing it:**
+
+```bash
+read -rsp "Slack webhook URL: " URL; echo
+az keyvault secret set --vault-name kv-evgenia-restauranty -n alertmanager-slack-webhook \
+  --file <(printf %s "$URL") --output none
+unset URL
+```
+
+Each part has a reason:
+
+- `read -rsp` asks for the URL and keeps it in a variable. `-s` hides what is pasted, like a password prompt, so it never shows on the screen.
+- `--file <(printf %s "$URL")` hands the value to `az` through a short-lived pipe. The usual way, `--value "https://..."`, would put the secret on the command line: bash saves command lines in `~/.bash_history`, and while the command runs, every program on the machine can see its arguments (`ps aux`).
+- `unset URL` removes it from the shell's memory afterwards.
+
+**Checking it, still without showing it:**
+
+```bash
+az keyvault secret show --vault-name kv-evgenia-restauranty -n alertmanager-slack-webhook --query "attributes.created" -o tsv
+az keyvault secret show --vault-name kv-evgenia-restauranty -n alertmanager-slack-webhook --query value -o tsv | wc -c
+```
+
+```
+2026-11-11T17:24:24+00:00
+82
+```
+
+The secret exists, and it is 82 characters long: the URL (81) plus the line break that `-o tsv` adds. An empty paste would have given 1. Checking a **property** of a secret (does it exist, how long is it) instead of looking at it is a habit worth keeping, in scripts too.
+
+**Next:** Alertmanager needs to read this one secret. The same pattern as Grafana's password (entry 52): its own Azure identity with a role on `alertmanager-slack-webhook` only, a ServiceAccount, a SecretStore and an ExternalSecret.
+
+### 57. Alertmanager: where the alerts go
+
+**In one line:** Alertmanager, already installed with kube-prometheus-stack (entry 53), gets a route to Slack: this project's alerts go to `#restauranty-alerts`, everything else stays in Alertmanager and Grafana. The webhook comes from Key Vault through Alertmanager's own Azure identity, and Alertmanager reads it as a file, so it is never part of any configuration.
+
+**What this step adds:**
+
+- In Azure: an identity for Alertmanager that may read one Key Vault secret, `alertmanager-slack-webhook` (`terraform/cluster-access/variables.tf`).
+- In the cluster: the Secret `alertmanager-slack`, filled from Key Vault by External Secrets (`k8s/monitoring/alertmanager-secrets.yaml`).
+- In Alertmanager's settings: where alerts go, how they are grouped, and what the Slack message says (`k8s/monitoring/kube-prometheus-stack-values.yaml`, section `alertmanager`).
+- In the setup script: the same, for every rebuild (`scripts/setup-aks.sh`, steps 5 and 7).
+
+**How an alert travels:**
+
+```
+Prometheus checks each rule every 30 s
+   │  the rule's query returns something, for longer than its "for:" time
+   ▼
+the alert "fires" ──> Alertmanager: which route? group it, wait 30 s for more of the same
+                          │
+                          ├── label project=restauranty ──> Slack, #restauranty-alerts
+                          └── anything else ─────────────> "null": nobody is sent anything,
+                                                            the alert is still visible in
+                                                            Alertmanager and Grafana
+```
+
+Prometheus decides **whether** something is wrong (the rules, entry 58). Alertmanager decides **who hears about it, and how often**.
+
+#### The Azure side: Alertmanager's own identity
+
+The same pattern as Grafana's password (entry 52). Two lines in `terraform/cluster-access/variables.tf`:
+
+```hcl
+variable "workload_secrets" {
+  default = {
+    # ... auth, discounts, items, mongodb, grafana as before
+    alertmanager = ["alertmanager-slack-webhook"] # where alerts are sent (#15), in the monitoring namespace
+  }
+}
+variable "workload_namespaces" {
+  default = {
+    grafana      = "monitoring"
+    alertmanager = "monitoring"
+  }
+}
+```
+
+The first line creates an identity named after the workload and gives it the role "Key Vault Secrets User" on that **one** secret. The second line says its ServiceAccount lives in `monitoring`, not in `restauranty`.
+
+```bash
+cd terraform/cluster-access && terraform apply && cd ../..
+```
+
+```
+Apply complete! Resources: 3 added, 0 changed, 0 destroyed.
+workload_client_ids = {
+  "alertmanager" = "1eff89d5-b19c-4b51-812e-5646c33ea6f2"
+  ...
+}
+```
+
+The three new resources: the identity, its trust rule for `system:serviceaccount:monitoring:alertmanager`, and the role on the secret. Nothing else changed.
+
+**Why not share Grafana's identity?** Grafana is on the internet. If someone took it over, they would get what Grafana's identity may read. With a shared identity that would include the Slack webhook, and with it they could post a fake "all clear" during an attack. One identity per workload keeps a break-in limited to that workload's own secrets, like `auth` and `items` in #8.
+
+#### The secret: from Key Vault to a file
+
+`k8s/monitoring/alertmanager-secrets.yaml` holds the same three objects as Grafana's file (entry 52):
+
+1. The **ServiceAccount** `alertmanager`, with the annotation `azure.workload.identity/client-id: 1eff89d5-…`: "I stand for Alertmanager's Azure identity". This time the real client id was in the file before anything was applied: the placeholder mistake of entry 52 could not happen again.
+2. The **SecretStore** `alertmanager`: "use Key Vault, signed in as the ServiceAccount `alertmanager`".
+3. The **ExternalSecret** `alertmanager-slack`: "write the Secret `alertmanager-slack` with the key `webhook-url`, from the Key Vault secret `alertmanager-slack-webhook`".
+
+Before writing the file, the name `alertmanager` was checked against every object the chart creates in `monitoring` (the lesson of entry 53, surprise 1): only a label used that word, no object.
+
+Alertmanager gets the Secret as a file. In the values file:
+
+```yaml
+alertmanager:
+  alertmanagerSpec:
+    secrets:
+      - alertmanager-slack     # mounted at /etc/alertmanager/secrets/alertmanager-slack/
+```
+
+and its Slack setting names only that file: `api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url`. The other way, `api_url: https://hooks.slack.com/...`, would put the URL into Alertmanager's configuration, which comes from the Helm values. Then the URL would have to be in the values file (in git) or be passed in by hand on every install, and the operator would keep one more copy of it in a Kubernetes Secret. With a file, the configuration contains only a path, and the URL exists in two places only: Key Vault and the Secret that External Secrets keeps in sync with it.
+
+#### The routing, line by line
+
+The `alertmanager.config` section of `k8s/monitoring/kube-prometheus-stack-values.yaml`:
+
+```yaml
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: "null"
+      group_by: [alertname, job]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - receiver: slack
+          matchers:
+            - project = "restauranty"
+    receivers:
+      - name: "null"
+      - name: slack
+        slack_configs:
+          - api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url
+            channel: "#restauranty-alerts"
+            send_resolved: true
+            title: '{{ if eq .Status "firing" }}:rotating_light:{{ else }}:white_check_mark:{{ end }} {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+            text: >-
+              {{ range .Alerts }}*{{ .Annotations.summary }}*
+              {{ .Annotations.description }}
+              {{ end }}
+              <https://grafana.aks.springlaughing.dev/d/restauranty|Open the dashboard>
+```
+
+- `resolve_timeout: 5m`: an alert that Prometheus stops reporting counts as over after 5 minutes.
+- `route` is a tree. The top says: by default, send to the receiver `"null"`, which sends nothing.
+- `routes` has one branch: alerts with the label `project="restauranty"` go to the receiver `slack`. Only the rules of this project carry that label (entry 58).
+- `group_by: [alertname, job]`: alerts with the same name and the same service become one message. Ten "refused tokens" alerts for `items` make one Slack message, not ten.
+- `group_wait: 30s`: after the first alert of a group, wait 30 seconds for more of the same, then send. That is why a test message arrives about half a minute late.
+- `group_interval: 5m`: news about a group already sent (a new alert in it, or one that ended) at most every 5 minutes.
+- `repeat_interval: 4h`: if an alert is still firing, remind every 4 hours, so it is not forgotten, but not every minute either.
+- `receivers` lists the two places alerts can go: `"null"` (nowhere) and `slack`.
+- `api_url_file` and `channel`: the webhook, read from the file, and the channel it posts to.
+- `send_resolved: true`: a second message when the alert is over, with a different symbol.
+- `title`: :rotating_light: and the rule's name and severity while it fires, :white_check_mark: when it is over. The `{{ }}` parts are Go templates that Alertmanager fills in for each message.
+- `text`: for each alert in the group, its summary in bold and its description, then a link to the dashboard. **No IP addresses**: the rules' texts carry counts and service names only. Slack keeps messages for a long time, outside my control; the details stay in Grafana, behind its login (entry 56).
+
+**Why the chart's standard alerts do not go to Slack.** kube-prometheus-stack brings about 100 rules about Kubernetes itself: a pod that restarts often, a node short of memory, a certificate about to expire. They are useful, but some fire on a small demo cluster for harmless reasons, and in a demo every message in the channel should be about the app. They still fire, and they are visible in Alertmanager's page and in Grafana's alert list. A real team would send them to a second channel for the platform.
+
+**Checked before applying,** on the laptop: the chart was rendered with `helm template`, and the configuration it produces was read back.
+
+```
+route receiver: null | sub-routes: [{'matchers': ['project = "restauranty"'], 'receiver': 'slack'}]
+slack api_url_file: /etc/alertmanager/secrets/alertmanager-slack/webhook-url | channel: #restauranty-alerts
+title kept as template: True
+Alertmanager secrets mounted: ['alertmanager-slack']
+```
+
+"Title kept as template" matters: Helm also uses `{{ }}`, and could have tried to fill these in itself. It does not here, so Alertmanager receives them unchanged. Alertmanager's own checker, `amtool`, could not run on the laptop (no Docker, and downloading binaries was not allowed in this session); Alertmanager checks the configuration itself when it loads it (entry 59).
+
+**The setup script** (`scripts/setup-aks.sh`):
+
+- Step 5 stops with a message if `alertmanager-slack-webhook` is missing in Key Vault. The script cannot create it: the webhook is made in Slack (entry 56). Without it, Alertmanager's pod could not start, because the Secret it mounts would not exist.
+- Step 7 applies `alertmanager-secrets.yaml` together with Grafana's secret file and waits for both, before installing the chart. At the end it applies `alert-rules.yaml`, which needs the PrometheusRule type that the chart adds.
+
+### 58. The alert rules
+
+**In one line:** nine rules in three groups (attacks, the app, MongoDB), in `k8s/monitoring/alert-rules.yaml`. Each one has a reason for its threshold, and none puts an IP address into an alert.
+
+**How a rule works.** The file is a **PrometheusRule**, an object type of the Prometheus Operator (entry 53). The operator hands its rules to Prometheus, which checks each one every 30 seconds. A rule has four parts:
+
+- `expr`: a PromQL query. If it returns nothing, all is well. If it returns a value, something is wrong.
+- `for`: how long it must stay wrong before the alert fires. Before that, the alert is "pending". This keeps a single odd minute from waking anyone.
+- `labels`: `project: restauranty`, so Alertmanager routes it to Slack (entry 57), and `severity`:
+  - `critical`: the app or its data is in danger now.
+  - `warning`: someone should look soon; an attack, or a trend.
+- `annotations`: the texts of the Slack message, `summary` and `description`. `{{ $value }}` is the number the query returned, `{{ $labels.job }}` the service.
+
+The rules use only numbers the system already has: the backends' metrics code (entries 48, 49, 54), the kubelet, and kube-state-metrics.
+
+#### Group 1: attacks
+
+**RestaurantyLoginGuessing: someone is guessing passwords.**
+
+```yaml
+- alert: RestaurantyLoginGuessing
+  expr: sum(increase(http_requests_total{job="auth", route="/api/auth/login", statusCode="401"}[5m])) > 20
+  for: 1m
+  labels: { project: restauranty, severity: warning }
+```
+
+The query counts the failed logins of the last 5 minutes: answers 401 from `auth` on the login route. The threshold comes from the Gateway's login limit (entry 27): one IP address may try 10 logins per minute, plus a burst of 5. So one attacker makes about 15 wrong guesses in the first minute and 10 per minute after that, and crosses 20 within about 2 minutes. A person who mistyped a password a few times never gets close. The first guesses are counted too, because the login counters start at 0 (entry 54).
+
+**RestaurantyRefusedTokens: someone calls the API without a valid login.**
+
+```yaml
+- alert: RestaurantyRefusedTokens
+  expr: sum by (job) (increase(http_requests_total{route="no_route", statusCode="401"}[5m])) > 50
+  for: 1m
+  labels: { project: restauranty, severity: warning }
+```
+
+Requests to a protected route with no token, an expired one or a forged one are refused before they reach a route, so they are counted as `no_route` with 401 (entry 48). More than 50 in 5 minutes, per service, means someone is probing the API or trying forged tokens. The F18 retest (entry 55) made 200 such requests in about a minute: it would have fired. In the metrics, a missing token and a forged one look the same; the backends' logs in Loki tell them apart.
+
+**RestaurantyMetricsGrowing: F18's second guard.**
+
+```yaml
+- alert: RestaurantyMetricsGrowing
+  expr: max by (job) (scrape_samples_scraped{job=~"auth|discounts|items"}) > 700
+  for: 5m
+  labels: { project: restauranty, severity: warning }
+```
+
+`scrape_samples_scraped` is how many series Prometheus received from a backend in its last scrape. Normal is 150 to 170 (entry 55). At 1,000, Prometheus throws the scrape away (`sampleLimit`, entry 53) and that backend goes dark on every dashboard. The alert warns at 700, before that happens. If it fires, a label is probably taking values from visitors again: F18 coming back with some future change.
+
+#### Group 2: the app
+
+**RestaurantyServerErrors: a backend is broken.**
+
+```yaml
+- alert: RestaurantyServerErrors
+  expr: |
+    sum by (job) (rate(http_requests_total{job=~"auth|discounts|items", statusCode=~"5.."}[5m]))
+      / sum by (job) (rate(http_requests_total{job=~"auth|discounts|items"}[5m])) > 0.05
+  for: 5m
+  labels: { project: restauranty, severity: critical }
+```
+
+The share of answers with status 500 to 599, per service: server errors divided by all answers. More than 5% for 5 minutes. A share and not a count, because a busy service may have a few errors without anything being broken. Since the code fix of entry 4, attacks get 401, not 500, so this alert fires for real failures, not for every attack: that was the reason for the fix.
+
+**RestaurantyBackendPodDown: one copy of a backend does not answer.**
+
+```yaml
+- alert: RestaurantyBackendPodDown
+  expr: up{job=~"auth|discounts|items"} == 0
+  for: 2m
+  labels: { project: restauranty, severity: warning }
+```
+
+`up` is the metric Prometheus makes by itself for every target: 1 if the last scrape worked, 0 if not (entry 54). One pod at 0 for 2 minutes: crashed, stuck, or cut off by a network rule. Only a warning, because the second copy still serves users.
+
+**RestaurantyServiceDown: a whole service has no ready pod.**
+
+```yaml
+- alert: RestaurantyServiceDown
+  expr: kube_deployment_status_replicas_available{namespace="restauranty"} == 0
+  for: 2m
+  labels: { project: restauranty, severity: critical }
+```
+
+From kube-state-metrics: how many pods of a Deployment are ready. Zero means every request to that service fails right now: critical. This rule uses Kubernetes' view, not Prometheus's scrapes, so it also fires when the pods are gone entirely and there is nothing left to scrape.
+
+#### Group 3: MongoDB
+
+**RestaurantyMongoDisconnected: a backend has lost its database.**
+
+```yaml
+- alert: RestaurantyMongoDisconnected
+  expr: min by (job) (mongo_connection_status) == 0
+  for: 2m
+  labels: { project: restauranty, severity: critical }
+```
+
+Each backend reports 1 while it is connected to MongoDB and 0 when the connection is lost. Since #28, a backend whose **first** connection fails exits and Kubernetes restarts it (entry 46). This alert catches what a restart cannot fix: MongoDB itself down, a wrong password, a network rule in the way.
+
+**RestaurantyMongoDown: MongoDB is not ready.**
+
+```yaml
+- alert: RestaurantyMongoDown
+  expr: kube_statefulset_status_replicas_ready{namespace="restauranty", statefulset="mongodb"} < 1
+  for: 2m
+  labels: { project: restauranty, severity: critical }
+```
+
+From kube-state-metrics: the MongoDB pod is not ready. Together with the rule above, it tells whether the problem is MongoDB itself or the path to it.
+
+**RestaurantyMongoDiskFilling: MongoDB's disk is filling up.**
+
+```yaml
+- alert: RestaurantyMongoDiskFilling
+  expr: |
+    kubelet_volume_stats_available_bytes{namespace="restauranty"}
+      / kubelet_volume_stats_capacity_bytes{namespace="restauranty"} < 0.20
+  for: 10m
+  labels: { project: restauranty, severity: warning }
+```
+
+Free space divided by size, for every disk (PersistentVolumeClaim) in `restauranty`; today that is only MongoDB's. Less than 20% free for 10 minutes. The kubelet reports these numbers, which is why node-exporter was not needed for this (entry 50). A full disk stops MongoDB from writing; the disk can be made bigger (`allowVolumeExpansion` in the storage class), but only after someone acts, so the alert comes early.
+
+#### What the rules do not cover
+
+- **Requests refused at the Gateway** (403 for the user list, 429 over a limit). They never reach a backend, so the backends' metrics do not see them; only the Gateway's log in Loki does. An alert on a log needs Loki's own rule engine (the "ruler") or Grafana's alerting; neither is set up. The dashboard shows them ("Login attempts at the Gateway", "Gateway answers by status").
+- **Vulnerabilities in the running images.** Planned with the Trivy Operator, as its own rule.
+- **A missing token vs a forged one.** The same in the metrics (above).
+
+### 59. Applying the alerts, and a test message to Slack
+
+**In one line:** six commands bring the secret, the routing and the rules to the cluster; one more sends a test alert straight to Alertmanager, to prove the route to Slack works before any real alert fires.
+
+**State:** all six steps done, every one on the first try. The test message reached Slack.
+
+**1. Alertmanager's webhook from Key Vault.**
+
+```bash
+kubectl apply -f k8s/monitoring/alertmanager-secrets.yaml
+kubectl wait externalsecret/alertmanager-slack -n monitoring --for=condition=Ready --timeout=3m
+kubectl get secretstore alertmanager -n monitoring
+```
+
+`apply` creates the ServiceAccount, the SecretStore and the ExternalSecret (entry 57). `wait` blocks until External Secrets reports that it has written the Secret, or gives up after 3 minutes. The last command shows the SecretStore's status: `Valid` means the sign-in to Key Vault as Alertmanager's identity works. Success: `condition met`, and `STATUS Valid`.
+
+```
+serviceaccount/alertmanager created
+secretstore.external-secrets.io/alertmanager created
+externalsecret.external-secrets.io/alertmanager-slack created
+externalsecret.external-secrets.io/alertmanager-slack condition met
+NAME           AGE   STATUS   CAPABILITIES   READY
+alertmanager   3s    Valid    ReadWrite      True
+```
+
+Synced within seconds: with the real client id in the file from the start, there was no failed sign-in and no waiting for a retry, unlike Grafana's first try (entry 52).
+
+**2. Ask whether the rules are valid, without applying them.**
+
+```bash
+kubectl apply --dry-run=server -f k8s/monitoring/alert-rules.yaml
+```
+
+`--dry-run=server` sends the file to the cluster, which runs every check, including the Prometheus Operator's admission webhook (a check that runs before an object is saved), and then throws the object away. That webhook parses the PromQL of every rule. Without this step, a typo in a query would be stored as plain text, and Prometheus would quietly skip the broken rule: the same "looks deployed, does not work" trap as Grafana's 2/3 in entry 53. Success: `prometheusrule.monitoring.coreos.com/restauranty created (server dry run)`.
+
+```
+prometheusrule.monitoring.coreos.com/restauranty created (server dry run)
+```
+
+The operator's check parsed all nine queries and found nothing to refuse. Nothing was stored yet.
+
+**3. Alertmanager with the route to Slack.**
+
+```bash
+helm upgrade --install kps prometheus-community/kube-prometheus-stack --version 93.2.0 \
+  -n monitoring -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
+```
+
+The same command as in entry 53, step 3: Helm compares the new values with what runs and changes only the difference. Here that is Alertmanager's configuration and its pod, which restarts once to mount the Secret `alertmanager-slack`. That is also why step 1 comes first: a pod that mounts a missing Secret cannot start. Success: `STATUS: deployed`.
+
+```
+Release "kps" has been upgraded. Happy Helming!
+STATUS: deployed
+REVISION: 3
+```
+
+Revision 3: the first install (entry 53, step 3), the fix for Grafana's loaders (surprise 2), and now Alertmanager's route. `helm history kps -n monitoring` lists them; `helm rollback kps 2 -n monitoring` would go back one step.
+
+**4. The rules, for real.**
+
+```bash
+kubectl apply -f k8s/monitoring/alert-rules.yaml
+```
+
+Success: `prometheusrule.monitoring.coreos.com/restauranty created`. Within about a minute, Prometheus loads the nine rules.
+
+```
+prometheusrule.monitoring.coreos.com/restauranty created
+```
+
+**5. Did Alertmanager load the new configuration?**
+
+```bash
+kubectl get pods -n monitoring -l app.kubernetes.io/name=alertmanager
+kubectl logs -n monitoring alertmanager-kps-kube-prometheus-stack-alertmanager-0 -c alertmanager --tail=5
+```
+
+The pod should be `2/2 Running`: Alertmanager, plus a helper that reloads it when its configuration changes. Alertmanager checks its configuration when it loads it; a wrong setting shows as an error in its log, and the old configuration stays. Success: a line `Completed loading of configuration file` and no `error`.
+
+```
+NAME                                                    READY   STATUS    RESTARTS   AGE
+alertmanager-kps-kube-prometheus-stack-alertmanager-0   2/2     Running   0          75s
+
+level=INFO msg="Listening on" address=[::]:9093
+level=INFO msg="TLS is disabled." http2=false address=[::]:9093
+level=INFO msg="Loading configuration file" file=/etc/alertmanager/config_out/alertmanager.env.yaml
+level=INFO msg="Completed loading of configuration file" file=/etc/alertmanager/config_out/alertmanager.env.yaml
+```
+
+The pod is 75 seconds old: it restarted to mount the Secret, as expected. Alertmanager read the new configuration without an error, so the route, the receivers and the templates are valid; this replaces the `amtool` check that could not run on the laptop (entry 57). "TLS is disabled" is about Alertmanager's own port, 9093, inside the cluster: only Prometheus (sending alerts) and Grafana (showing them) talk to it, and it is not published through the Gateway. The message to Slack itself goes out over HTTPS (the webhook URL starts with `https://`).
+
+**6. A test message to Slack.**
+
+```bash
+kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-alertmanager 9093:9093 >/dev/null &
+sleep 3
+curl -s -XPOST localhost:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[{
+  "labels": {"alertname":"RestaurantyTest","project":"restauranty","severity":"warning","job":"test"},
+  "annotations": {"summary":"Test alert","description":"If this is in Slack, the route and the webhook work."}}]' \
+  && echo "sent"
+kill %1
+```
+
+A tunnel to Alertmanager (like the one to Prometheus in entry 54), then a hand-made alert sent to Alertmanager's API, the same way Prometheus sends real ones. It skips Prometheus and the rules on purpose: it tests only the second half of the path, routing and Slack. The alert carries `project: restauranty`, so it should take the route to Slack. The `labels` are what Alertmanager routes and groups by; the `annotations` fill the message.
+
+Success: about 30 seconds later (`group_wait`), `#restauranty-alerts` shows ":rotating_light: RestaurantyTest (warning)" with the text and the dashboard link. About 5 minutes later (`resolve_timeout`, since nobody sends this alert again), a second message with :white_check_mark: says it is over.
+
+```
+[1] 77905
+sent
+```
+
+**Result:** the message appeared in `#restauranty-alerts` after about 1 to 2 minutes (my estimate, watching the channel). So the whole second half of the path works: Alertmanager's route, the webhook read from the file, Key Vault through Alertmanager's own identity, and Slack.
+
+![The test alert in #restauranty-alerts: "RestaurantyTest (warning)", the summary in bold, the description, and a link to the dashboard](evidence/15-alert-test-slack.png)
+
+The message has every part of the template (entry 57): the symbol for "firing", the alert's name and severity as the title, the summary in bold, the description, and the link to the dashboard.
+
+Five minutes later, the second message: the test alert is over.
+
+![The same test alert twice: firing at 18:53, resolved at 18:58](evidence/15-alert-test-slack-resolved.png)
+
+18:53 to 18:58: exactly `resolve_timeout` (5 minutes). Nobody sent the test alert again, so Alertmanager counted it as over and, because of `send_resolved: true`, said so.
+
+It took longer than the 30 seconds of `group_wait`. That setting is only the minimum: Alertmanager's own processing and Slack's delivery come on top, and Alertmanager had restarted a few minutes earlier.
+
+**What this means for a real attack, and for the demo.** A real alert passes through several waits, one after the other:
+
+| Stage | Time |
+| --- | --- |
+| The attacker passes 20 failed logins (the login limit allows about 15 in the first minute, then 10 per minute) | about 1 to 2 min |
+| Prometheus scrapes `auth` (every 30 s) and checks the rule (every 30 s) | up to 1 min |
+| The rule must stay true for its `for:` time | 1 min |
+| Alertmanager groups and sends; Slack delivers | about 0.5 to 2 min |
+| **From the first wrong password to the Slack message** | **about 3 to 5 min** |
+
+Each wait has a reason: the `for:` time and the threshold keep a single odd minute from raising an alarm, and grouping turns a burst of alerts into one message. For the demo: start the attack, show the dashboard (the 401 and 429 curves move within a minute) while explaining the waits, then show the message.
+
+### 60. Installing k6: a supply-chain check, on my own laptop
+
+**In one line:** k6, the load-testing tool for the attack, came from k6's own package repository. `apt` first refused it twice, both times correctly: once because the key was missing, once because it could not read the key. The fixes are a lesson in how package signing works.
+
+**Why it matters.** k6 runs on my laptop with my rights. A tampered copy could do anything there, including reading `~/.kube/config`, the admin key to the cluster (entry 54). So it should come from a source whose packages are signed, and the signature should really be checked.
+
+**How package signing works, in short.** k6 signs its package list with a private key. My laptop needs the matching **public key** to check that signature. `apt` is told: "trust packages from `dl.k6.io` only if they are signed with this key". If the key is missing or wrong, `apt` refuses the whole repository.
+
+**Which key is the right one?** k6's key has the fingerprint `C5AD17C747E3415A3642D57D77C6C491D6AC1D69`. A fingerprint is a short, unique summary of a key; comparing it is how one checks a key without trusting where it came from. Two independent sources were compared: the key that k6's package server publishes (`https://dl.k6.io/key.gpg`) and the fingerprint written in the install instructions. They matched:
+
+```
+$ curl -fsSL https://dl.k6.io/key.gpg | gpg --show-keys --with-fingerprint
+pub   rsa4096 2021-03-12 [SC] [expires: 2033-03-10]
+      C5AD 17C7 47E3 415A 3642  D57D 77C6 C491 D6AC 1D69
+uid   k6.io (key for signing binaries) <security@k6.io>
+```
+
+**Refusal 1: the key never arrived.** The first attempt used an older instruction: fetch the key by its fingerprint from a public key server.
+
+```
+gpg: keyserver receive failed: Connection timed out
+...
+Err:3 https://dl.k6.io/deb stable InRelease
+  The following signatures couldn't be verified because the public key is not available: NO_PUBKEY C780D0BDB1A69C86
+E: The repository 'https://dl.k6.io/deb stable InRelease' is not signed.
+```
+
+The key server did not answer, so the keyring file stayed empty, and `apt` refused the repository. The ID in the error, `C780D0BDB1A69C86`, is not the fingerprint above, and that is fine: a key is a main key plus **subkeys** with separate jobs. The main key (`…1D69`, marked `[SC]`) vouches for its subkeys; the subkey `…9C86` (marked `[S]`, for signing) signs the packages day to day. `gpg --show-keys --with-subkey-fingerprints` lists both:
+
+```
+pub   rsa4096/77C6C491D6AC1D69 [SC]   C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+sub   rsa4096/1E7959CE7A3B0C10 [E]
+sub   rsa4096/C780D0BDB1A69C86 [S]    <- the subkey in apt's error
+```
+
+**Refusal 2: the key was there, but nobody could read it.** The current instruction from k6's documentation downloads the key from k6's own server instead:
+
+```bash
+curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --yes --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+```
+
+`apt` still said `NO_PUBKEY`, and reading the file failed with `Permission denied`. The empty file from the first attempt had been created by root with gpg's private permissions, and writing the key into it kept them:
+
+```
+-rw------- 1 root root 3950 Nov 11 19:36 /usr/share/keyrings/k6-archive-keyring.gpg
+```
+
+`apt` reads keyrings as an unprivileged user (`_apt`), so for `apt` the key did not exist. The fix: delete the file, write the key fresh, and make it readable for everyone:
+
+```bash
+sudo rm /usr/share/keyrings/k6-archive-keyring.gpg
+curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+sudo chmod 644 /usr/share/keyrings/k6-archive-keyring.gpg
+sudo apt-get update && sudo apt-get install -y k6
+```
+
+```
+-rw-r--r-- 1 root root 3950 Nov 11 19:37 /usr/share/keyrings/k6-archive-keyring.gpg
+Get:3 https://dl.k6.io/deb stable InRelease [4149 B]
+Get:1 https://dl.k6.io/deb stable/main amd64 k6 amd64 2.3.0 [29.2 MB]
+Setting up k6 (2.3.0) ...
+k6 v2.3.0 (commit/e088784614, go1.26.8, linux/amd64)
+```
+
+`644` means: everyone may **read**, only root may **write**. Reading is fine for a public key. Writing must stay with root: if a normal user could change this file, they could add their own key and make `apt` install packages they signed.
+
+**The lesson.** Both refusals were `apt` doing its job: it would rather install nothing than install something it cannot verify. It is the same idea as the pipeline's pinned actions and image digests (Part 9), on my own laptop.
+
+The attack script was written for k6 1.x, and the package was k6 2.3. `k6 inspect` reads a script and its settings without running it; it loaded cleanly.
+
+### 61. The attack: password guessing with k6, and the alert in Slack
+
+**In one line:** k6 tried 481 passwords in 4 minutes from one IP address. The Gateway refused 436 of them (91%) with 429 before they reached `auth`; the other 45 got 401. The alert "35 failed logins in 5 minutes" reached Slack. This is step 5 of the Friday demo, and its backup.
+
+**The script,** `scripts/k6/login-guessing.js`: one attacker (my laptop, one IP address) tries a new random password twice per second, for 4 minutes, against one email address. The email does not need to exist: an unknown email and a wrong password get the same answer (entry 5). The important settings:
+
+```js
+export const options = {
+  scenarios: {
+    guessing: {
+      executor: 'constant-arrival-rate', // a fixed pace, however fast the answers come
+      rate: 2,
+      timeUnit: '1s',                    // 2 tries per second = 120 per minute
+      duration: '4m',
+      preAllocatedVUs: 5,
+    },
+  },
+};
+```
+
+`constant-arrival-rate` keeps the pace fixed. A normal k6 loop waits for each answer before the next try, so a slow server would slow the attacker down; with a fixed pace, the numbers can be predicted. The script counts the answers in three counters: 401, 429, and anything else.
+
+**The prediction.** The Gateway's login limit (entry 27) lets one IP address through 10 times per minute, with a burst of 5 answered at once. Over 4 minutes: about 1 + 5 at the start, then one every 6 seconds, so about 45 to 50 tries reach `auth`; the rest, about 430, get 429.
+
+```bash
+k6 run scripts/k6/login-guessing.js
+```
+
+**The result** (shortened):
+
+```
+checks_succeeded...: 100.00% 481 out of 481
+✓ refused (401 or 429)
+
+answers_401_wrong_password.....: 45
+answers_429_rate_limited.......: 436
+
+http_req_duration..............: avg=104.9ms  min=21.22ms med=40.3ms  max=712.31ms p(90)=336.02ms p(95)=354.09ms
+http_req_failed................: 0.00%  0 out of 481
+```
+
+| | Predicted | Measured |
+| --- | --- | --- |
+| Tries | 480 | 481 |
+| Reached `auth`, wrong password (401) | about 45 to 50 | **45** |
+| Refused by the Gateway (429) | about 430 | **436** |
+| Any other answer | 0 | **0** |
+
+`http_req_failed: 0.00%` does not mean the attack worked: the script tells k6 that 401 and 429 are the expected answers, so none counts as a failed request.
+
+**The alert,** at 19:45 local time, while k6 was still running:
+
+![Slack: RestaurantyLoginGuessing (warning), 35 failed logins in 5 minutes, with the description and the link to the dashboard](evidence/15-k6-alert-slack.png)
+
+When the message was sent, 35 failed logins had passed the Gateway within the last 5 minutes. With about 15 in the first minute and 10 per minute after that, 35 is reached after about 3 minutes of attack, which fits: the rule becomes true at 21 (after about 2 minutes) and must stay true for one more minute (`for: 1m`, entry 58).
+
+A few minutes after k6 stopped, the alert ended:
+
+![The same alert twice: firing with 35 failed logins, then resolved, showing 26 failed logins](evidence/15-k6-alert-slack-resolved.png)
+
+The "resolved" message says **26**, more than the threshold of 20. That is not a mistake: a resolved message repeats the text of the alert's **last check while it was still firing**. At that check the count was 26; at the next one it was below 20, and Prometheus reported the alert as over. Worth saying in a demo, so the number does not confuse anyone. The message carries a count and points to the dashboard for the IP addresses; it carries no IP itself (entry 56).
+
+**The dashboard around the attack** (time range "last 15 minutes": before, during and after):
+
+![Traffic and security rows, 19:35 to 19:50: auth's latency rises to about 220 ms and falls again; at the Gateway, 429 at about 110 per minute and 401 at about 10 per minute while k6 runs](evidence/15-k6-grafana-traffic-security.png)
+
+- **Login attempts at the Gateway, by answer** draws the prediction: 429 jumps to about 110 per minute; 401 starts at about 15 (the burst) and then stays at 10 per minute (one every 6 seconds).
+- **Failed logins per minute** (from `auth`'s own counter) goes from 0 to between about 6 and 14 while k6 runs, and back to 0. Prometheus reads the counter every 30 seconds and spreads the count over the minute, so the line is jagged, but it averages the same 10 per minute.
+- **Latency p95, backends:** `auth` climbs from a few milliseconds to about 220 ms and falls again after the attack. That is bcrypt: each failed login costs `auth` about 300 ms (below). The other backends stay flat.
+- **Server errors (5xx):** a flat 0, no longer "No data" (entry 55).
+
+![The Gateway's view, 19:40 to 19:50: the whole attack as 401 and 429 curves; 481 requests from one IP address, all 481 refused; each one in the log as 429 POST /api/auth/login (IP hidden)](evidence/15-k6-grafana-gateway.png)
+
+The Gateway's log, in Loki, has every single try: one IP address, 481 requests, 481 refused (401 or 429). This is the issue's third point, "a Loki query showing the attack (IP, path, status)": the panels "Top 10 client IPs" and "Refused at the Gateway" are exactly that query.
+
+**What the response times show.** Half of the answers took 40 ms or less, but the slowest tenth took more than 336 ms. The fast ones are the 429s: the Gateway answers them without asking anyone. The slow ones are the 401s: they reach `auth`, which checks the password with **bcrypt**, a hash that is slow on purpose, so that guessing passwords offline is expensive too. The email used here does not exist, yet its 401s were just as slow. That is the code fix of entry 5 at work:
+
+```js
+if (!foundUser) {
+  // Same work and same answer as a wrong password
+  bcrypt.compareSync(password, DUMMY_HASH);
+  res.status(401).json({ message: LOGIN_FAILED });
+  return;
+}
+```
+
+Without it, an unknown email would be answered in a few milliseconds and a known one in about 300, and an attacker could tell from the timing alone which emails have an account. This run proves on AKS that the timing gives nothing away.
+
+**The defence, layer by layer:**
+
+- The Gateway's login limit stopped 91% of the attack before it cost `auth` anything. That also protects `auth`'s CPU: each bcrypt check costs it roughly 300 ms (most of the 336 ms above; the rest is the trip over the internet). Even the 9% that got through pushed `auth`'s p95 latency to about 220 ms; without the limit, all 481 would have reached it.
+- The alert told a person within minutes, from the 9% that got through.
+- The Gateway's log, in Loki, has every try with its IP address (the screenshot above).
+
+**What it does not stop.** The limit is per IP address. An attacker with many addresses (a botnet) gets 10 tries per minute **per address**. The alert would still fire, because it counts failed logins in total, not per IP. Blocking that needs more: a lock per account after a few failures, a CAPTCHA, or multi-factor login.
+
+### 62. Two more panels: the day-one leak, and the Gateway's own errors
+
+**In one line:** the dashboard gets two panels from the Gateway's log. One counts requests for the user list, the path that leaked every password hash on day one. The other counts server errors that the Gateway gives itself when it cannot reach a backend. No new alerts: these are for watching and for the demo.
+
+**Why a panel and not an alert.** An alert on log lines needs Loki's own rule engine (the "ruler"), configured and connected to Alertmanager. For the demo, seeing the event is enough; the Prometheus alerts (entry 58) already cover the attacks with the most volume. The ruler stays in "What is next".
+
+**Which status codes are watched, and where:**
+
+| Status | Means | Watched by |
+| --- | --- | --- |
+| 401 on login | wrong password | Prometheus (panel and alert), Loki (panel) |
+| 401 on `no_route` | missing or forged token | Prometheus (panel and alert) |
+| 403 | the blocked user list | Loki: status panel, log panel, **new: "Day-one leak"** |
+| 429 | over a rate limit | Loki: status panel, login panel, log panel |
+| 404 | unknown path, mostly scanners | Loki: status panel |
+| 5xx from a backend | a backend failed on a request | Prometheus (panel and alert) |
+| 5xx from the Gateway | the Gateway could not reach a backend | **new: "Server errors at the Gateway"** |
+
+Other codes, such as 400 (bad input in a form), are visible in the status panel and need nothing of their own.
+
+**Panel 1: "Day-one leak: requests for the user list."** A big number: how many requests for `/api/auth/users` the Gateway refused with 403, in the dashboard's time range. Red from the first one. Before the fixes, this path gave anyone every user with their password hash (finding F11). Since #10 the Gateway refuses it in any spelling (entry 27), and the frontend does not use it. So nobody legitimate asks for it: every request here is someone probing for a known leak.
+
+```
+sum(count_over_time(<Gateway, app host> | path=~"(?i)/api/auth/users.*" | status="403" [$__range]))
+```
+
+`(?i)` makes the pattern ignore upper and lower case, like the block itself; `.*` also catches `/api/auth/users/123` and query strings. `$__range` is Grafana's name for the selected time range.
+
+**Panel 2: "Server errors at the Gateway (502, 503, 504)."** When the Gateway cannot reach a backend, it answers 502, 503 or 504 itself. The backends' metrics never see these, because the requests never arrive. The worst case is a mistake of my own: a changed network rule that blocks the Gateway from a backend. The pods stay healthy, Prometheus still scrapes them (it has its own rule 6), every alert stays green, and every user gets an error. Only the Gateway's log knows. The panel shows a flat 0, not "No data", when nothing is wrong: "No data" could also mean the query is broken.
+
+The old panel "Server errors (5xx) per second" is now called "Server errors from the backends (5xx)", so the two are not confused.
+
+**The test:** the day-one leak, in three spellings, as an attacker would try to get around the block:
+
+```bash
+kubectl apply -f k8s/monitoring/dashboard.yaml
+APP=https://restauranty.aks.springlaughing.dev
+for p in /api/auth/users /api/auth/USERS /api/auth/Users/123; do
+  curl -s -o /dev/null -w "$p  %{http_code}\n" "$APP$p"
+done
+```
+
+All three got 403, and the panel turned red:
+
+![The day-one leak panel shows 3 in red; the log lists GET /api/auth/users, /USERS and /Users/123, each refused with 403 (IP addresses hidden)](evidence/15-day-one-leak-panel.png)
+
+The pattern caught every spelling. The IP table also shows a second address with 6 requests that were not mine: most likely another scanner from the internet (entry 54).
+
+### Why scan what is running, not only what is built
+
+**In one line:** the pipeline checks an image once, before it is deployed. But the list of known vulnerabilities grows every day, and not everything that runs comes from the pipeline. So mature teams scan twice: before the deploy, and while it runs. This is often called "shift left, shield right".
+
+**Five reasons:**
+
+1. **Vulnerabilities are found after the build.** An image never changes after it is built, but the list of known holes (CVEs) does, every day. An image that was clean on Monday can have a CRITICAL on Wednesday, without anyone touching it. The famous case is Log4Shell (December 2021): a hole in log4j, a Java library for writing logs, rated the highest severity. Overnight, images that had passed every scan for years were critical, and they were already running everywhere.
+2. **Not everything that runs went through the pipeline.** The pipeline scans the 4 images it builds. The cluster also runs MongoDB, NGINX, Grafana, Prometheus, Loki, cert-manager and more. They come from public registries through Helm charts, and the pipeline has never seen them. Our own example: MongoBleed (CVE-2025-14847), a hole in MongoDB that was exploited in the wild and fixed in version 8.0.17. Our cluster runs 8.0.34, so it is patched; but until now nothing in this project would have noticed if it were not.
+3. **What runs can drift from what was scanned.** Someone changes an image by hand (`kubectl edit`), an old pod keeps running, or an image's version name (its tag) is changed to point to a different image. The pipeline's result describes what was built, not what is running.
+4. **In an incident, the question is "where does this run?"** When the next Log4Shell is announced, a team has to answer within hours: are we affected, and where? During Log4Shell, many companies needed days just to find out where log4j was running. A scanner that watches the cluster keeps that list ready.
+5. **Two scans of "the same image" can disagree, and both can be right.** The nightly scan reads the image's SBOM, the parts list the pipeline wrote at build time: what the build tools **declared**. A scan of the running container's files reads what is **actually there**. A program copied in without a package manager can be missing from the first and visible to the second. Entry 45 met exactly that gap: Trivy's scan listed Alpine's packages and the npm packages, but no entry for the Node.js program itself, because the official Node image installs it from a download, not as an Alpine package. Whether the operator's scan of the files finds it is checked in entry 64.
+
+**Three layers, three jobs:**
+
+| Layer | When | Covers | Does |
+| --- | --- | --- | --- |
+| Pipeline gate (Trivy, #13) | before a deploy | the 4 images we build | **blocks** the deploy on CRITICAL |
+| Nightly re-scan (#13) | every night | the 4 images, against new CVE data | **reports** in GitHub's Security tab (reason 1) |
+| Trivy Operator (this part) | whenever a pod starts | everything running in the scanned namespace | **reports** in the cluster, on the dashboard, with an alert (reasons 1 to 5) |
+
+A scanner of running images does not stop anything: it informs, and the fix is still a rebuild and a deploy through the pipeline. Stopping an unscanned or unsigned image from starting at all is the job of an "admission controller" such as Kyverno; not part of this project. In production, the cloud's own tool often does the scanning instead: on Azure, Microsoft Defender for Containers (paid per node). The Trivy Operator is the free, open-source way to the same result.
+
+### SBOMs and hashes: what is inside, and is it exactly that
+
+**In one line:** an SBOM lists what is inside an image by **name and version**, so it can be compared with lists of known vulnerabilities. A hash proves that some bytes are **exactly** the ones expected, so a name and a version cannot lie. They answer different questions, and the project uses both.
+
+**The SBOM: "what is inside?"** A Software Bill of Materials is a file that lists every component of a piece of software: its name, its version, and where it comes from. The pipeline writes one per image at build time (Part 9, "SBOM: the parts list of an image"): about 155 entries for a backend. In the format used here (CycloneDX), an entry looks roughly like this (shortened):
+
+```json
+{ "name": "express", "version": "4.22.3", "purl": "pkg:npm/express@4.22.3" }
+```
+
+`purl` is a "package URL": one standard way to write "the npm package express, version 4.22.3", so that tools from different makers mean the same thing.
+
+An SBOM exists to answer one question quickly: **"do we have package X in version Y anywhere?"** When a new CVE says "express before version Z is affected", a team searches its SBOMs instead of pulling and scanning every image again. The nightly scan (entry 43) does exactly that: it checks the parts lists of yesterday's deploy against today's list of known vulnerabilities.
+
+Its limit: it lists what the build tools **declared**. Something copied into an image without a package manager may be missing (reason 5 above, and entry 45).
+
+**The hash: "is it exactly that, unchanged?"** A hash is a fingerprint of some bytes, computed by a fixed formula such as SHA-256 or SHA-512. The same bytes always give the same fingerprint; change a single bit and the fingerprint is completely different. And nobody can make different bytes with a chosen fingerprint. So comparing fingerprints proves that two things are exactly the same.
+
+This project checks hashes in four places. The first needs two words explained:
+
+- **npm** is the package manager of Node.js: it downloads the libraries an app uses (express, mongoose, …) from the public npm registry.
+- **`package-lock.json`** is a file in each app folder that pins every library to an exact version, with the address to download it and a hash of the file.
+- **`npm ci`** is the command that installs exactly what `package-lock.json` lists, nothing newer, and checks each downloaded file against its hash. It runs twice for every build: in the pipeline's build job, before the tests (`ci-cd.yaml`), and inside each Dockerfile, while the image is built (`RUN npm ci …`). So every library that ends up in an image has passed this check.
+
+
+| Where | What is hashed | Who compares |
+| --- | --- | --- |
+| `package-lock.json`, field `integrity` (entry 30) | each npm package | `npm ci`, in the pipeline and in the Dockerfile, refuses a package whose content does not match |
+| image digests, `client@sha256:…` (entry 41) | a whole image | Kubernetes pulls exactly that image |
+| action pins, `checkout@3d3c42e5…` (Part 9, "Pinning") | a version of an action's code | GitHub runs exactly that commit |
+| the k6 key's fingerprint, `C5AD…1D69` (entry 60) | a signing key | I compare it before `apt` trusts the key |
+
+The real lock-file entry for express in `auth`:
+
+```json
+"node_modules/express": {
+  "version": "4.22.3",
+  "resolved": "https://registry.npmjs.org/express/-/express-4.22.3.tgz",
+  "integrity": "sha512-Bdcs4+3qlpVlx2NRn6fgX2Ue2/gGRaPeawebgclM0ERSCqDpA+owF1fdPwjJUTAJWMTuAaxjDf+hzb0/4eKvvw=="
+}
+```
+
+Name, version and the place to download it, as in an SBOM, plus `integrity`: the SHA-512 fingerprint of that exact package file. If anyone replaced the file on the npm registry with different content under the same version number, `npm ci` would compute a different fingerprint while downloading it, and the build would stop with an error: in the pipeline, the image would never be built.
+
+**How the two fit together.**
+
+| | SBOM | Hash |
+| --- | --- | --- |
+| Question | What is inside? | Is it exactly this? |
+| Identifies by | name and version | the bytes themselves |
+| Can be looked up in a CVE list | yes | no: a fingerprint says nothing about vulnerabilities |
+| Can be fooled by a moved or reused name | yes | no |
+
+Names and versions can lie. A version name like `trivy-action@0.28.0` is a label that points to one specific version of the code (Part 9, "Pinning"). A label can be changed to point somewhere else. That's what attackers did in March 2026: they changed the label so it pointed to code they had written themselves, code that stole the secrets of every pipeline that ran it. The label still said `0.28.0`, and a parts list would still have said "trivy-action 0.28.0". Nothing looked different. Only the commit hash showed that the code behind the name had changed.
+
+And the other way round: a hash alone cannot tell whether something is vulnerable. Nobody can look up `sha512-Bdcs…` in a list of CVEs. So:
+
+- the **SBOM** says what to look up in the vulnerability lists;
+- the **hash** proves that what runs is exactly what was looked up.
+
+The two can also be combined: CycloneDX has a place for a hash next to each component, so a parts list can say "express 4.22.3, with exactly these bytes".
+
+### 63. Trivy Operator: the design, and three rights checked
+
+**In one line:** the Trivy Operator scans the images running in `restauranty` (our 4 and MongoDB) whenever a pod starts, and publishes the counts to Prometheus. It runs in its own namespace, and two settings were changed so that it needs no password for the registry and no right to read other workloads' Secrets.
+
+**How it works:**
+
+```
+a pod starts in restauranty (for example client after a deploy)
+  → the operator notices its image
+  → starts a short scan job in trivy-system (a pod that runs Trivy, then stops)
+  → writes the result as a Kubernetes object: a VulnerabilityReport, in restauranty
+  → publishes the counts per image and severity as Prometheus metrics
+  → the dashboard row "Vulnerabilities in running images", and an alert on CRITICAL
+```
+
+**The files:**
+
+- `k8s/monitoring/trivy-operator-values.yaml`: the settings (below).
+- `k8s/platform/namespaces.yaml`: a new namespace, `trivy-system`, with Pod Security "baseline".
+- `k8s/monitoring/alert-rules.yaml`: a tenth rule, `RestaurantyCriticalVulnerability`.
+- `scripts/build-dashboard.py` and `k8s/monitoring/dashboard.yaml`: a new row with three panels.
+- `scripts/setup-aks.sh`: installs the chart (aqua/trivy-operator 0.38.1) at the end of step 7.
+
+**Scope: `restauranty` only** (`targetNamespaces`). That is our 4 images and MongoDB: enough for Demo A (below) and for reason 2. Scanning `monitoring` and `gateway` as well would give a fuller picture, with many more findings in other people's images, and more scan time.
+
+**Only the vulnerability scanner.** The chart also brings scanners for configuration, RBAC, the nodes, compliance and secrets inside images. Each adds reports and rights that this project does not use yet, so they are off. The metrics carry counts per image and severity, not one label per CVE (`metricsVulnIdEnabled: false`): one label per CVE id would be the high-cardinality problem of F18 again (entry 48).
+
+**Decision 1: how the scanner reads a private image.** By default (`command: image`), Trivy downloads the image from the registry itself, so it needs its own login to our Azure Container Registry. There is none to give: the nodes pull images with the kubelet's identity, which has the role AcrPull, without any password (entry 12). With `command: filesystem`, the scan job starts the image as a normal container, which the **node** pulls with its existing right, and Trivy reads the container's files. No new password, no new Azure role.
+
+The price: to read every file in the image, the scan container runs as **root** (the chart's own instructions say so). Everything else stays locked:
+
+```yaml
+trivyOperator:
+  scanJobPodTemplateContainerSecurityContext:
+    runAsUser: 0                      # root, only to read every file
+    allowPrivilegeEscalation: false
+    privileged: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+```
+
+The scan jobs run in `trivy-system`, not in `restauranty` (which enforces "restricted" and would refuse a root container), and they stop after the scan. `trivy-system` enforces "baseline": root is allowed, host access and privileged pods are not.
+
+**Decision 2: no right to every Secret.** Rendering the chart first (as in entry 51) showed two broad rights:
+
+```
+ClusterRole trivy-operator (cluster-wide) ['secrets'] ['create', 'get', 'update']
+ClusterRole trivy-operator (cluster-wide) ['nodes/proxy'] ['get']
+```
+
+The first lets the operator read, create and change every Secret in the cluster: the JWT key, the database passwords, the HTTPS key. The second gives direct access to every node's kubelet, the agent that runs the containers. Both come from one setting, `accessGlobalSecretsAndServiceAccount`, which exists so the operator can read the image-pull Secrets of workloads in private registries. Decision 1 removed that need, so the setting is off. Rendered again:
+
+```
+Role trivy-operator trivy-system ['secrets'] ['create', 'get', 'delete', 'update']
+```
+
+Only a Role in its own namespace is left, for its own working data. No cluster-wide Secret right, no `nodes/proxy`.
+
+**Decision 3: the ServiceMonitor goes into `monitoring`.** The Prometheus Operator watches only the namespace `monitoring` (entry 51), so a ServiceMonitor in `trivy-system` would be ignored. The chart can place it elsewhere; it then points across to the operator's Service in `trivy-system`:
+
+```
+ServiceMonitor ns: monitoring nsSelector: {'matchNames': ['trivy-system']}
+```
+
+**The new dashboard row, "Vulnerabilities in running images":**
+
+- **CRITICAL in running images:** one number for the whole namespace. Green at 0, red from 1.
+- **Images with HIGH:** how many images have at least one HIGH. Orange from 1.
+- **Per image:** a table with CRITICAL, HIGH and MEDIUM per image.
+
+The queries use `max by (image_repository)`, because both copies of a backend run the same image and share one report.
+
+**The new alert:**
+
+```yaml
+- alert: RestaurantyCriticalVulnerability
+  expr: sum by (image_repository) (trivy_image_vulnerabilities{namespace="restauranty", severity="Critical"}) > 0
+  for: 15m
+  labels: { project: restauranty, severity: warning }
+```
+
+It should stay quiet today: the pipeline blocks CRITICAL before a deploy. It fires when a CRITICAL is published **after** a deploy, or turns up in an image the pipeline never builds. A warning, not critical: nothing is broken yet, but the image should be rebuilt soon. The 15 minutes keep it from flickering while an old report is replaced by a new one.
+
+**Expected numbers will differ from the pipeline's.** The pipeline's gate counts only CRITICAL, and ignores holes without a fix (`ignore-unfixed`, entry 37). The operator reports everything, fixed or not, at every severity. The dashboard shows CRITICAL and HIGH, with MEDIUM for information.
+
+**What this proves in the demo: Demo A.** The client's base image has 2 HIGH (in libxslt, entry 43). The operator should show them for `client`. Merging the Dependabot pull request #39 (a newer nginx base) and deploying should bring the client's row to 0, in GitHub's Security tab and on the dashboard.
+
+### 64. The scanner checked: three corrections in one evening
+
+**In one line:** the first results of the Trivy Operator were wrong in three ways, and each was found by comparing a result with something already known. After the corrections, our four images are clean of CRITICAL and HIGH, MongoDB shows 1 CRITICAL and 11 HIGH, and the alert on it reached Slack.
+
+**State:** done. All three corrections applied and confirmed by a final rescan (below).
+
+#### Correction 1: "filesystem" mode did not look at the operating system
+
+The first install used `command: filesystem` (entry 63, decision 1). The first reports:
+
+```
+$ kubectl get vulnerabilityreports -n restauranty -o wide        (shortened)
+REPOSITORY      TAG       CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+client          68e7e5e   0          0      0        0     0
+library/mongo   8.0.34    0          2      42       6     0
+```
+
+Two things did not fit. The client showed **0 of everything**, even LOW and UNKNOWN, although the nightly scan had found 2 HIGH in its base image the day before. And a real image with not a single known issue of any severity is very unlikely: "all zeros" usually means the scanner found nothing to check.
+
+In Trivy, "filesystem" scanning is meant for a project folder: it reads lock files and checks programs, but not the operating system's package list. For a container's whole file system, Trivy has another mode, **rootfs**, which checks both. One word in the values file:
+
+```yaml
+trivy:
+  command: rootfs        # was: filesystem
+```
+
+After the upgrade, the old reports were deleted (`kubectl delete vulnerabilityreports -n restauranty --all`), so that every image was scanned again. MongoDB, before and after:
+
+| | filesystem | rootfs |
+| --- | --- | --- |
+| CRITICAL | 0 | **1** |
+| HIGH | 2 | **12** |
+| MEDIUM | 42 | 48 |
+| LOW | 6 | 6 |
+| UNKNOWN | 0 | 87 |
+
+Every report now names the operating system it found (`os=alpine 3.24.4`, `os=ubuntu 24.04`). The first "2 HIGH" was only what the programs bundled in MongoDB's image contained; its Ubuntu packages had not been checked at all.
+
+The same upgrade gave the operator's own pod the settings the install warning had named: non-root (user 10000) and seccomp. The next upgrade printed no Pod Security warning.
+
+#### Correction 2: "missing" scans were only slow
+
+After the first install, only 2 of the 5 images had a report, and no new scan jobs appeared for minutes. It looked as if auth, discounts and items were being skipped. They were not: the operator works in rounds, 2 scan jobs at a time (`scanJobsConcurrentLimit: 2`), with a pause of about 5 minutes between rounds. Its log shows it:
+
+```
+19:51:04  "Starting operator"  ... "target namespaces":["restauranty"]
+19:56:04  (scan job for discounts created)
+19:56:18  (scan job for client created)
+```
+
+So all 5 images take about 15 minutes. The lesson: give an operator time before calling something missing, and read its log for its rhythm.
+
+The same log also shows two warnings that are expected:
+
+```
+"would violate PodSecurity \"restricted:latest\": runAsNonRoot != true ..., runAsUser=0 (containers ..., \"discounts\" must not set runAsUser=0)"
+```
+
+They are about the **scan jobs**, which run as root on purpose (entry 63). `trivy-system` only warns about "restricted" and enforces "baseline", which allows root, so the jobs start. A warning that is understood and accepted is fine; the dangerous kind is one that people have learned to ignore without knowing why.
+
+#### Correction 3: Trivy found itself
+
+With rootfs, three different images reported **the same HIGH**:
+
+```
+client     HIGH  CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+discounts  HIGH  CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+mongodb    HIGH  CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+```
+
+go-jose is a library of the Go programming language. And every finding in the client was a Go library:
+
+```
+client  HIGH     CVE-2026-116587  github.com/go-jose/go-jose/v4 v4.1.5
+client  UNKNOWN  GO-2026-5932     golang.org/x/crypto v0.57.0
+client  UNKNOWN  CVE-2026-78661   golang.org/x/net v0.60.0
+client  UNKNOWN  CVE-2026-97045   golang.org/x/net v0.60.0
+client  UNKNOWN  CVE-2026-97054   stdlib v1.27.3
+```
+
+The client is nginx on Alpine: it contains no Go program. But in rootfs mode, the scan job copies **the Trivy program itself** into the scanned container, and then scans the whole file system. Trivy is written in Go, built with a recent Go (1.27.3), and uses exactly these libraries. So Trivy was reporting its own copy. The fix: skip the folder where the operator puts it.
+
+```yaml
+trivy:
+  skipDirs: "/var/trivyoperator"
+```
+
+Once all five images had been scanned in rootfs mode (after a restart of the operator), the pattern was complete:
+
+```
+$ kubectl get vulnerabilityreports -n restauranty -o wide        (shortened, 22:04)
+REPOSITORY      CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+auth            0          1      0        0     5
+client          0          1      0        0     4
+discounts       0          1      0        0     5
+items           0          1      0        0     5
+library/mongo   1          12     48       6     87
+```
+
+Four images with different contents (nginx, and three Node.js apps with different libraries) do not share the very same findings by chance. What they share is the Trivy copy inside each scan job. The report does not say where a finding's file was (`path` is empty), so this is a conclusion from the pattern: the same library and version in unrelated images, and only Go libraries in an image without Go. **The experiment: one change, one prediction.** After the upgrade with `skipDirs` (and the pins of entry 65), all old jobs and reports were deleted and every image scanned again. The prediction: the shared HIGH disappears from the four app images, and MongoDB loses exactly that one HIGH and keeps everything else. The result:
+
+| Image | Before `skipDirs` | After |
+| --- | --- | --- |
+| auth | 1 HIGH, 5 UNKNOWN | 0 HIGH, 1 UNKNOWN |
+| client | 1 HIGH, 4 UNKNOWN | 0 of everything |
+| discounts | 1 HIGH, 5 UNKNOWN | 0 HIGH, 1 UNKNOWN |
+| items | 1 HIGH, 5 UNKNOWN | 0 HIGH, 1 UNKNOWN |
+| mongo | 1 CRITICAL, 12 HIGH, 87 UNKNOWN | 1 CRITICAL, 11 HIGH, 83 UNKNOWN |
+
+Exactly as predicted. MongoDB lost one HIGH (go-jose) and 4 UNKNOWN: the same four Go libraries that Trivy's copy had added to the client. Its CRITICAL stayed: it is in Go 1.24.6, MongoDB's own; Trivy is built with Go 1.27.3.
+
+**"0 of everything" again, but this time real.** The client's very first report was also all zeros, and that meant the scanner had not looked. So the same result was checked again: the report names the operating system it found, `os=alpine 3.21.10`. Trivy recognised Alpine, read its package list, and found no known issue in it. The `os` field is the scanner's own proof that it looked.
+
+The one UNKNOWN in each backend is a real finding in an Alpine package:
+
+```
+auth  os=alpine 3.24.4
+   UNKNOWN  CVE-2026-4738  zlib 1.3.2-r1 -> 1.4-r0
+```
+
+"UNKNOWN" means the CVE has no severity rating yet, which is common for a new one. A fixed version exists, so the next rebuild of the backends will most likely pick it up from the updated base image.
+
+The dashboard row, after the final rescan:
+
+![Vulnerabilities in running images: CRITICAL 1 (red), images with HIGH 1 (orange); per image, library/mongo 1 critical and 11 high, auth, client, discounts and items 0 and 0](evidence/15-trivy-dashboard.png)
+
+#### What MongoDB really has
+
+```
+mongodb: os=ubuntu 24.04
+   CRITICAL  CVE-2025-68121   stdlib v1.24.6        -> 1.24.13, 1.25.7, 1.26.0-rc.3
+   HIGH      CVE-2026-32281   stdlib v1.24.6        -> 1.25.9, 1.26.2
+   ... (5 more in stdlib v1.24.6)
+   HIGH      CVE-2026-109518  apt 2.8.3             -> 2.8.4ubuntu0.1
+   HIGH      CVE-2026-109518  libapt-pkg6.0t64 2.8.3 -> 2.8.4ubuntu0.1
+   HIGH      CVE-2026-59869   js-yaml 3.13.1        -> 3.15.0, 4.3.0
+   HIGH      CVE-2026-84375   js-yaml 3.13.1        -> 4.3.2, 3.15.2
+   HIGH      GHSA-5p4m-2wfm-xmqj  js-yaml 3.13.1    -> 4.3.1, 3.15.1
+```
+
+- The CRITICAL is in **Go's standard library, version 1.24.6**: not in the database itself, but in a Go program that the official MongoDB image contains. It is MongoDB's own, not Trivy's: Trivy is built with Go 1.27.3.
+- `apt` is Ubuntu's package manager. The "filesystem" scan never saw it.
+- `js-yaml` is a JavaScript library, most likely part of MongoDB's command-line shell, which is written in Node.js.
+
+All of them have fixed versions. They come with a newer MongoDB image; the image tag is set in `k8s/app/mongodb.yaml`.
+
+**The alert, for real.** About 15 minutes after MongoDB's report showed the CRITICAL, `RestaurantyCriticalVulnerability` reached Slack. Nobody planted a test case: this was a real finding, in an image that nothing in this project had ever scanned (reason 2).
+
+![Slack: RestaurantyCriticalVulnerability (warning), "library/mongo: 1 CRITICAL vulnerabilities in a running image", with the next step and the dashboard link](evidence/15-trivy-alert-slack.png)
+
+#### The client's libxslt: two scans, two different images
+
+The nightly scan's 2 HIGH in the client's libxslt were still open in GitHub. But the nightly scan last ran at 11:52 UTC, before the two deploys of the afternoon: it describes **yesterday's** client image. The operator scanned **today's** rebuild (commit `68e7e5e`, Alpine 3.21.10), and found it clean. Building an image again pulls its base image again, often with newer operating-system packages, so a fix can arrive without any change in the code. The next nightly run scans today's SBOM; if the rebuild fixed libxslt, the two alerts close by themselves.
+
+**The lesson of all three.** The scanner's raw output was a claim, and three times it was wrong: it did not look, it looked slowly, and it looked at itself. Each mistake was found by comparing a result with something already known: an alert in GitHub, an nginx image that cannot contain Go, Ubuntu's `apt` that must be there. Without that, the dashboard would have shown "0 CRITICAL" today: false comfort. **Verify the verifier.**
+
+### Can a security tool be trusted?
+
+**In one line:** not by default, and not because it is called a security tool. Trivy itself was attacked in March 2026. You can never fully trust it, but you can limit what it can do if it betrays you, and check that what runs is what you meant to run.
+
+**The question.** Trivy is supposed to protect. In March 2026 it was attacked successfully (Part 9, "Pinning"). And the Trivy Operator runs inside the cluster, with rights. Is Trivy in the cluster trustworthy?
+
+**A check found a real gap.** The cluster pulls both Trivy images by tag, not by fingerprint:
+
+```
+mirror.gcr.io/aquasec/trivy-operator:0.36.1     ← the operator
+mirror.gcr.io/aquasec/trivy:0.76.1              ← the scanner in every scan job
+```
+
+That's the chart's default, and it has no setting for a digest. In March 2026, the attackers also published poisoned Trivy Docker images. The pipeline would have been safe, because it pins `aquasec/trivy:0.76.1@sha256:790fd66d…`. The cluster wouldn't have been: if those tags were changed, the next scan would pull whatever they point to. So on this point, the operator breaks the rule the pipeline follows.
+
+**What could a poisoned Trivy do in the cluster, today?** Thanks to the narrowing in entries 51 and 63, a lot less than with the chart's defaults:
+
+| A bad operator or scan job could… | Could not… |
+| --- | --- |
+| read the specs of workloads (image names, settings) | read Secrets anywhere except `trivy-system` (cluster-wide right removed) |
+| start pods in `trivy-system`, as root | use `nodes/proxy` (removed) or get host access (baseline refuses it) |
+| read the files of the app's images (code, which is public anyway) | get the running pods' secrets: scan jobs start the image fresh, without its Secrets, and with no Kubernetes token (`scanJobAutomountServiceAccountToken: false`) |
+| send data to the internet: `trivy-system` has no network rules | reach MongoDB or the backends: the rules in `restauranty` let only the backends, the Gateway and Prometheus in |
+
+**So the honest answer:** you can never fully trust it, but you can limit what it can do if it betrays you, and check that what runs is what you meant to run. Three fixes bring it in line with the rest of the project:
+
+1. **Pin both images by digest.** The chart has no digest setting, but the usual trick works: put the digest into the tag (`tag: "0.36.1@sha256:…"`), so the result reads `aquasec/trivy-operator:0.36.1@sha256:…`. For Trivy itself, the digest is the one the pipeline already pins; the operator's is looked up from the registry. This is the most important fix, because it closes the exact attack from March. **Done: entry 65.**
+2. **Network rules for `trivy-system`:** scan jobs may only reach HTTPS on the internet (to download Trivy's vulnerability database), and nothing inside the cluster. That's the same pattern as `items` → Cloudinary in #11. **Open: in "What is next".** The operator itself must still reach the Kubernetes API, and Prometheus must still reach the operator, so the rules need testing.
+3. **Keep the two independent scans.** If one scanner were poisoned or simply wrong, the other one disagrees. On 11 November that exact disagreement found two bugs in the scanner (entry 64). **Done.**
+
+This also fits the threat model: story 10, "a poisoned package or image", with the project's own security tool as the example. It's the classic question "who watches the watchers?", and the answer is: nobody fully, so give the watchers as little power as possible.
+
+**Security tools are high-value targets precisely because they're trusted and widely installed.** One poisoned scanner reaches thousands of pipelines and clusters at once, which is why attackers went after Trivy in the first place. The defenses are the same as for any dependency: pin what you run, give it the least rights it needs, and keep an independent check. Being a "security" tool earns it no exemption.
+
+### 65. Pinning the scanner: both Trivy images by digest
+
+**In one line:** fix 1 of "Can a security tool be trusted?": the Trivy Operator and Trivy images are now named by digest, and both digests were checked against two registries and against the pipeline's own pin.
+
+**State:** pins committed; applied with the next `helm upgrade` of the operator.
+
+**The change,** in `k8s/monitoring/trivy-operator-values.yaml`. A Docker image name may carry both a tag and a digest, `<repository>:<tag>@sha256:<digest>`; the digest wins, and the tag is only there for people reading it:
+
+```yaml
+image:
+  tag: "0.36.1@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9"
+trivy:
+  image:
+    tag: "0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+```
+
+Rendered, the operator's image line reads `mirror.gcr.io/aquasec/trivy-operator:0.36.1@sha256:05191a51…`, and the scan jobs' Trivy `mirror.gcr.io/aquasec/trivy:0.76.1@sha256:790fd66d…`.
+
+**The digests were not taken on trust either.** Each was asked from two registries: Docker Hub, and `mirror.gcr.io` (the copy of Docker Hub that the chart uses). They matched. Trivy's also matches the pin in `ci-cd.yaml`, so the cluster runs exactly the Trivy that the pipeline already trusts:
+
+```
+aquasec/trivy-operator:0.36.1  docker.io=sha256:05191a51…  mirror.gcr.io=sha256:05191a51…
+aquasec/trivy:0.76.1           docker.io=sha256:790fd66d…  mirror.gcr.io=sha256:790fd66d…
+ci-cd.yaml:                    aquasec/trivy:0.76.1@sha256:790fd66d…
+```
+
+The operator 0.36.1 was built on 29 October 2026 (its own start log says so), 13 days before: older than the pipeline's rule of "at least a week" (Part 9).
+
+**Did the pin change what runs?** Kubernetes records the fingerprint of the image each pod actually runs (`imageID`), even when it was asked for by label only. Before the upgrade:
+
+```
+$ kubectl get pods -n trivy-system -l app.kubernetes.io/name=trivy-operator \
+    -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+mirror.gcr.io/aquasec/trivy-operator@sha256:05191a514247ae644dd5cc71306a94f44faff0a6a3fa817235911b911ecebcb9
+```
+
+The same digest as the pin. But that is only what was pulled **the last time**. What the pod **asks for**, and so what every future pull gets, is a different field:
+
+```
+$ kubectl get pods -n trivy-system -l app.kubernetes.io/name=trivy-operator \
+    -o jsonpath='{.items[0].spec.containers[0].image}'                     # what the operator pod asks for
+mirror.gcr.io/aquasec/trivy-operator:0.36.1
+$ kubectl get configmap trivy-operator-trivy-config -n trivy-system \
+    -o jsonpath='{.data.trivy\.repository}:{.data.trivy\.tag}'             # what every scan job asks for
+mirror.gcr.io/aquasec/trivy:0.76.1
+$ kubectl get pods -n trivy-system -l app.kubernetes.io/name=trivy-operator \
+    -o jsonpath='{.items[0].spec.containers[0].imagePullPolicy}'           # when Kubernetes pulls again
+IfNotPresent
+```
+
+Asked by label, got a hash. `IfNotPresent` means a node pulls only when it does not have the image yet. Every scan job is a new pod, on any of the 3 nodes, and the operator moves to another node after a restart or `az aks stop` and `start`. Each time a node without the image needs it, Kubernetes asks the registry "what does `0.76.1` point to **now**?" and runs whatever it gets. If the label had been changed, today's hash would not stop that, because nothing asks for it.
+
+So the pin changes nothing about **what** runs today; it guarantees that it stays that way, for every future pull. `image` in a pod's spec is what was asked for, perhaps only a label; `imageID` in its status is what was really pulled, always as a digest. Comparing the two is the quickest way to check what a cluster really runs.
+
+---
+
 ## What is next
 
-| Task | Issue |
-| --- | --- |
-| docker-compose for local dev | #1 |
-| Fail the build on an end-of-life base image or runtime, whatever its CVE count (entry 45) | — |
-| Monitoring, alerts, the attack demo; a Grafana panel for vulnerabilities (Trivy Operator), if time allows | #14, #15 |
-| Security headers at the Gateway or in nginx (ZAP's warnings, entry 42) | — |
-| Reliability, outside this project's security focus: a readiness check that asks MongoDB's state (fast errors instead of 10 s waits, entry 46); MongoDB as a replica set for high availability | — |
-| Reliability: spread the app pods over all 3 nodes and zones. Today all of them run on one node (entry 47). Fix: a strict spread rule (`DoNotSchedule`) or the descheduler; a second Gateway pod | — |
-| GitOps with Argo CD or Flux: platform charts and app manifests installed from git by a controller in the cluster; no `helm` or `kubectl` from laptops or the pipeline, drift put back automatically, and the deploy identity no longer needs admin rights (entries 35, 53) | — |
-| Major upgrades, each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS | — |
+**In one line:** the plan after the bootcamp, grouped by topic, the most important first in each group. Every item says why it matters and where the log explains it.
+
+### 1. Who may do what: identities and logins
+
+- **Grafana login through Entra ID** (#17). Today Grafana has one local `admin` user with a strong password from Key Vault (entry 52), but no multi-factor login, one shared account, and its login page is on the internet. The plan: an app registration in Entra ID with three roles (Viewer, Editor, Admin) and "assignment required", so only invited people get in; Grafana signs in to Entra ID with Workload Identity, so there is no client secret; then Grafana's own login form and basic login are switched off. Proof for a demo: a classmate's account is refused. Risk: the tenant is shared, so creating the app registration may need rights from the tenant's admins.
+- **AKS with Entra ID and Kubernetes RBAC** (entries 35, 54). Today `az aks get-credentials` gives an admin certificate, to my laptop and to the pipeline's deploy job. With Entra ID, a kubeconfig holds no secret, only a short-lived token tied to a login with MFA; rights like `pods/portforward` go only to an admin group, granted just in time (Entra PIM); and audit logs show who did what.
+- **Roles for the app's own users** (finding F1, accepted). Every new account is an admin today: a demo shortcut. New accounts should start as normal users, with admins set up separately; later a real identity service (Keycloak or Entra External ID) instead of the app's own passwords.
+
+### 2. The supply chain: what gets built and what may run
+
+- **GitOps with Argo CD or Flux** (entries 35, 53). A controller in the cluster installs the platform charts and the app from git; no `helm` or `kubectl` from laptops or the pipeline. Changes made by hand are put back automatically, and the deploy identity no longer needs any rights on the cluster.
+- **Signed images, checked before they start.** The pipeline signs each image (for example with Sigstore's cosign); an admission controller in the cluster (for example Kyverno) refuses images without a valid signature. Pinning by digest proves "these bytes"; a signature also proves "built by our pipeline" ("Can a security tool be trusted?", Part 9).
+- **Fail the build on an end-of-life base image or runtime,** whatever its CVE count (entry 45).
+- **A newer MongoDB image:** its Go 1.24.6 (1 CRITICAL), `apt` and `js-yaml` have fixed versions (entry 64).
+- **Major upgrades,** each as its own task: react-router 7 (F19), express 5, mongoose 9, Node 24 LTS.
+
+### 3. The network and the cluster's insides
+
+- **Network rules for `trivy-system`:** scan jobs may reach only DNS and HTTPS on the internet, nothing in the cluster ("Can a security tool be trusted?", fix 2).
+- **Network rules for `gateway` and `monitoring`,** which have none yet: default deny, then only the paths they use, as in `restauranty` (#11).
+- **Name the hosts `items` may call** (Cloudinary only), instead of "any public address on 443": Cilium's FQDN rules, which on AKS come with Advanced Container Networking Services (`k8s/network/policies.yaml`).
+- **Narrow the Prometheus Operator's rights:** its ClusterRole can still change Secrets in every namespace; Roles per namespace would close that (entry 51).
+- **Detect attacks inside running containers** with Falco (#18): for example a shell opened in a container, or a sensitive file read.
+
+### 4. Seeing and responding
+
+- **Alerts from the logs:** Loki's rule engine (the "ruler"), connected to Alertmanager, for the day-one leak (any 403 on the user list) and the Gateway's own 5xx (entry 62).
+- **Secret rotation under load, with a runbook** (#16): a new MongoDB password while k6 runs, with zero failed requests; a written procedure for "a secret leaked: now what?".
+- **Security headers** at the Gateway or in nginx (ZAP's warnings, entry 42).
+
+### 5. Reliability (outside this project's security focus)
+
+- **Spread the app pods over all 3 nodes and zones,** with a strict spread rule (`DoNotSchedule`) or the descheduler, and a second Gateway pod: after a cluster start, all app pods ran on one node (entry 47).
+- **A readiness check that asks MongoDB's state:** fast errors instead of 10-second waits (entry 46).
+- **MongoDB as a replica set,** for high availability.
+
+### 6. Developer comfort
+
+- **docker-compose for local development** (#1).
