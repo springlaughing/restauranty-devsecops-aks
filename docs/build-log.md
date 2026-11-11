@@ -125,6 +125,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [61. The attack: password guessing with k6, and the alert in Slack](#61-the-attack-password-guessing-with-k6-and-the-alert-in-slack)
   - [62. Two more panels: the day-one leak, and the Gateway's own errors](#62-two-more-panels-the-day-one-leak-and-the-gateways-own-errors)
   - [Why scan what is running, not only what is built](#why-scan-what-is-running-not-only-what-is-built)
+  - [SBOMs and hashes: what is inside, and is it exactly that](#sboms-and-hashes-what-is-inside-and-is-it-exactly-that)
   - [63. Trivy Operator: the design, and three rights checked](#63-trivy-operator-the-design-and-three-rights-checked)
 - [What is next](#what-is-next)
 
@@ -4977,6 +4978,61 @@ The pattern caught every spelling. The IP table also shows a second address with
 | Trivy Operator (this part) | whenever a pod starts | everything running in the scanned namespace | **reports** in the cluster, on the dashboard, with an alert (reasons 1 to 5) |
 
 A scanner of running images does not stop anything: it informs, and the fix is still a rebuild and a deploy through the pipeline. Stopping an unscanned or unsigned image from starting at all is the job of an "admission controller" such as Kyverno; not part of this project. In production, the cloud's own tool often does the scanning instead: on Azure, Microsoft Defender for Containers (paid per node). The Trivy Operator is the free, open-source way to the same result.
+
+### SBOMs and hashes: what is inside, and is it exactly that
+
+**In one line:** an SBOM lists what is inside an image by **name and version**, so it can be compared with lists of known vulnerabilities. A hash proves that some bytes are **exactly** the ones expected, so a name and a version cannot lie. They answer different questions, and the project uses both.
+
+**The SBOM: "what is inside?"** A Software Bill of Materials is a file that lists every component of a piece of software: its name, its version, and where it comes from. The pipeline writes one per image at build time (Part 9, "SBOM: the parts list of an image"): about 155 entries for a backend. In the format used here (CycloneDX), an entry looks roughly like this (shortened):
+
+```json
+{ "name": "express", "version": "4.22.3", "purl": "pkg:npm/express@4.22.3" }
+```
+
+`purl` is a "package URL": one standard way to write "the npm package express, version 4.22.3", so that tools from different makers mean the same thing.
+
+An SBOM exists to answer one question quickly: **"do we have package X in version Y anywhere?"** When a new CVE says "express before version Z is affected", a team searches its SBOMs instead of pulling and scanning every image again. The nightly scan (entry 43) does exactly that: it checks the parts lists of yesterday's deploy against today's list of known vulnerabilities.
+
+Its limit: it lists what the build tools **declared**. Something copied into an image without a package manager may be missing (reason 5 above, and entry 45).
+
+**The hash: "is it exactly that, unchanged?"** A hash is a fingerprint of some bytes, computed by a fixed formula such as SHA-256 or SHA-512. The same bytes always give the same fingerprint; change a single bit and the fingerprint is completely different. And nobody can make different bytes with a chosen fingerprint. So comparing fingerprints proves that two things are exactly the same.
+
+This project checks hashes in four places:
+
+| Where | What is hashed | Who compares |
+| --- | --- | --- |
+| `package-lock.json`, field `integrity` (entry 30) | each npm package | `npm ci` refuses a package whose content does not match |
+| image digests, `client@sha256:…` (entry 41) | a whole image | Kubernetes pulls exactly that image |
+| action pins, `checkout@3d3c42e5…` (Part 9, "Pinning") | a version of an action's code | GitHub runs exactly that commit |
+| the k6 key's fingerprint, `C5AD…1D69` (entry 60) | a signing key | I compare it before `apt` trusts the key |
+
+The real lock-file entry for express in `auth`:
+
+```json
+"node_modules/express": {
+  "version": "4.22.3",
+  "resolved": "https://registry.npmjs.org/express/-/express-4.22.3.tgz",
+  "integrity": "sha512-Bdcs4+3qlpVlx2NRn6fgX2Ue2/gGRaPeawebgclM0ERSCqDpA+owF1fdPwjJUTAJWMTuAaxjDf+hzb0/4eKvvw=="
+}
+```
+
+Name, version and the place to download it, as in an SBOM, plus `integrity`: the SHA-512 fingerprint of that exact package file. If anyone replaced the file on the registry with different content under the same version number, `npm ci` would compute a different fingerprint and stop.
+
+**How the two fit together.**
+
+| | SBOM | Hash |
+| --- | --- | --- |
+| Question | What is inside? | Is it exactly this? |
+| Identifies by | name and version | the bytes themselves |
+| Can be looked up in a CVE list | yes | no: a fingerprint says nothing about vulnerabilities |
+| Can be fooled by a moved or reused name | yes | no |
+
+Names and versions can lie. In the Trivy attack of March 2026 (Part 9, "Pinning"), the version name `trivy-action@0.28.0` was moved to malware. A parts list would still have said "trivy-action 0.28.0"; only the commit hash showed that the code was different. And a hash alone cannot tell whether something is vulnerable: nobody can look up `sha512-Bdcs…` in a list of CVEs. So:
+
+- the **SBOM** says what to look up in the vulnerability lists;
+- the **hash** proves that what runs is exactly what was looked up.
+
+The two can also be combined: CycloneDX has a place for a hash next to each component, so a parts list can say "express 4.22.3, with exactly these bytes".
 
 ### 63. Trivy Operator: the design, and three rights checked
 
