@@ -3570,7 +3570,20 @@ The new code reaches AKS through the pipeline, after this branch is merged. Unti
 
 Both disks use MongoDB's zone-redundant storage class (entry 15), so they can follow their pod to another zone.
 
-**Decision 1: no node-exporter.** The chart normally adds node-exporter, which measures the nodes themselves: CPU, memory and disk of each VM. For that, it needs the node's network, its list of processes and its files. A pod with that access can see every other container on the node. The numbers per pod (CPU, memory, volume usage) still come from the **kubelet**, the Kubernetes agent on each node, which Prometheus scrapes anyway. What is lost: graphs per VM. node-exporter's alert rules are switched off too, or they would complain that their data is missing.
+**Decision 1: no node-exporter.** The chart normally adds node-exporter: one pod per node that measures the VM itself, its CPU, memory, disk and network. Rendering the chart with it switched on shows what it needs:
+
+- `hostNetwork`: it uses the node's own network instead of a pod network.
+- `hostPID`: it sees every process on the node, in every container, with their command lines.
+- The node's whole disk (`/`), plus `/proc` and `/sys` (where Linux describes its processes and hardware), all read-only.
+- It runs as the user `nobody`, not as root. So on the node's disk it can read only what any user may read; the pods' Secret files and ServiceAccount tokens are in folders only root may open.
+
+So node-exporter is not very dangerous by itself, and most production clusters run it. It is left out here for three reasons:
+
+1. **It would cost the namespace its protection.** Pod Security "baseline" refuses host network, host processes and host paths. To allow node-exporter, `monitoring` would have to become "privileged", and then any pod there could ask for full host access, Grafana too, which is on the internet. One exporter would weaken the rule for every tool next to it.
+2. **Little value for this project.** Its numbers are about the VMs; the questions here are about the app and about attacks. The numbers per pod (CPU, memory) come from the **kubelet**, the Kubernetes agent on each node, which Prometheus scrapes anyway. The usage of each pod's disk (PersistentVolumeClaim), needed for the alert "MongoDB disk filling up" (#15), comes from the kubelet too. Azure shows graphs per VM for the AKS nodes in the portal.
+3. **Least privilege by default.** For a component with host access, "the chart includes it" is not a reason.
+
+What is lost: graphs and alerts per VM, for example a node's own disk filling up. node-exporter's alert rules are switched off too, or they would complain that their data is missing. If it is needed later, the usual compromise is node-exporter in **its own namespace** with "privileged", so `monitoring` keeps "baseline".
 
 **Decision 2: Alloy reads the logs through the Kubernetes API.** There are three usual ways to collect logs:
 
