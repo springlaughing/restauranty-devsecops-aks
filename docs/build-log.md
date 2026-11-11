@@ -4859,18 +4859,24 @@ http_req_failed................: 0.00%  0 out of 481
 
 ![Slack: RestaurantyLoginGuessing (warning), 35 failed logins in 5 minutes, with the description and the link to the dashboard](evidence/15-k6-alert-slack.png)
 
-When the message was sent, 35 failed logins had passed the Gateway within the last 5 minutes. With about 15 in the first minute and 10 per minute after that, 35 is reached after about 3 minutes of attack, which fits: the rule becomes true at 21 (after about 2 minutes) and must stay true for one more minute (`for: 1m`, entry 58). The message carries a count and points to the dashboard for the IP addresses; it carries no IP itself (entry 56).
+When the message was sent, 35 failed logins had passed the Gateway within the last 5 minutes. With about 15 in the first minute and 10 per minute after that, 35 is reached after about 3 minutes of attack, which fits: the rule becomes true at 21 (after about 2 minutes) and must stay true for one more minute (`for: 1m`, entry 58).
 
-**The dashboard during the attack** (time range "last 5 minutes", around 19:45):
+A few minutes after k6 stopped, the alert ended:
 
-![Traffic and security rows during the attack: auth's latency up to about 220 ms; at the Gateway, 429 at about 110 per minute and 401 at about 10 per minute](evidence/15-k6-grafana-traffic-security.png)
+![The same alert twice: firing with 35 failed logins, then resolved, showing 26 failed logins](evidence/15-k6-alert-slack-resolved.png)
+
+The "resolved" message says **26**, more than the threshold of 20. That is not a mistake: a resolved message repeats the text of the alert's **last check while it was still firing**. At that check the count was 26; at the next one it was below 20, and Prometheus reported the alert as over. Worth saying in a demo, so the number does not confuse anyone. The message carries a count and points to the dashboard for the IP addresses; it carries no IP itself (entry 56).
+
+**The dashboard around the attack** (time range "last 15 minutes": before, during and after):
+
+![Traffic and security rows, 19:35 to 19:50: auth's latency rises to about 220 ms and falls again; at the Gateway, 429 at about 110 per minute and 401 at about 10 per minute while k6 runs](evidence/15-k6-grafana-traffic-security.png)
 
 - **Login attempts at the Gateway, by answer** draws the prediction: 429 jumps to about 110 per minute; 401 starts at about 15 (the burst) and then stays at 10 per minute (one every 6 seconds).
-- **Failed logins per minute** (from `auth`'s own counter) jumps between about 6 and 14. Prometheus reads the counter every 30 seconds and spreads the count over the minute, so the line is jagged, but it averages the same 10 per minute.
-- **Latency p95, backends:** `auth` climbs from a few milliseconds to about 220 ms. That is bcrypt: each failed login costs `auth` about 300 ms (below). The other backends stay flat.
+- **Failed logins per minute** (from `auth`'s own counter) goes from 0 to between about 6 and 14 while k6 runs, and back to 0. Prometheus reads the counter every 30 seconds and spreads the count over the minute, so the line is jagged, but it averages the same 10 per minute.
+- **Latency p95, backends:** `auth` climbs from a few milliseconds to about 220 ms and falls again after the attack. That is bcrypt: each failed login costs `auth` about 300 ms (below). The other backends stay flat.
 - **Server errors (5xx):** a flat 0, no longer "No data" (entry 55).
 
-![The Gateway's view: 481 requests from one IP address, all 481 refused; each one in the log as 429 POST /api/auth/login (IP hidden)](evidence/15-k6-grafana-gateway.png)
+![The Gateway's view, 19:40 to 19:50: the whole attack as 401 and 429 curves; 481 requests from one IP address, all 481 refused; each one in the log as 429 POST /api/auth/login (IP hidden)](evidence/15-k6-grafana-gateway.png)
 
 The Gateway's log, in Loki, has every single try: one IP address, 481 requests, 481 refused (401 or 429). This is the issue's third point, "a Loki query showing the attack (IP, path, status)": the panels "Top 10 client IPs" and "Refused at the Gateway" are exactly that query.
 
