@@ -41,13 +41,27 @@ serviceMonitor:
 trivy:
   # "image" would make Trivy pull each image from the registry itself, with
   # its own login. Our registry has none to give: the nodes pull with the
-  # kubelet's AcrPull identity (entry 12). "filesystem" starts the image as a
-  # normal container (the node pulls it) and scans its files instead.
-  command: filesystem
+  # kubelet's AcrPull identity (entry 12). "rootfs" starts the image as a
+  # normal container (the node pulls it) and scans its whole file system:
+  # the operating system's packages (Alpine, Ubuntu) and the programs.
+  # "filesystem" was tried first: it is meant for a project folder and
+  # checks only programs and lock files, so it missed every OS package
+  # (client showed 0 of everything; build log, entry 64).
+  command: rootfs
   ignoreUnfixed: false                # report everything; the dashboard shows CRITICAL and HIGH
 
+# The operator's own pod: the chart already drops all capabilities, forbids
+# privilege escalation and makes its file system read-only; it leaves out
+# non-root and seccomp, which the install's Pod Security warning named.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  runAsGroup: 10000
+  seccompProfile:
+    type: RuntimeDefault
+
 trivyOperator:
-  # Filesystem scanning must read every file in the image, so the scan
+  # Root-filesystem scanning must read every file in the image, so the scan
   # container runs as root (the chart says so). Everything else stays
   # locked: no privilege escalation, no Linux capabilities, read-only file
   # system, seccomp. The scan jobs run in trivy-system, not in restauranty,
