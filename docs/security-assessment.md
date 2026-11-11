@@ -1281,7 +1281,7 @@ Issue numbers link to GitHub.
 | F15 | Logged-in users get every hash | High | Fix: the User model leaves out `password` everywhere | [#21](https://github.com/springlaughing/restauranty-devsecops-aks/issues/21) |
 | F16 | Any discount and any dates accepted | Medium | Accept: a business rule, and no longer open to strangers once writes need a token (F13). Production: discount 0 to 100, end after start. | [#19](https://github.com/springlaughing/restauranty-devsecops-aks/issues/19) |
 | F17 | Raw database errors in answers | Low | Fix: the shared error handler answers briefly (same change as F8) | [#4](https://github.com/springlaughing/restauranty-devsecops-aks/issues/4) |
-| F18 | Metrics labelled with the full URL | Medium | Fix: label by route pattern | [#14](https://github.com/springlaughing/restauranty-devsecops-aks/issues/14) |
+| F18 | Metrics labelled with the full URL | Medium | Fix: label by route pattern. **Fixed**, [Retest 3](#retest-3-f18-on-aks-after-14-11-november-2026) | [#14](https://github.com/springlaughing/restauranty-devsecops-aks/issues/14) |
 | F19 | Outdated packages | Low | Fix: images without development tools, frontend served as static files; npm audit and Trivy in the pipeline | [#5](https://github.com/springlaughing/restauranty-devsecops-aks/issues/5), [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 | F20 | Cloudinary keys in the git history | High | Not reported: the repo is a course project used by many groups, so the keys are most likely there on purpose. Keys not used. gitleaks on every push. | [#13](https://github.com/springlaughing/restauranty-devsecops-aks/issues/13) |
 
@@ -1402,3 +1402,36 @@ The frontend now sends the token to items and discounts. Compare with test 4c, w
 Health checks, `/metrics`, signup and login stay public on purpose: Kubernetes, Prometheus and new users need them.
 
 **Still open, as planned:** logged-in users can still do everything, because every account is admin (F1, accepted). The Gateway block and the login rate limit come on AKS with [#10](https://github.com/springlaughing/restauranty-devsecops-aks/issues/10).
+
+### Retest 3: F18 on AKS, after #14 (11 November 2026)
+
+**Result:** fixed. 200 made-up URLs, sent through the Gateway like an attacker would, added no new series in Prometheus. With the old code, the same attack made 201 (test 7c).
+
+**What changed** (#14, build log entry 48): the backends' metrics code labels each request with the route pattern from the code, such as `/api/items/items/:id`, not with the URL the visitor sent. Requests that match no route, like junk URLs or a refused token, are all counted as `no_route`. So the code, not the visitor, decides how many labels exist. A second guard in Prometheus drops any scrape with more than 1,000 series (`sampleLimit`).
+
+**What I did:** after the deploy, counted the series in Prometheus, sent the attack of test 7c through the public Gateway, waited for the next scrape, and counted again.
+
+```bash
+q 'count by (job) (http_requests_total)'           # q = a query to Prometheus (full commands: evidence file)
+for i in $(seq 1 200); do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    "https://restauranty.aks.springlaughing.dev/api/items/items/junk-$RANDOM$RANDOM"
+done | sort | uniq -c
+sleep 40
+q 'count by (job) (http_requests_total)'
+q 'sum by (route, statusCode) (http_requests_total{job="items"})'
+```
+
+```text
+    200 401                                          <- all 200 reached items (no 429 from the Gateway)
+job=items  10    ->    job=items  10                 <- request series before -> after
+route=no_route statusCode=401  208                   <- the 200 junk requests, in one series
+```
+
+Full output: [evidence/14-f18-retest-aks.txt](evidence/14-f18-retest-aks.txt). The URLs themselves are kept where they belong, in the Gateway's access log (Loki), one line each:
+
+![Grafana: each junk URL is a log line with status 401; series per scrape unchanged at 156, 167, 155](evidence/14-f18-retest-grafana-logs.png)
+
+| Finding | Before | After |
+| --- | --- | --- |
+| F18 Request metrics labelled with the full URL | 200 junk URLs → 201 new series (test 7c, local) | 200 junk URLs → **0** new series (AKS, through the Gateway) |

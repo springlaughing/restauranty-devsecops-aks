@@ -1,0 +1,52 @@
+# F18 retest on AKS (11 November 2026, build log entry 55, security assessment Retest 3)
+#
+# After the deploy of PR #55 (new metrics code, commit 9d3f371). 200 made-up URLs
+# sent through the Gateway, like test 7c; the series are counted by Prometheus.
+
+$ kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090:9090 >/dev/null &
+$ q() { curl -s localhost:9090/api/v1/query --data-urlencode "query=$1" \
+    | jq -r '.data.result[] | "\(.metric | del(.__name__) | to_entries | map("\(.key)=\(.value)") | join(" "))  \(.value[1])"'; }
+
+## 1. Is the new code live? (the latency histogram exists only in the new code)
+$ q 'count by (job) (http_request_duration_seconds_count)'
+job=auth  8
+job=items  10
+job=discounts  10
+
+## 2. BEFORE
+$ q 'count by (job) (http_requests_total)'
+job=auth  12
+job=items  10
+job=discounts  10
+$ q 'max by (job) (scrape_samples_scraped{job=~"auth|discounts|items"})'
+job=auth  156
+job=items  155
+job=discounts  167
+
+## 3. The attack: 200 made-up URLs through the Gateway
+$ for i in $(seq 1 200); do
+    curl -s -o /dev/null -w "%{http_code}\n" \
+      "https://restauranty.aks.springlaughing.dev/api/items/items/junk-$RANDOM$RANDOM"
+  done | sort | uniq -c
+    200 401
+
+## 4. AFTER (40 s later: at least one scrape)
+$ q 'count by (job) (http_requests_total)'
+job=auth  12
+job=items  10
+job=discounts  10
+$ q 'max by (job) (scrape_samples_scraped{job=~"auth|discounts|items"})'
+job=auth  156
+job=items  155
+job=discounts  167
+$ q 'sum by (route, statusCode) (http_requests_total{job="items"})'
+route=/api/items statusCode=200  273
+route=/metrics statusCode=200  60
+route=no_route statusCode=401  208
+route=/api/items/items/ statusCode=200  1
+
+# Result: items had 10 request series before and 10 after (+0); 155 series per
+# scrape before and after. All 200 junk requests are counted in ONE series,
+# route=no_route statusCode=401 (208 = these 200 + 8 earlier requests without a
+# token since the deploy, most likely the pipeline's API tests and ZAP scan).
+# Test 7c with the old code: 201 new series.

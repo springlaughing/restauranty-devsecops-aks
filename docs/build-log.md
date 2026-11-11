@@ -115,6 +115,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
     - [Step 7: network rule 6, Prometheus may scrape the backends](#step-7-network-rule-6-prometheus-may-scrape-the-backends)
     - [The same steps in the setup script](#the-same-steps-in-the-setup-script)
   - [54. Check: does the data arrive?](#54-check-does-the-data-arrive)
+  - [55. Retest on AKS: F18 is fixed, and a latency number that was made up](#55-retest-on-aks-f18-is-fixed-and-a-latency-number-that-was-made-up)
 - [What is next](#what-is-next)
 
 ---
@@ -3232,6 +3233,7 @@ The 2 restarts are the fix at work: each one is a backend that found no MongoDB 
 5. **Grafana's password**, from Key Vault (entry 52).
 6. **The install, step by step:** the namespace, Prometheus with Grafana, Loki, Alloy, the scrape targets, the dashboard and one network rule, and where these commands live in the setup script (entry 53).
 7. **The check that data arrives**, and what the first look at the dashboard found (entry 54).
+8. **The F18 retest on AKS** after the deploy, and a latency number the math invented (entry 55).
 
 The explainer below says what each monitoring tool does. Entries 48 and 49 use its words (metric, label, time series).
 
@@ -3526,7 +3528,7 @@ The 3 new series are `/metrics` itself, the 400 answers for invalid IDs, and `no
 
 **Why.** A common checklist for any service is **rate, errors, duration**: how many requests, how many fail, how long they take. The backends already counted requests and their status codes, so the first two were there. Duration was missing.
 
-**How it is measured: a histogram.** Storing every single duration would be too much data. A histogram sorts each request into "buckets" and only counts them. Here the buckets are 10 ms, 50 ms, 100 ms, 250 ms, 0.5 s, 1 s, 2.5 s and 10 s. A request that took 80 ms is counted in the 100 ms bucket and in every bigger one; the label `le` means "less than or equal". One more bucket, `+Inf`, counts all requests.
+**How it is measured: a histogram.** Storing every single duration would be too much data. A histogram sorts each request into "buckets" and only counts them. Here the buckets were 10 ms, 50 ms, 100 ms, 250 ms, 0.5 s, 1 s, 2.5 s and 10 s (entry 55 adds 1, 2.5 and 5 ms, after the smallest bucket proved too big). A request that took 80 ms is counted in the 100 ms bucket and in every bigger one; the label `le` means "less than or equal". One more bucket, `+Inf`, counts all requests.
 
 From these counts, Prometheus estimates the **p95**: the time that 95 of 100 requests stayed under. The p95 is used instead of the average, because an average hides the slow requests that users notice.
 
@@ -4139,7 +4141,84 @@ The Gateway's two newest lines, a second after the upgrade (IP replaced, user ag
 
 The first line is my browser showing Grafana, the second is the test request to the app: the same Gateway, now told apart by `host`. The dashboard's ConfigMap was `configured`, not `created`: the same dashboard (fixed id `restauranty`) with new panels, not a second copy.
 
-**Still to do:** merge and deploy the new metrics code (entries 48, 49 and finding 1), then the F18 retest on AKS.
+**Next:** merge and deploy the new metrics code (entries 48, 49 and finding 1), then the F18 retest on AKS: entry 55.
+
+### 55. Retest on AKS: F18 is fixed, and a latency number that was made up
+
+**In one line:** after the deploy, 200 made-up URLs sent through the Gateway added **no** new series in Prometheus (the old code added 201). The dashboard also showed a latency of 9.5 ms that the math invented; smaller histogram buckets fix it.
+
+**What was deployed.** Pull request #55 was merged, and after my approval the pipeline replaced all backend pods with the new metrics code (entries 48, 49, and the login counters from entry 54).
+
+**The test** repeats the attack of the security assessment (test 7c: 200 made-up URLs), but on AKS, through the Gateway like a real attacker, and counted by Prometheus, which is what an attacker would try to overload. Full output: [evidence/14-f18-retest-aks.txt](evidence/14-f18-retest-aks.txt).
+
+```bash
+kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090:9090 >/dev/null &
+q() { curl -s localhost:9090/api/v1/query --data-urlencode "query=$1" \
+  | jq -r '.data.result[] | "\(.metric | del(.__name__) | to_entries | map("\(.key)=\(.value)") | join(" "))  \(.value[1])"'; }
+
+q 'count by (job) (http_request_duration_seconds_count)'                 # 1. is the new code live?
+q 'count by (job) (http_requests_total)'                                  # 2. before
+q 'max by (job) (scrape_samples_scraped{job=~"auth|discounts|items"})'
+for i in $(seq 1 200); do                                                 # 3. the attack
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    "https://restauranty.aks.springlaughing.dev/api/items/items/junk-$RANDOM$RANDOM"
+done | sort | uniq -c
+sleep 40                                                                  # 4. after the next scrape
+q 'count by (job) (http_requests_total)'
+q 'max by (job) (scrape_samples_scraped{job=~"auth|discounts|items"})'
+q 'sum by (route, statusCode) (http_requests_total{job="items"})'
+```
+
+Two things were checked first, so that the result means something:
+
+- **The new code is live.** The latency histogram exists only in the new code, and Prometheus had it for all three services.
+- **The junk really reached `items`.** The Gateway's flood limit is 50 requests per second per IP (entry 27). A `curl` loop sends one request at a time, far below that: all 200 answers were `401` (refused for having no token, by `items`), none was `429`.
+
+**Result:**
+
+| | Before the attack | After 200 junk requests |
+| --- | --- | --- |
+| Request series of `items` in Prometheus | 10 | **10** |
+| Series per scrape, `items` | 155 | **155** |
+| Test 7c, old code (for comparison) | | 201 new series |
+
+All 200 junk requests landed in one existing series:
+
+```
+route=no_route statusCode=401  208
+```
+
+208 = the 200 junk requests plus 8 earlier requests without a token since the deploy, most likely the pipeline's API tests and ZAP scan. That is also why the result is +0 and not +1 or +2: the series `no_route, 401` already existed in both `items` pods. A fixed label value is created once by its first request; the fix is that the number then stops growing, however many junk URLs follow.
+
+**The dashboard during the test** (my IP address hidden):
+
+![Refused at the Gateway: every junk URL as a log line with status 401. Series per scrape: 156, 167, 155, unchanged](evidence/14-f18-retest-grafana-logs.png)
+
+The junk URLs are all there, in the Gateway's **log** (Loki), one line each. In the **metrics** (Prometheus), the "Series per scrape" numbers did not move. That is the rule of entry 48 at work: visitor input goes into logs, never into metric labels.
+
+![Refused tokens per minute: items peaks at about 140. Top 10 client IPs: one address, 200 requests, 200 refused](evidence/14-f18-retest-grafana-security.png)
+
+"Refused tokens per minute" shows the attack as one curve for `items`. This panel only works with the new code, because before it there was no `no_route` label.
+
+**Finding: a latency of 9.5 ms that nobody measured.**
+
+![Latency p95, backends: a flat 9.5 ms for all three services. Latency p95, at the Gateway: about 6 ms](evidence/14-f18-retest-grafana-traffic.png)
+
+"Latency p95, backends" showed almost exactly 9.5 ms for all three services, as a flat line. But "Latency p95, at the Gateway", which **includes** the backend's time, showed about 6 ms. The backends' own time should be lower than that, not higher. (The two panels do not count exactly the same requests: the backends also count Prometheus's scrapes and Kubernetes' health checks, which never pass the Gateway. But those are fast too.) So the backends' number was suspect.
+
+The cause is the histogram's buckets (entry 49). The smallest was 10 ms. When almost every request takes less, Prometheus only knows "between 0 and 10 ms". `histogram_quantile` then assumes the requests are spread evenly over that range, and the 95th percent lands at 9.5 ms. The number comes from the bucket edges, not from the requests.
+
+**The fix:** three smaller buckets, 1 ms, 2.5 ms and 5 ms, in `backend/<service>/metrics.cjs`:
+
+```js
+buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10],
+```
+
+Tested locally: of 20 requests to the health route of `items`, **19 took less than 1 ms**. The old buckets put all of them into "under 10 ms". Each label combination now has 15 series instead of 11; per backend that is a few dozen more, far below the limit of 1,000 per scrape (entry 53). Reaches AKS with the next deploy.
+
+**Small fix: "No data" for server errors.** With no 5xx answers at all, the 5xx series does not exist, and the panel said "No data". During a demo, that looks broken. The query now ends with `or vector(0)`, so the panel shows a flat 0 (`scripts/build-dashboard.py`).
+
+**The lesson.** A dashboard can be wrong in a convincing way: a smooth line at a believable value. Two panels that measure the same thing from different places (the backend and the Gateway) caught it. Checking one number against another is cheap, and it found what looking at a single panel would not.
 
 ---
 
