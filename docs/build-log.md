@@ -99,6 +99,12 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
 - [Part 11 — monitoring](#part-11--monitoring)
   - [47. Before monitoring: what runs in the cluster](#47-before-monitoring-what-runs-in-the-cluster)
   - [48. Code fix: metrics labelled by route, not by URL (F18)](#48-code-fix-metrics-labelled-by-route-not-by-url-f18)
+  - [How monitoring works: four questions, five tools](#how-monitoring-works-four-questions-five-tools)
+  - [49. Code: how long each request takes](#49-code-how-long-each-request-takes)
+  - [50. Design: where each monitoring part runs, and what it may do](#50-design-where-each-monitoring-part-runs-and-what-it-may-do)
+  - [51. Finding: five monitoring tools could read every Secret in the cluster](#51-finding-five-monitoring-tools-could-read-every-secret-in-the-cluster)
+  - [52. Grafana's login from Key Vault](#52-grafanas-login-from-key-vault)
+  - [53. Install: Prometheus, Grafana, Loki and Alloy](#53-install-prometheus-grafana-loki-and-alloy)
 - [What is next](#what-is-next)
 
 ---
@@ -3223,53 +3229,54 @@ Full outputs: [evidence/14-cluster-start-pods.txt](evidence/14-cluster-start-pod
 
 #### How to read the list
 
-| Column | Means |
-| --- | --- |
-| `NAMESPACE` | A folder for Kubernetes objects. It groups them and lets rules (access rights, network rules) apply to one group. |
-| `READY` `1/1` | Containers in the pod that are ready, out of all containers in the pod. Some pods have helpers next to the main program, so `3/3` or `4/4` is normal. |
-| `STATUS` | `Running`: the container is running. `CrashLoopBackOff`: it stopped with an error, and Kubernetes waits a little before it tries again. |
-| `RESTARTS` | How often a container stopped and Kubernetes started it again. |
-| `AGE` | How old the **pod** is: the record in Kubernetes. Not how long the program in it has been running (see below). |
+- **NAMESPACE**: a folder for Kubernetes objects. It groups them, so rules (access rights, network rules) can apply to one group.
+- **READY**, for example `1/1`: how many containers in the pod are ready, out of all its containers. Some pods have helpers next to the main program, so `3/3` or `4/4` is normal.
+- **STATUS**: `Running` means the container runs. `CrashLoopBackOff` means it stopped with an error, and Kubernetes waits a little before it tries again.
+- **RESTARTS**: how often a container stopped and Kubernetes started it again.
+- **AGE**: how old the **pod** is, meaning its record in Kubernetes. Not how long the program in it has run (see below).
 
 There are two kinds of names:
 
-| Name looks like | Made by | Copies |
-| --- | --- | --- |
-| `cilium-g5jzk`: one short random part | a **DaemonSet** | exactly one on each node, so 3 here |
-| `coredns-5bf45f87d-jv6dt`: two random parts | a **Deployment** | as many as asked for, on any node |
-| `mongodb-0`: a number | a **StatefulSet** | fixed names, each with its own disk |
+- A name with **one short random part**, like `cilium-g5jzk`, comes from a **DaemonSet**: exactly one copy on each node, so 3 here.
+- A name with **two random parts**, like `coredns-5bf45f87d-jv6dt`, comes from a **Deployment**: as many copies as asked for, on any node.
+- A name with **a number**, like `mongodb-0`, comes from a **StatefulSet**: fixed names, each copy with its own disk.
 
 #### Who installed what
 
-| Namespace | Pods | Installed by |
-| --- | --- | --- |
-| `kube-system` | 30 | AKS itself. Azure keeps them up to date. |
-| `cert-manager`, `external-secrets`, `nginx-gateway`, `gateway`, `reloader` | 9 | me, with `scripts/setup-aks.sh` (Parts 4 and 5) |
-| `restauranty` | 9 | me, with the pipeline (Part 8) |
+- **AKS itself** installed the 30 pods in `kube-system`. Azure keeps them up to date.
+- **I** installed 9 pods with `scripts/setup-aks.sh` (Parts 4 and 5): the namespaces `cert-manager`, `external-secrets`, `nginx-gateway`, `gateway` and `reloader`.
+- **The pipeline** (Part 8) deploys the 9 app pods in `restauranty`.
 
 #### The app: namespace `restauranty`
 
-| Pod | Copies | What it does |
-| --- | --- | --- |
-| `auth` | 2 | sign-up, login, user accounts |
-| `discounts` | 2 | coupons and campaigns |
-| `items` | 2 | menu items, dietary labels, orders |
-| `client` | 2 | an nginx web server that sends the React website to the browser |
-| `mongodb-0` | 1 | the database, with its data on an Azure disk |
+- `auth`, 2 copies: sign-up, login, user accounts.
+- `discounts`, 2 copies: coupons and campaigns.
+- `items`, 2 copies: menu items, dietary labels, orders.
+- `client`, 2 copies: an nginx web server that sends the React website to the browser.
+- `mongodb-0`, 1 copy: the database, with its data on an Azure disk.
 
 #### The platform: installed by me
 
-| Namespace | Pod | What it does | Why this project needs it |
-| --- | --- | --- | --- |
-| `gateway` | `restauranty-nginx` | The front door. An NGINX web server that gets every request at the public IP address. It ends HTTPS, blocks the user list, limits logins and floods, and sends each request to the right service. | All traffic from the internet (#7, #10) |
-| `nginx-gateway` | `nginx-gateway-fabric` | The front door's manager. It reads the Gateway and route objects in Kubernetes and writes them as NGINX settings. It never gets a request from a user. | Routes and limits live in git as YAML, not as NGINX files |
-| `cert-manager` | `cert-manager` | Gets the HTTPS certificate from Let's Encrypt and renews it before it runs out. | HTTPS (#7) |
-| | `cert-manager-webhook` | Checks every new certificate request object. Broken ones are refused at once. | |
-| | `cert-manager-cainjector` | Puts certificate data into the webhook settings, so the Kubernetes API trusts the webhook. | |
-| `external-secrets` | `external-secrets` | Reads secrets from Key Vault and writes them as Kubernetes Secrets: JWT keys, database password, Cloudinary keys. | No secret in git (#8) |
-| | `external-secrets-webhook` | Checks every new "copy this secret" object. | |
-| | `external-secrets-cert-controller` | Makes and renews the certificate of that webhook. | |
-| `reloader` | `reloader` | When a Secret changes, it restarts the pods that use it, so they read the new value. | Key rotation (#16) |
+**The front door** (#7, #10):
+
+- `restauranty-nginx`, in `gateway`, is the Gateway itself: an NGINX web server that gets every request at the public IP address. It ends HTTPS, blocks the user list, limits logins and floods, and sends each request to the right service.
+- `nginx-gateway-fabric`, in `nginx-gateway`, is its manager. It reads the Gateway and route objects in Kubernetes and turns them into NGINX settings. It never gets a request from a user. Thanks to it, the routes and limits live in git as YAML files.
+
+**HTTPS certificates** (#7), in `cert-manager`:
+
+- `cert-manager` gets the certificate from Let's Encrypt and renews it before it runs out.
+- `cert-manager-webhook` checks every new certificate request object, and refuses broken ones at once.
+- `cert-manager-cainjector` puts certificate data into the webhook settings, so the Kubernetes API trusts the webhook.
+
+**Secrets from Key Vault** (#8), in `external-secrets`:
+
+- `external-secrets` reads secrets from Key Vault and writes them as Kubernetes Secrets: the JWT keys, the database passwords, the Cloudinary keys. No secret is in git.
+- `external-secrets-webhook` checks every new "copy this secret" object.
+- `external-secrets-cert-controller` makes and renews the certificate of that webhook.
+
+**Restarts after a secret changes** (#16), in `reloader`:
+
+- `reloader` restarts the pods that use a Secret when that Secret changes, so they read the new value.
 
 The two webhook pods follow a common pattern: before Kubernetes saves an object, it asks the tool "is this object correct?". The tool answers through its webhook.
 
@@ -3277,26 +3284,22 @@ The two webhook pods follow a common pattern: before Kubernetes saves an object,
 
 **One on every node (DaemonSets):**
 
-| Pod | What it does |
-| --- | --- |
-| `cilium` (3 containers) | Carries network traffic between pods and **enforces the NetworkPolicies**. Without it, the 5 network rules from #11 would be text that nothing checks. |
-| `azure-cns` | Gives every pod an IP address from the Azure network. |
-| `azure-ip-masq-agent` | Traffic that leaves the cluster (to Cloudinary, to Let's Encrypt) goes out with the node's address, so the answer can come back. |
-| `cloud-node-manager` | Keeps each node's record in Kubernetes in step with its Azure VM: IP address, zone, and whether the VM still exists. |
-| `csi-azuredisk-node` (3 containers) | Attaches Azure disks to the node, so a pod can use them. MongoDB's data disk comes through here. |
-| `csi-azurefile-node` (4 containers) | The same for Azure Files shares. This project does not use them; AKS installs it anyway. |
+- `cilium` (3 containers) carries network traffic between pods and **enforces the NetworkPolicies**. Without it, the network rules from #11 would be text that nothing checks.
+- `azure-cns` gives every pod an IP address from the Azure network.
+- `azure-ip-masq-agent` makes traffic that leaves the cluster (to Cloudinary, to Let's Encrypt) go out with the node's address, so the answer can come back.
+- `cloud-node-manager` keeps each node's record in Kubernetes in step with its Azure VM: IP address, zone, and whether the VM still exists.
+- `csi-azuredisk-node` (3 containers) attaches Azure disks to the node, so a pod can use them. MongoDB's data disk comes through here.
+- `csi-azurefile-node` (4 containers) does the same for Azure Files shares. This project does not use them; AKS installs it anyway.
 
 **Some copies on any node (Deployments):**
 
-| Pod | Copies | What it does |
-| --- | --- | --- |
-| `coredns` | 2 | The cluster's phone book (DNS). It turns a service name such as `mongodb` into an IP address. When this name could not be found yet, the backends crashed (`ENOTFOUND mongodb`, #28). |
-| `coredns-autoscaler` | 1 | Adds `coredns` copies when the cluster grows. |
-| `cilium-operator` | 2 | Cluster-wide housekeeping for Cilium, for example cleaning up after deleted pods. |
-| `konnectivity-agent` | 2 | A tunnel from the nodes to the Kubernetes control plane, which Azure runs outside my network. `kubectl logs`, `kubectl exec` and `port-forward` travel through it. |
-| `konnectivity-agent-autoscaler` | 1 | Adds tunnel copies when the cluster grows. |
-| `metrics-server` | 2 | CPU and memory of every pod, for `kubectl top` and for scaling. It keeps only the **current** value: no history, no alerts. That is what Prometheus adds in this part. |
-| `azure-wi-webhook-controller-manager` | 2 | Workload Identity: lets a Kubernetes service account sign in to Azure as an Azure identity. External Secrets uses this to read Key Vault (#8). |
+- `coredns`, 2 copies, is the cluster's phone book (DNS). It turns a service name such as `mongodb` into an IP address. When this name could not be found yet, the backends crashed (`ENOTFOUND mongodb`, #28).
+- `coredns-autoscaler` adds `coredns` copies when the cluster grows.
+- `cilium-operator`, 2 copies, does cluster-wide housekeeping for Cilium, for example cleaning up after deleted pods.
+- `konnectivity-agent`, 2 copies, is a tunnel from the nodes to the Kubernetes control plane, which Azure runs outside my network. `kubectl logs`, `kubectl exec` and `port-forward` travel through it.
+- `konnectivity-agent-autoscaler` adds tunnel copies when the cluster grows.
+- `metrics-server`, 2 copies, knows the CPU and memory of every pod, for `kubectl top` and for scaling. It keeps only the **current** value: no history, no alerts. Prometheus adds those in this part.
+- `azure-wi-webhook-controller-manager`, 2 copies, is Workload Identity: it lets a Kubernetes ServiceAccount sign in to Azure as an Azure identity. External Secrets uses it to read Key Vault (#8).
 
 `kubectl get daemonsets -n kube-system` also lists `azure-cns-win`, `csi-azuredisk-node-win` and a few more with 0 pods. They are for Windows nodes. This cluster has only Linux nodes, so they stay empty.
 
@@ -3310,11 +3313,9 @@ discounts-54784b8d64-trrrh   0/1     Running            2 (18s ago)   14h
 items-7d66c5464b-bc94q       0/1     CrashLoopBackOff   2 (18s ago)   14h
 ```
 
-| Shows | Means |
-| --- | --- |
-| `0/1 Running` | The program runs again, but its health check has not passed yet. Kubernetes sends it no users until then. |
-| `CrashLoopBackOff` | It stopped (no MongoDB yet). Kubernetes waits a little before the next try. |
-| `2 (18s ago)` | It has stopped twice, the last time 18 seconds ago. |
+- `0/1 Running`: the program runs again, but its health check has not passed yet. Kubernetes sends it no users until then.
+- `CrashLoopBackOff`: it stopped (no MongoDB yet). Kubernetes waits a little before the next try.
+- `2 (18s ago)`: it has stopped twice, the last time 18 seconds ago.
 
 The stopped container's log says why:
 
@@ -3325,11 +3326,9 @@ Error connecting to mongo: getaddrinfo ENOTFOUND mongodb. Exiting, so the contai
 
 The timeline, from Kubernetes (times UTC):
 
-| Time | What happened |
-| --- | --- |
-| 13:00:12 to 13:00:28 | The 3 nodes are back |
-| 13:02:50 | MongoDB starts |
-| 13:03:36 | The last backend starts, and this time it connects |
+- 13:00:12 to 13:00:28: the 3 nodes are back.
+- 13:02:50: MongoDB starts.
+- 13:03:36: the last backend starts, and this time it connects.
 
 A few minutes later every pod was `1/1`, the website answered 200, and a wrong login got the right answer, 401. **No manual restart.** Before #28, every backend would have stayed broken until someone ran `kubectl rollout restart`.
 
@@ -3459,6 +3458,342 @@ The 3 new series are `/metrics` itself, the 400 answers for invalid IDs, and `no
 **What is lost.** A dashboard can no longer show which made-up URL an attacker tried. That is on purpose: a URL is input from the visitor, and it belongs in the **logs** (Loki, later in this part), not in metric labels. The rule: labels only take values from a short, fixed list.
 
 **Still to do:** the same retest on AKS after the deploy, through the Gateway like a real attacker, and its result in the security assessment.
+
+### How monitoring works: four questions, five tools
+
+**In one line:** monitoring answers four questions about the running system. Each question has its own tool, and Grafana shows the answers side by side.
+
+- **How much, how fast, how often?** These are **metrics**: numbers over time, for example "12 failed logins per minute". Prometheus collects and stores them.
+- **What exactly happened?** These are **logs**: one line of text per event, for example `<ip> "POST /api/auth/login" 429`. Loki stores them, Alloy collects them.
+- **Does a person need to act now?** These are **alerts**: rules on metrics or logs, for example "more than 30 failed logins in 5 minutes". Prometheus checks the rules, Alertmanager sends the message (#15).
+- **What does it look like?** These are **dashboards**. Grafana draws them from Prometheus and Loki.
+
+**How the data flows:**
+
+```
+ auth, discounts, items  /metrics ─┐
+ kubelet (CPU, memory, disks)  ────┼── Prometheus asks every 30 s ──> Prometheus ──> Alertmanager ──> (#15)
+ kube-state-metrics (replicas,  ───┘    ("scrape", a pull)                │
+   restarts, pod states)                                                   │
+                                                                           ▼
+ logs of the pods ── Alloy reads them like "kubectl logs" ──> Loki ───> Grafana <── me, in the browser:
+                                                                                      https://grafana.aks.springlaughing.dev
+```
+
+**Words used in this part:**
+
+- A **metric** is a named number. `http_requests_total` is how many requests a backend has answered since it started.
+- A **label** is a name=value pair on a metric, like `route="/api/auth/login"` or `statusCode="401"`. Labels let one metric be split: "only the 401s on the login route".
+- A **time series** is one metric with one exact set of labels, and its values over time. Each one costs Prometheus memory. That is why labels must have few values (F18, entry 48).
+- A **scrape** is Prometheus asking a program for its metrics, over HTTP, at `/metrics`. Prometheus **pulls**: the backends send nothing on their own, they only answer.
+- **PromQL** and **LogQL** are the query languages of Prometheus and Loki. Every dashboard panel is one query.
+
+**Helm, charts and values.** Prometheus, Grafana, Loki and Alloy are not written by me. They come as **Helm charts**: packages of Kubernetes files with settings left open. A **values file** fills in those settings, for example "no disk for Grafana" or "keep 7 days of data". The command `helm upgrade --install <name> <chart> --version <v> -f <values>` installs the chart the first time and updates it on every later run, so it is safe to run again. `--version` pins the exact chart version, like the image digests in the pipeline (entry 41): the same command installs the same thing next month.
+
+**Operators and their object types.** The Prometheus Operator is a program that adds new object types to Kubernetes and acts on them. This project uses one of them, the **ServiceMonitor**: a small file that says "scrape these Services, on this port, at this path". The operator reads it and writes Prometheus's settings. So adding a scrape target is a `kubectl apply`, not an edit inside Prometheus. External Secrets (Part 5) works the same way, with its own types, SecretStore and ExternalSecret.
+
+### 49. Code: how long each request takes
+
+**In one line:** the three backends now measure how long each request takes (`http_request_duration_seconds`), so Grafana can show the slowest 5 of every 100 requests per service.
+
+**Why.** A common checklist for any service is **rate, errors, duration**: how many requests, how many fail, how long they take. The backends already counted requests and their status codes, so the first two were there. Duration was missing.
+
+**How it is measured: a histogram.** Storing every single duration would be too much data. A histogram sorts each request into "buckets" and only counts them. Here the buckets are 10 ms, 50 ms, 100 ms, 250 ms, 0.5 s, 1 s, 2.5 s and 10 s. A request that took 80 ms is counted in the 100 ms bucket and in every bigger one; the label `le` means "less than or equal". One more bucket, `+Inf`, counts all requests.
+
+From these counts, Prometheus estimates the **p95**: the time that 95 of 100 requests stayed under. The p95 is used instead of the average, because an average hides the slow requests that users notice.
+
+**The code**, in `backend/*/metrics.cjs`:
+
+```js
+const httpRequestDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Time from request to response, in seconds',
+  labelNames: ['method', 'route'],
+  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 10],
+});
+// in the middleware: start a timer for each request, stop it when the answer is sent
+const endTimer = httpRequestDuration.startTimer();
+res.on('finish', () => { /* ... */ endTimer({ method, route }); });
+```
+
+**Why only two labels.** A histogram already makes 11 time series per label combination: 8 buckets, `+Inf`, a sum and a count. Each extra label multiplies that. The route label uses the pattern from entry 48 (`/api/items/items/:id`, or `no_route`), so junk URLs cannot add series here either. The status code is left out, because the request counter already has it.
+
+**Tested locally**, in the same setup as entry 48. The whole `/metrics` output of `items` was 101 series after 50 junk requests, and the histogram put all 50 under one label, `route="no_route"`:
+
+```
+http_request_duration_seconds_bucket{le="0.01",method="GET",route="no_route"} 50
+...
+http_request_duration_seconds_count{method="GET",route="no_route"} 50
+```
+
+The new code reaches AKS through the pipeline, after this branch is merged. Until then, the latency panel stays empty.
+
+### 50. Design: where each monitoring part runs, and what it may do
+
+**In one line:** everything goes into a new namespace, `monitoring`, and no part gets access to the nodes themselves. That costs one feature (metrics about the VMs) and lets the namespace enforce Pod Security "baseline".
+
+**The parts.** Each runs as a single pod:
+
+- **Prometheus** scrapes the metrics every 30 seconds, stores them and checks the alert rules. It keeps 7 days on a 10 GB disk.
+- **Alertmanager** receives the alerts that fire, groups them and sends them on (#15).
+- **Grafana** is the web page with the dashboards. It has no disk: the dashboards are files in git.
+- **The Prometheus Operator** turns ServiceMonitor objects into Prometheus settings.
+- **kube-state-metrics** turns the state of Kubernetes objects into metrics: replicas wanted and ready, restarts, pod phases.
+- **Loki** stores and searches the logs. It keeps 7 days on a 10 GB disk.
+- **Alloy** collects the pod logs and sends them to Loki.
+
+Both disks use MongoDB's zone-redundant storage class (entry 15), so they can follow their pod to another zone.
+
+**Decision 1: no node-exporter.** The chart normally adds node-exporter, which measures the nodes themselves: CPU, memory and disk of each VM. For that, it needs the node's network, its list of processes and its files. A pod with that access can see every other container on the node. The numbers per pod (CPU, memory, volume usage) still come from the **kubelet**, the Kubernetes agent on each node, which Prometheus scrapes anyway. What is lost: graphs per VM. node-exporter's alert rules are switched off too, or they would complain that their data is missing.
+
+**Decision 2: Alloy reads the logs through the Kubernetes API.** There are three usual ways to collect logs:
+
+| | Sidecar | DaemonSet (most common) | Through the API (chosen) |
+| --- | --- | --- | --- |
+| Where the collector runs | inside every app pod | one per node, 3 here | one pod for the cluster |
+| How it reads the logs | from a folder shared with the app | from the log files on the node's disk | asks Kubernetes, like `kubectl logs` |
+| What it needs | a change to every app file | access to the node's files | read pods and their logs, nothing else |
+
+The chosen way needs no host access and no change to the app. Its limit: one pod pulling every log through the Kubernetes API does not scale to hundreds of nodes. There, a DaemonSet is the right choice.
+
+**Decision 3: the AKS control plane is not scraped.** Azure runs the Kubernetes control plane (etcd, the scheduler, the controller manager) and hides it from the cluster's own pods. Cilium replaces kube-proxy. So the chart's scrapers and alerts for these parts are switched off. Otherwise their "target down" alerts would fire forever.
+
+**The namespace** (`k8s/platform/namespaces.yaml`) has three labels:
+
+- `pod-security.kubernetes.io/enforce: baseline`: Kubernetes refuses any pod here that asks for host access or extra privileges. This is possible only because of decisions 1 and 2.
+- `pod-security.kubernetes.io/warn: restricted`: a warning for pods that miss the strictest settings. Some chart pods do.
+- `gateway-access: "true"`: the Gateway accepts routes only from namespaces with this label. Grafana is published from here.
+
+### 51. Finding: five monitoring tools could read every Secret in the cluster
+
+**In one line:** with their default settings, five monitoring tools had the right to read every Secret in the cluster, including the JWT signing key, the database passwords and the HTTPS private key. Four now have no such right. The fifth is a known gap.
+
+**Why check this.** Monitoring tools are built to see everything, so they are a favourite target. The question is: if an attacker takes over one of them, through a bug in Grafana, a bad plugin or a poisoned chart update, what do they get? Assume it happens, and look at the rights.
+
+**How it was found.** Before installing anything, each chart was rendered to plain Kubernetes files on the laptop, and every rule that names `secrets` was listed:
+
+```bash
+helm template alloy grafana/alloy --version 1.15.0 -n monitoring -f k8s/monitoring/alloy-values.yaml > alloy.yaml
+grep -n -B4 -A2 "secrets" alloy.yaml      # the same for kube-prometheus-stack and loki
+```
+
+A **ClusterRole** gives rights in every namespace. A **Role** gives them in one namespace only.
+
+**Before and after:**
+
+| Tool | Default right | Now |
+| --- | --- | --- |
+| Alloy | read all Secrets, cluster-wide | Roles in 7 namespaces: read pods and their logs, nothing else |
+| Grafana's loaders | read all Secrets and ConfigMaps, cluster-wide | a Role in `monitoring` only, and they read ConfigMaps only |
+| Loki's rules loader | read all Secrets and ConfigMaps, cluster-wide | switched off, no role at all |
+| kube-state-metrics | list all Secrets, values included | no right on Secrets |
+| Prometheus Operator | read, create, change and delete all Secrets, cluster-wide | unchanged: known gap |
+
+**Why each one had the right, and how it was removed:**
+
+- **Alloy** can also collect other things than logs, for which the chart grants wide rights. Its values file now lists exactly the namespaces it may read (`rbac.namespaces`) and only two rights there: pods and pod logs (`rbac.rules`).
+- **Grafana's loaders** are two helper containers that load dashboards and data sources from labelled ConfigMaps. `grafana.rbac.namespaced: true` makes their rights a Role. A surprise during the install changed two more settings (entry 53).
+- **Loki's rules loader** loads alert rules for Loki. This project keeps its alert rules in Prometheus, so it is switched off (`sidecar.rules.enabled: false`).
+- **kube-state-metrics** turns the names of Secrets into metrics, and for that it may list them, values included. Its list of "collectors" is now the chart's default without `secrets`, and the chart then gives no right on Secrets.
+- **The Prometheus Operator** writes Prometheus's and Alertmanager's settings, which are Secrets. It now **watches** only `monitoring` (`prometheusOperator.namespaces`). That limits what the program does, not what it may do: the chart still gives it a ClusterRole for Secrets everywhere, with no setting to change that. Closing the gap means replacing the chart's role with Roles per namespace. Not done this week; noted in the values file and for the threat model (#3).
+
+**The lesson.** Chart defaults are written so that every feature works for every user. Rendering a chart and reading its rights before installing it takes one command. Here it removed four of five paths to every secret in the cluster.
+
+### 52. Grafana's login from Key Vault
+
+**In one line:** Grafana's admin password lives only in Key Vault. Grafana gets it through External Secrets, signed in as its own Azure identity, which may read exactly one secret. The first try failed on a placeholder ID.
+
+**Why not the chart's default.** Without settings, the chart makes up the password itself and stores it in a Kubernetes Secret. Then the password exists only inside the cluster, nobody chose it, and a new install changes it. Key Vault keeps it in the same place as all other secrets, with the same access rules and the same log of who read what.
+
+**A refresher on External Secrets** (in detail: entries 17 to 19). External Secrets fetches a value from Key Vault and writes it into a Kubernetes Secret. To sign in to Azure, it borrows the identity of a Kubernetes **ServiceAccount**: Azure trusts a token from that ServiceAccount, so no password is needed anywhere. Three objects in `k8s/monitoring/grafana-secrets.yaml` set this up for Grafana:
+
+1. The **ServiceAccount** `grafana` says "I stand for the Azure identity with client id 869b2c55-…".
+2. The **SecretStore** `grafana` says "use Key Vault, signed in as the ServiceAccount `grafana`".
+3. The **ExternalSecret** `grafana-admin` says "write the Secret `grafana-admin`, with `admin-user: admin` and `admin-password` taken from the Key Vault secret `grafana-admin-password`".
+
+The chart reads that Secret by its name (`admin.existingSecret: grafana-admin`). The ServiceAccount `grafana` is used only by External Secrets. Grafana's own pod runs as another ServiceAccount, `grafana-server`, which has no Azure identity.
+
+**The Azure side** (`terraform/cluster-access/`) follows the pattern of the four app workloads, with one change. Until now every identity trusted a ServiceAccount in the namespace `restauranty`. Grafana's ServiceAccount is in `monitoring`, so a new variable lists the workloads that live elsewhere:
+
+```hcl
+variable "workload_namespaces" {
+  default = { grafana = "monitoring" }
+}
+# subject = "system:serviceaccount:${lookup(var.workload_namespaces, each.key, var.app_namespace)}:${each.key}"
+```
+
+`lookup` gives `monitoring` for `grafana` and `restauranty` for every other workload, so the four existing identities stay as they are. The plan confirmed it: `3 to add, 0 to change, 0 to destroy`. The three are an identity, its trust rule (federated credential), and the role "Key Vault Secrets User" on the one secret `grafana-admin-password`.
+
+**The steps, in this order:**
+
+```bash
+# 1. A random password into Key Vault (the setup script does this by itself if it is missing)
+az keyvault secret set --vault-name kv-evgenia-restauranty -n grafana-admin-password \
+  --file <(openssl rand -hex 24 | tr -d '\n') --output none
+# 2. The identity, its trust rule and its one role
+cd terraform/cluster-access && terraform apply && cd ../..
+terraform -chdir=terraform/cluster-access output workload_client_ids   # grafana = "869b2c55-…"
+# 3. The client id goes into k8s/monitoring/grafana-secrets.yaml, then:
+kubectl apply -f k8s/monitoring/grafana-secrets.yaml
+kubectl wait externalsecret/grafana-admin -n monitoring --for=condition=Ready --timeout=3m
+```
+
+**Surprise: applied too early.** The file was first applied before step 3, with the placeholder `GRAFANA_CLIENT_ID` still in it. The wait timed out, and two places showed why:
+
+```
+$ kubectl get secretstore -n monitoring
+NAME      STATUS                  READY
+grafana   InvalidProviderConfig   False
+
+$ kubectl logs -n external-secrets deploy/external-secrets | grep grafana
+... AADSTS700016: Application with identifier 'GRAFANA_CLIENT_ID' was not found in the directory
+```
+
+Kubernetes had accepted the placeholder, because it is valid text. Only Entra ID, Azure's sign-in service, could say that no such identity exists.
+
+With the real client id applied, the SecretStore turned `Valid`. The ExternalSecret still waited: `kubectl apply` reported it as `unchanged`, so External Secrets had no reason to try again early, and after each failure it waits longer. One annotation makes it try at once:
+
+```bash
+kubectl annotate externalsecret grafana-admin -n monitoring force-sync=$(date +%s) --overwrite
+```
+
+```
+NAME            STORE     STATUS         READY   LAST SYNC
+grafana-admin   grafana   SecretSynced   True    1s
+```
+
+The Secret `grafana-admin` then held exactly two keys, `admin-password` and `admin-user`.
+
+**Two things to keep.** `kubectl get secretstore` is the fastest check when an ExternalSecret stays not ready: its STATUS names the problem. And `force-sync` helps with key rotation (#16): change a value in Key Vault, force a sync, and Reloader restarts the pods within seconds instead of within the hour.
+
+### 53. Install: Prometheus, Grafana, Loki and Alloy
+
+**In one line:** the monitoring tools are installed with Helm in seven steps, the backends become scrape targets, Grafana is published through the Gateway, and one network rule opens for Prometheus. Two surprises in step 5, both about names and rights.
+
+**State:** steps 3 to 5 done (kube-prometheus-stack runs). Steps 6 to 9 follow.
+
+**The steps,** after entry 52. The setup script does the same in its step 7.
+
+```bash
+# 3. The namespace (entry 50)
+kubectl apply -f k8s/platform/namespaces.yaml
+# 4. Grafana's login (entry 52). Before step 5: without it, Grafana's pod cannot
+#    start, and Helm waits until it times out.
+kubectl apply -f k8s/monitoring/grafana-secrets.yaml
+# 5. Prometheus, Alertmanager, Grafana, the operator, kube-state-metrics.
+#    Also adds the object types ServiceMonitor and PrometheusRule.
+helm upgrade --install kps prometheus-community/kube-prometheus-stack --version 93.2.0 \
+  -n monitoring -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
+# 6. Loki
+helm upgrade --install loki grafana/loki --version 7.6.0 \
+  -n monitoring -f k8s/monitoring/loki-values.yaml --wait --timeout=10m
+# 7. Alloy
+helm upgrade --install alloy grafana/alloy --version 1.15.0 \
+  -n monitoring -f k8s/monitoring/alloy-values.yaml --wait --timeout=5m
+# 8. What to scrape, Grafana's address, the dashboard
+kubectl apply -f k8s/monitoring/servicemonitors.yaml \
+              -f k8s/monitoring/grafana-route.yaml \
+              -f k8s/monitoring/dashboard.yaml
+# 9. The network rule for Prometheus
+kubectl apply -f k8s/network/policies.yaml
+```
+
+`--wait` makes Helm wait until the new pods are ready, so a broken install stops the steps instead of failing quietly. It checks once, though: surprise 2 shows its limit.
+
+**What each file sets, and why:**
+
+- `k8s/monitoring/kube-prometheus-stack-values.yaml` switches off node-exporter and the control plane scrapers (entry 50). Prometheus keeps 7 days or 8 GB of data, whichever is reached first, on a 10 GB disk, and reads ServiceMonitors from any namespace. Grafana is on the internet, so it allows no sign-up and no anonymous visitors, sends its login cookie over HTTPS only, and makes no calls home (usage reports, update checks, profile pictures). Grafana gets Loki as a second data source and no disk. The narrowed rights of entry 51 are here too.
+- `k8s/monitoring/loki-values.yaml` runs Loki as one instance ("single binary"), with its files on its own disk, and deletes logs after 7 days. The parts a big installation needs are off: caches, an extra NGINX in front, self-tests, and the rules loader (entry 51).
+- `k8s/monitoring/alloy-values.yaml` runs Alloy as one pod. It reads the pods of 7 namespaces through the Kubernetes API: `restauranty`, `gateway`, `nginx-gateway`, `cert-manager`, `external-secrets`, `reloader` and `monitoring`. Its rights are Roles in exactly those namespaces.
+- `k8s/monitoring/servicemonitors.yaml` tells Prometheus to scrape `auth`, `discounts` and `items` at `/metrics` every 30 seconds, with a limit per scrape (below).
+- `k8s/monitoring/grafana-route.yaml` sends `grafana.aks.springlaughing.dev` to Grafana, through the Gateway (below).
+- `k8s/monitoring/dashboard.yaml` holds the dashboard (below).
+- `k8s/network/policies.yaml` gets rule 6, for Prometheus (below).
+
+**The ServiceMonitor, and a second guard for F18.** It picks the Services in `restauranty` whose label `app` is `auth`, `discounts` or `items`, and names Prometheus's `job` after that label. The line `sampleLimit: 1000` means: if one scrape brings more than 1,000 series, Prometheus throws that scrape away and marks the target as down, instead of filling its memory. Each backend sends about 100 to 400 series. The code fix (entry 48) closes the known hole; the limit protects Prometheus from the next one.
+
+**Is `/metrics` public?** No. The Gateway sends paths starting with `/api/auth`, `/api/discounts` and `/api/items` to the backends, and everything else to the client. So `https://restauranty.aks.springlaughing.dev/metrics` reaches the client's nginx, which has no such page. Inside the cluster, the network rules decide.
+
+**Network rule 6: Prometheus may scrape the backends.** Since #11, every pod in `restauranty` refuses all traffic that no rule allows (entry 21). The new rule opens exactly one more path: from the Prometheus pods (label `app.kubernetes.io/name: prometheus`) in the namespace `monitoring`, to `auth`, `discounts` and `items`, on their port `http` (3001, 3002, 3003). Grafana, Loki and Alloy get no path into `restauranty`; Alloy reads logs through the Kubernetes API, not from the pods. The client and MongoDB stay closed to Prometheus.
+
+**Grafana on the internet.** The Gateway already had a listener for `grafana.aks.springlaughing.dev`, and the certificate already covered the name (entry 15), so no new certificate was needed. The login is protected five ways:
+
+- HTTPS only; plain HTTP is redirected (the Gateway, entry 15).
+- A flood limit per IP address (the Gateway, entry 27).
+- A random 48-character password that exists only in Key Vault (entry 52).
+- After 5 failed logins, Grafana locks that user for 5 minutes (on by default).
+- No sign-up and no anonymous visitors (`grafana.ini`).
+
+Better, later: sign-in through Entra ID instead of a password (#17).
+
+**The dashboard "Restauranty: traffic and security".** It is generated as JSON and stored as a ConfigMap. Grafana's dashboard loader reads every ConfigMap in `monitoring` with the label `grafana_dashboard`, so the dashboard comes back after every rebuild. A change made in Grafana's editor is lost on the next restart: export the JSON and put it into the file. It has three rows.
+
+*Traffic*, from Prometheus:
+
+- **Requests per second**: how busy is each service?
+- **Server errors (5xx) per second**: is something broken?
+- **Latency p95**: is it slow? (entry 49)
+
+*Security*:
+
+- **Failed logins per minute** (Prometheus): is someone guessing passwords? These are the 401 answers from `auth` on `/api/auth/login`.
+- **Refused tokens per minute** (Prometheus): is someone sending no token, or a forged one? These are 401 answers on `no_route`.
+- **Gateway answers per minute, by status** (Loki): what do strangers get? 403 is the blocked user list, 429 is over a limit.
+- **Top 10 client IPs, last 15 minutes** (Loki): who sends the most, and how much of it is refused?
+- **Refused at the Gateway** (Loki): the newest refused requests, with IP, method, path and status.
+
+*Health*:
+
+- **MongoDB connected** (Prometheus): has a backend lost the database? (#28)
+- **Restarts in restauranty, last hour** (kube-state-metrics): are pods crashing?
+- **Series per scrape** (Prometheus): the F18 guard. Junk URLs must not move this number.
+- **Users, items, coupons** (Prometheus): counts from the database.
+
+**Why the Gateway's log matters most for security.** Requests refused at the Gateway (403, 429) never reach a backend, so the backends' metrics never see them. Only the Gateway's access log does. It writes one line per request, in NGINX's standard format:
+
+```
+<ip> - - [11/Nov/2026:13:29:11 +0000] "GET /api/items/junk-logcheck HTTP/2.0" 404 39 "-" "curl/7.81.0"
+```
+
+Loki stores the line as it is. The dashboard's queries cut it into fields when they run, with a pattern:
+
+```
+{namespace="gateway", container="nginx"} | pattern `<ip> - <_> [<_>] "<method> <path> <_>" <status> <_>`
+```
+
+This follows the same rule as the metric labels in entry 48: values that come from visitors, like the IP and the path, stay inside the log line and never become labels.
+
+**Surprise 1: two things wanted the name `grafana`.** The first install of kube-prometheus-stack stopped at once:
+
+```
+Error: Unable to continue with install: ServiceAccount "grafana" in namespace "monitoring" exists
+and cannot be imported into the current release: invalid ownership metadata; ...
+```
+
+The values file sets `fullnameOverride: grafana`, so the Service is simply called `grafana`. But the chart then names Grafana's ServiceAccount `grafana` too, and that name was taken by External Secrets' ServiceAccount from entry 52. Helm manages only objects it created itself, so it refused to take over a stranger. Nothing had been installed. The fix gives the chart's ServiceAccount its own name, `grafana-server`. Before the next try, every object the chart would create was compared with what already existed in `monitoring`: no other clash. The chart's own warning at the end ("get the password from the Secret `kps-grafana`") is generic text: that Secret does not exist, the password comes from `grafana-admin`.
+
+**Surprise 2: Helm said "deployed", but Grafana kept crashing.** The install ended with `STATUS: deployed`, yet Grafana's pod showed `2/3 Error` with 4 restarts. The three containers in that pod told the story:
+
+```
+grafana                 ready=true
+grafana-sc-datasources  ready=true
+grafana-sc-dashboard    ready=false  restarts=4  last=Error/1
+```
+
+The dashboard loader's log said `ForbiddenException: (403)`, and its settings said `NAMESPACE=ALL` and `RESOURCE=both`. kube-prometheus-stack tells the loader to search **every** namespace, for ConfigMaps **and** Secrets. But entry 51 had limited its rights to `monitoring`. Kubernetes refused, the loader exited, and Kubernetes restarted it again and again.
+
+The fix changes the loaders, not the rights: they now search only their own namespace (`searchNamespace: null`) and read only ConfigMaps (`resource: configmap`). Dashboards and data sources never come from Secrets, so this removes one more right they never needed. After `helm upgrade`, the five pods of kube-prometheus-stack ran:
+
+```
+NAME                                                    READY   STATUS    RESTARTS
+alertmanager-kps-kube-prometheus-stack-alertmanager-0   2/2     Running   0
+grafana-84b59ddddd-2plz2                                3/3     Running   0
+kps-kube-prometheus-stack-operator-587f6dbb8f-46gnc     1/1     Running   0
+kps-kube-state-metrics-6bf4956584-r8v86                 1/1     Running   0
+prometheus-kps-kube-prometheus-stack-prometheus-0       2/2     Running   0
+```
+
+**What the two surprises teach.** First, removing a right can break a default that relied on it. The 403 also proved that the narrowed rights are really enforced. Second, `STATUS: deployed` does not mean "healthy". `--wait` checks that each pod became ready once. A helper that starts failing after that is not caught. The READY column, `2/3`, showed it.
 
 ---
 
