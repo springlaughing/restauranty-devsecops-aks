@@ -4598,7 +4598,7 @@ Free space divided by size, for every disk (PersistentVolumeClaim) in `restauran
 
 **In one line:** six commands bring the secret, the routing and the rules to the cluster; one more sends a test alert straight to Alertmanager, to prove the route to Slack works before any real alert fires.
 
-**State:** steps 1 to 5 done, every one on the first try. Step 6, the test message, follows.
+**State:** all six steps done, every one on the first try. The test message reached Slack.
 
 **1. Alertmanager's webhook from Key Vault.**
 
@@ -4700,6 +4700,27 @@ kill %1
 A tunnel to Alertmanager (like the one to Prometheus in entry 54), then a hand-made alert sent to Alertmanager's API, the same way Prometheus sends real ones. It skips Prometheus and the rules on purpose: it tests only the second half of the path, routing and Slack. The alert carries `project: restauranty`, so it should take the route to Slack. The `labels` are what Alertmanager routes and groups by; the `annotations` fill the message.
 
 Success: about 30 seconds later (`group_wait`), `#restauranty-alerts` shows ":rotating_light: RestaurantyTest (warning)" with the text and the dashboard link. About 5 minutes later (`resolve_timeout`, since nobody sends this alert again), a second message with :white_check_mark: says it is over.
+
+```
+[1] 77905
+sent
+```
+
+**Result:** the message appeared in `#restauranty-alerts` after about 1 to 2 minutes (my estimate, watching the channel). So the whole second half of the path works: Alertmanager's route, the webhook read from the file, Key Vault through Alertmanager's own identity, and Slack.
+
+It took longer than the 30 seconds of `group_wait`. That setting is only the minimum: Alertmanager's own processing and Slack's delivery come on top, and Alertmanager had restarted a few minutes earlier.
+
+**What this means for a real attack, and for the demo.** A real alert passes through several waits, one after the other:
+
+| Stage | Time |
+| --- | --- |
+| The attacker passes 20 failed logins (the login limit allows about 15 in the first minute, then 10 per minute) | about 1 to 2 min |
+| Prometheus scrapes `auth` (every 30 s) and checks the rule (every 30 s) | up to 1 min |
+| The rule must stay true for its `for:` time | 1 min |
+| Alertmanager groups and sends; Slack delivers | about 0.5 to 2 min |
+| **From the first wrong password to the Slack message** | **about 3 to 5 min** |
+
+Each wait has a reason: the `for:` time and the threshold keep a single odd minute from raising an alarm, and grouping turns a burst of alerts into one message. For the demo: start the attack, show the dashboard (the 401 and 429 curves move within a minute) while explaining the waits, then show the message.
 
 ---
 
