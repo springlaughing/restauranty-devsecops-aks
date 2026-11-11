@@ -19,3 +19,15 @@ nginx:
     # NGINX sees the visitor's real IP. Per-IP rate limits (#10) and the
     # access logs (#14) need it. This is the chart default, kept on purpose.
     externalTrafficPolicy: Local
+  # The Gateway's access log (#14): one JSON line per request, read by Loki.
+  # NGINX's default ("combined") has no host name, so requests for the app and
+  # for Grafana could not be told apart. JSON also lets Loki read each field
+  # by name, and adds the time each request took ($request_time, in seconds)
+  # and the time the backend took ($upstream_response_time).
+  # escape json: characters from the visitor (path, user agent) are escaped,
+  # so a crafted path cannot break the line or fake extra fields.
+  config:
+    logging:
+      accessLog:
+        escape: json
+        format: '{"time":"$time_iso8601","ip":"$remote_addr","host":"$host","method":"$request_method","path":"$request_uri","status":$status,"bytes":$body_bytes_sent,"duration":$request_time,"upstream_duration":"$upstream_response_time","user_agent":"$http_user_agent"}'
