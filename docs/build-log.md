@@ -124,6 +124,8 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [60. Installing k6: a supply-chain check, on my own laptop](#60-installing-k6-a-supply-chain-check-on-my-own-laptop)
   - [61. The attack: password guessing with k6, and the alert in Slack](#61-the-attack-password-guessing-with-k6-and-the-alert-in-slack)
   - [62. Two more panels: the day-one leak, and the Gateway's own errors](#62-two-more-panels-the-day-one-leak-and-the-gateways-own-errors)
+  - [Why scan what is running, not only what is built](#why-scan-what-is-running-not-only-what-is-built)
+  - [63. Trivy Operator: the design, and three rights checked](#63-trivy-operator-the-design-and-three-rights-checked)
 - [What is next](#what-is-next)
 
 ---
@@ -4272,6 +4274,7 @@ The 95% mark lies between 2.5 and 5 ms, and Prometheus estimates 4.7 ms inside t
 4. **Applying and testing** them, with a test message to Slack (entry 59).
 5. **The attack:** installing k6 (entry 60), then password guessing against the real login, and the alert in Slack (entry 61).
 6. **Two more dashboard panels:** the day-one leak, and the Gateway's own server errors (entry 62).
+7. **Scanning what runs:** why scan running images too, and the Trivy Operator (entry 63).
 
 ### 56. Slack: a channel for the alerts, and its webhook in Key Vault
 
@@ -4952,6 +4955,117 @@ All three got 403, and the panel turned red:
 ![The day-one leak panel shows 3 in red; the log lists GET /api/auth/users, /USERS and /Users/123, each refused with 403 (IP addresses hidden)](evidence/15-day-one-leak-panel.png)
 
 The pattern caught every spelling. The IP table also shows a second address with 6 requests that were not mine: most likely another scanner from the internet (entry 54).
+
+### Why scan what is running, not only what is built
+
+**In one line:** the pipeline checks an image once, before it is deployed. But the list of known vulnerabilities grows every day, and not everything that runs comes from the pipeline. So mature teams scan twice: before the deploy, and while it runs. This is often called "shift left, shield right".
+
+**Four reasons:**
+
+1. **Vulnerabilities are found after the build.** An image never changes after it is built, but the list of known holes (CVEs) does, every day. An image that was clean on Monday can have a CRITICAL on Wednesday, without anyone touching it. The famous case is Log4Shell (December 2021): a hole in log4j, a Java library for writing logs, rated the highest severity. Overnight, images that had passed every scan for years were critical, and they were already running everywhere.
+2. **Not everything that runs went through the pipeline.** The pipeline scans the 4 images it builds. The cluster also runs MongoDB, NGINX, Grafana, Prometheus, Loki, cert-manager and more. They come from public registries through Helm charts, and the pipeline has never seen them. Our own example: MongoBleed (CVE-2025-14847), a hole in MongoDB that was exploited in the wild and fixed in version 8.0.17. Our cluster runs 8.0.34, so it is patched; but until now nothing in this project would have noticed if it were not.
+3. **What runs can drift from what was scanned.** Someone changes an image by hand (`kubectl edit`), an old pod keeps running, or a tag is moved to another image. The pipeline's result describes what was built, not what is running.
+4. **In an incident, the question is "where does this run?"** When the next Log4Shell is announced, a team has to answer within hours: are we affected, and where? During Log4Shell, many companies needed days just to find out where log4j was running. A scanner that watches the cluster keeps that list ready.
+
+**Three layers, three jobs:**
+
+| Layer | When | Covers | Does |
+| --- | --- | --- | --- |
+| Pipeline gate (Trivy, #13) | before a deploy | the 4 images we build | **blocks** the deploy on CRITICAL |
+| Nightly re-scan (#13) | every night | the 4 images, against new CVE data | **reports** in GitHub's Security tab (reason 1) |
+| Trivy Operator (this part) | whenever a pod starts | everything running in the scanned namespace | **reports** in the cluster, on the dashboard, with an alert (reasons 1 to 4) |
+
+A scanner of running images does not stop anything: it informs, and the fix is still a rebuild and a deploy through the pipeline. Stopping an unscanned or unsigned image from starting at all is the job of an "admission controller" such as Kyverno; not part of this project. In production, the cloud's own tool often does the scanning instead: on Azure, Microsoft Defender for Containers (paid per node). The Trivy Operator is the free, open-source way to the same result.
+
+### 63. Trivy Operator: the design, and three rights checked
+
+**In one line:** the Trivy Operator scans the images running in `restauranty` (our 4 and MongoDB) whenever a pod starts, and publishes the counts to Prometheus. It runs in its own namespace, and two settings were changed so that it needs no password for the registry and no right to read other workloads' Secrets.
+
+**How it works:**
+
+```
+a pod starts in restauranty (for example client after a deploy)
+  → the operator notices its image
+  → starts a short scan job in trivy-system (a pod that runs Trivy, then stops)
+  → writes the result as a Kubernetes object: a VulnerabilityReport, in restauranty
+  → publishes the counts per image and severity as Prometheus metrics
+  → the dashboard row "Vulnerabilities in running images", and an alert on CRITICAL
+```
+
+**The files:**
+
+- `k8s/monitoring/trivy-operator-values.yaml`: the settings (below).
+- `k8s/platform/namespaces.yaml`: a new namespace, `trivy-system`, with Pod Security "baseline".
+- `k8s/monitoring/alert-rules.yaml`: a tenth rule, `RestaurantyCriticalVulnerability`.
+- `scripts/build-dashboard.py` and `k8s/monitoring/dashboard.yaml`: a new row with three panels.
+- `scripts/setup-aks.sh`: installs the chart (aqua/trivy-operator 0.38.1) at the end of step 7.
+
+**Scope: `restauranty` only** (`targetNamespaces`). That is our 4 images and MongoDB: enough for Demo A (below) and for reason 2. Scanning `monitoring` and `gateway` as well would give a fuller picture, with many more findings in other people's images, and more scan time.
+
+**Only the vulnerability scanner.** The chart also brings scanners for configuration, RBAC, the nodes, compliance and secrets inside images. Each adds reports and rights that this project does not use yet, so they are off. The metrics carry counts per image and severity, not one label per CVE (`metricsVulnIdEnabled: false`): one label per CVE id would be the high-cardinality problem of F18 again (entry 48).
+
+**Decision 1: how the scanner reads a private image.** By default (`command: image`), Trivy downloads the image from the registry itself, so it needs its own login to our Azure Container Registry. There is none to give: the nodes pull images with the kubelet's identity, which has the role AcrPull, without any password (entry 12). With `command: filesystem`, the scan job starts the image as a normal container, which the **node** pulls with its existing right, and Trivy reads the container's files. No new password, no new Azure role.
+
+The price: to read every file in the image, the scan container runs as **root** (the chart's own instructions say so). Everything else stays locked:
+
+```yaml
+trivyOperator:
+  scanJobPodTemplateContainerSecurityContext:
+    runAsUser: 0                      # root, only to read every file
+    allowPrivilegeEscalation: false
+    privileged: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: [ALL]
+    seccompProfile:
+      type: RuntimeDefault
+```
+
+The scan jobs run in `trivy-system`, not in `restauranty` (which enforces "restricted" and would refuse a root container), and they stop after the scan. `trivy-system` enforces "baseline": root is allowed, host access and privileged pods are not.
+
+**Decision 2: no right to every Secret.** Rendering the chart first (as in entry 51) showed two broad rights:
+
+```
+ClusterRole trivy-operator (cluster-wide) ['secrets'] ['create', 'get', 'update']
+ClusterRole trivy-operator (cluster-wide) ['nodes/proxy'] ['get']
+```
+
+The first lets the operator read, create and change every Secret in the cluster: the JWT key, the database passwords, the HTTPS key. The second gives direct access to every node's kubelet, the agent that runs the containers. Both come from one setting, `accessGlobalSecretsAndServiceAccount`, which exists so the operator can read the image-pull Secrets of workloads in private registries. Decision 1 removed that need, so the setting is off. Rendered again:
+
+```
+Role trivy-operator trivy-system ['secrets'] ['create', 'get', 'delete', 'update']
+```
+
+Only a Role in its own namespace is left, for its own working data. No cluster-wide Secret right, no `nodes/proxy`.
+
+**Decision 3: the ServiceMonitor goes into `monitoring`.** The Prometheus Operator watches only the namespace `monitoring` (entry 51), so a ServiceMonitor in `trivy-system` would be ignored. The chart can place it elsewhere; it then points across to the operator's Service in `trivy-system`:
+
+```
+ServiceMonitor ns: monitoring nsSelector: {'matchNames': ['trivy-system']}
+```
+
+**The new dashboard row, "Vulnerabilities in running images":**
+
+- **CRITICAL in running images:** one number for the whole namespace. Green at 0, red from 1.
+- **Images with HIGH:** how many images have at least one HIGH. Orange from 1.
+- **Per image:** a table with CRITICAL, HIGH and MEDIUM per image.
+
+The queries use `max by (image_repository)`, because both copies of a backend run the same image and share one report.
+
+**The new alert:**
+
+```yaml
+- alert: RestaurantyCriticalVulnerability
+  expr: sum by (image_repository) (trivy_image_vulnerabilities{namespace="restauranty", severity="Critical"}) > 0
+  for: 15m
+  labels: { project: restauranty, severity: warning }
+```
+
+It should stay quiet today: the pipeline blocks CRITICAL before a deploy. It fires when a CRITICAL is published **after** a deploy, or turns up in an image the pipeline never builds. A warning, not critical: nothing is broken yet, but the image should be rebuilt soon. The 15 minutes keep it from flickering while an old report is replaced by a new one.
+
+**Expected numbers will differ from the pipeline's.** The pipeline's gate counts only CRITICAL, and ignores holes without a fix (`ignore-unfixed`, entry 37). The operator reports everything, fixed or not, at every severity. The dashboard shows CRITICAL and HIGH, with MEDIUM for information.
+
+**What this proves in the demo: Demo A.** The client's base image has 2 HIGH (in libxslt, entry 43). The operator should show them for `client`. Merging the Dependabot pull request #39 (a newer nginx base) and deploying should bring the client's row to 0, in GitHub's Security tab and on the dashboard.
 
 ---
 
