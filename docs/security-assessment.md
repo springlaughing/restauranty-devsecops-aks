@@ -88,7 +88,7 @@ All tests go through HAProxy, like real users would, unless a step says otherwis
 | I work for the company (the scenario here) | The report is confidential: it stays internal (a private repo or ticket system) until the fixes are live. |
 | I am an outsider who found a problem | Coordinated disclosure: report it privately to the company, the way their `SECURITY.md` describes; give them time to fix it (often 90 days); publish only after that. |
 
-How to report a problem in this project will be described in `SECURITY.md` (planned, issue #19).
+How to report a problem in this project is described in [SECURITY.md](../SECURITY.md).
 
 ---
 

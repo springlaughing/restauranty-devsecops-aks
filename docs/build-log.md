@@ -314,7 +314,7 @@ Per-service identities and their Key Vault roles come next (#8), in a `cluster-a
 
 ## Findings and their fixes
 
-The 20 findings from the [security assessment](security-assessment.md), and whether each is fixed yet. "Fixed" means the code change is done and retested locally; the AKS parts (Gateway block, rate limit, Key Vault) are marked where they belong.
+The 20 findings from the [security assessment](security-assessment.md), and their state after #15 (11 November). "Fixed" means the change is done and retested; "Contained" means a barrier at the Gateway keeps strangers away from it.
 
 | ID | Finding | Severity | State |
 | --- | --- | --- | --- |
@@ -323,23 +323,23 @@ The 20 findings from the [security assessment](security-assessment.md), and whet
 | F3 | Personal data in the server log | Medium | **Fixed** (entry 6) |
 | F4 | Login reveals which emails exist | Medium | **Fixed** (entry 5) |
 | F5 | Weak passwords accepted | Medium | Accepted (other fixes reduce the risk) |
-| F6 | No limit on login attempts | High | Planned on AKS: Gateway rate limit (#10) |
+| F6 | No limit on login attempts | High | **Contained** at the Gateway (entry 27), alert on failed logins (entry 61) |
 | F7 | Logout does not end the session | Medium | Accepted (6-hour token) |
 | F8 | Token errors answered with 500 | Medium | **Fixed** (entry 4) |
 | F9 | Public signing secret, one secret for all | High | **Fixed** (entry 3) |
-| F10 | Old `.env` files in git history | Low | Planned: gitleaks in the pipeline (#13) |
-| F11 | User list with hashes, no login | High | **Fixed** (entries 6, 7) |
+| F10 | Old `.env` files in git history | Low | **Fixed**: values never reused, gitleaks on every push (entry 38) |
+| F11 | User list with hashes, no login | High | **Fixed** (entries 6, 7) and **contained** (entry 27) |
 | F12 | All data readable without login | Medium | **Fixed** (entry 7) |
 | F13 | All data changeable without login | High | **Fixed** (entry 7) |
-| F14 | Any user deleted without login | High | **Fixed** (entries 6, 7) |
+| F14 | Any user deleted without login | High | **Fixed** (entries 6, 7) and **contained** (entry 27) |
 | F15 | Logged-in users get every hash | High | **Fixed** (entry 6) |
 | F16 | Any discount and any dates accepted | Medium | Accepted (closed to strangers by #9) |
 | F17 | Raw database errors in answers | Low | **Fixed** (entry 4) |
-| F18 | Metrics labelled with the full URL | Medium | Planned: label by route (#14) |
-| F19 | Outdated packages | Low | **Images done** (entry 11): 0 high/critical; pipeline scan still to add (#13) |
+| F18 | Metrics labelled with the full URL | Medium | **Fixed** (entry 48; assessment Retest 3) |
+| F19 | Outdated packages | Low | **Fixed**: images without development tools (entry 11), npm audit and Trivy in the pipeline (entry 37) |
 | F20 | Cloudinary keys in git history | High | Not reported (course repo, keys not used) |
 
-Fixed so far: 10 of 20, all the code findings. The rest are either planned for AKS or accepted on purpose.
+14 of 20 are fixed or contained. 5 are accepted on purpose, with the reason in [`SECURITY.md`](../SECURITY.md). F20 belongs to the original repository's owner. On 9 November, after the code fixes, the count was 10 of 20.
 
 ---
 
@@ -627,7 +627,7 @@ This is the same path as the vote app on AKS (staging first, then production). T
 
 The backup keeps only what cert-manager checks: the certificate, the private key, and cert-manager's labels and annotations. An expired copy does no harm: cert-manager just renews it.
 
-**Trade-off:** the private key now has a second home, in Key Vault. Only the operator can read it there (Secrets Officer role), it is encrypted, and every read is logged. If it ever leaks, the answer is the same as before: revoke the certificate and issue a new one.
+**Trade-off:** the private key now has a second home, in Key Vault. Only the operator can read it there (Secrets Officer role), and it is encrypted. Key Vault can log every read, but its diagnostic logs are not switched on yet (a known gap in `SECURITY.md`). If it ever leaks, the answer is the same as before: revoke the certificate and issue a new one.
 
 **This backup is a workaround.** It solves a problem that exists only because the cluster is destroyed and rebuilt every day to save money. In a normal setup the cluster stays up, the certificate stays in it, and cert-manager renews it in place about every 60 days. Nothing needs a backup. Better options, and why they are not used this week:
 
