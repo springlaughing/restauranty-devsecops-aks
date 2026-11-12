@@ -4,7 +4,7 @@ How work is planned, branched, committed and merged in this repository.
 
 ## Workflow
 
-1. Every change starts with an issue. The open issues are the plan.
+1. Every change starts with an issue (small `docs` and `chore` fixes may skip it, see below). The open issues are the plan.
 2. Create a branch from an up-to-date `main` (names below).
 3. Make small commits, one logical change each (format below).
 4. Test before opening a pull request (checklist below).
@@ -13,20 +13,16 @@ How work is planned, branched, committed and merged in this repository.
 
 `main` must always work.
 
-### Committing straight to `main`
+### Nothing goes straight to `main`
 
-Allowed only for changes that can't break anything that runs:
+`main` is protected: every change, documentation included, goes through a
+pull request, and the required checks (`all gates passed`, `secrets
+(gitleaks)`) must pass. The rule has no exception, not even for the
+repository admin.
 
-- `docs`: README, SECURITY.md, the threat model, this guide, results, typos
-- `chore`: `.gitignore`, renames of files nothing refers to
-
-Everything else goes through an issue and a pull request: app code,
-Dockerfiles, Terraform, manifests, the pipeline and test scripts. If you're
-unsure, it's not a direct commit.
-
-`main` is protected (pull requests required). Direct `docs` and `chore`
-commits work because the repository admin may bypass the rule; nobody else
-can.
+Small `docs` and `chore` changes (typos, `.gitignore`) may skip the issue,
+but not the pull request. App code, Dockerfiles, Terraform, manifests, the
+pipeline and test scripts always start with an issue.
 
 ## Issues and labels
 

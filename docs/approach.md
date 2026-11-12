@@ -89,9 +89,9 @@ No single wall is trusted. The same threat is met by several independent measure
 | --- | --- |
 | **Prevent** | Fix the code; block the route at the Gateway; network rules; secrets in a vault |
 | **Detect** | Metrics, logs in Loki, alerts on attacks |
-| **Respond** | A runbook to rotate a leaked secret |
+| **Respond** | Every secret in one place (Key Vault), so a leaked one can be replaced without touching the code; a tested runbook is planned (#16) |
 
-The worst finding, the leaked user list, is met four ways: the route is blocked at the edge, the code no longer returns the hash, the pipeline tests for it, and an alert watches for it.
+The worst finding, the leaked user list, is met four ways: the route is blocked at the edge, the code no longer returns the hash, the pipeline tests for it after every deploy, and the dashboard counts anyone who still asks for it. An alert from the logs is the next step.
 
 ## How we work
 
@@ -110,7 +110,7 @@ The exact rules (branch names, commit format, the test checklist before a pull r
 The project is honest about its limits. Some things are left for a reason and named as such:
 
 - The app signs its own tokens. Production would use an identity provider (Entra External ID, Keycloak) that holds the keys and rotates them.
-- The monitoring stack has no login between its parts; network rules are the only control. Production would authenticate every hop.
+- The monitoring tools have no login between their parts, and their namespace has no network rules yet. Production would add both.
 - Some demo shortcuts (every new user is an admin) are documented, not fixed.
 
 Naming these is part of the approach: a real assessment says what it did **and** what it did not do, and why.

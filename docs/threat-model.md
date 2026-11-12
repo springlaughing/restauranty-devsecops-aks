@@ -167,7 +167,7 @@ Each story has five parts: **how the attacker gets there**, **a real case** (che
 
 **What I built.** Four layers. The pipeline's gate: Trivy blocks a CRITICAL before a deploy, `npm audit` checks the libraries (entry 37). Dependabot proposes updates (entry 44). A nightly scan re-checks what runs against that day's list of vulnerabilities (entry 43). And the Trivy Operator scans the images **running** in the cluster, whenever a pod starts, also images the pipeline never builds (entries 63 to 65).
 
-**How it is proven.** An old base image was stopped by the gate, and the merge was blocked (entry 45). The Trivy Operator found a CRITICAL in MongoDB's image, which nothing had scanned before, and the alert reached Slack (entry 64).
+**How it is proven.** A test pull request added a package with a known CRITICAL: npm audit missed it, Trivy stopped it, and the merge was blocked (entry 45). An image two years out of support passed the same gate, because it had no CRITICAL. The Trivy Operator found a CRITICAL in MongoDB's image, which nothing had scanned before, and the alert reached Slack (entry 64).
 
 **What it does not stop.** Holes nobody knows yet ("zero-days"). Software a scanner cannot see: a program copied into an image without a package manager may be missing from its parts list (entry 45). And the time between "reported" and "fixed": a scanner only informs; someone still has to rebuild and deploy. MongoDB's CRITICAL is known and documented, and waits for a newer image.
 
