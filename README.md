@@ -2,7 +2,7 @@
 
 **What this is.** My final project for the Ironhack DevOps bootcamp. I received Restauranty, a restaurant back office (a React website and three Node.js services with MongoDB). I tested its security first, then ran it on Azure Kubernetes Service (AKS) with a security layer around it: fixes in the code, rules at the edge and inside the cluster, secrets in a vault, security checks in the pipeline, and alerts.
 
-**Live:** https://restauranty.aks.springlaughing.dev (only while the cluster runs; it is stopped at night).
+**Live:** https://restauranty.aks.springlaughing.dev (only while the cluster runs; might not be available after bootcamp finishes).
 
 ---
 
@@ -10,7 +10,7 @@
 
 **Day one.** One request, with no login, returned every user's password hash and personal data. From those hashes, 4 of 5 test passwords were recovered in 3.4 seconds. The server also signed login tokens with `MySecret1!`, a value published in the repository, so anyone could make their own admin token.
 
-**What I did about it,** in the order of a real incident:
+**What I did about it,** in the order I built it:
 
 1. **Test.** A security assessment along the OWASP Web Security Testing Guide found 20 problems, 8 of them high.
 2. **Close.** Fix the code, so the problems are gone at their source.
@@ -35,9 +35,23 @@ The same test, on the app as I received it and on the system today.
 | A hacked pod connects to MongoDB | Open | Blocked by network rules |
 | `items` asks Key Vault for `auth`'s signing key | Every service had the one shared secret | 403: each service reads only its own secrets |
 | A pull request adds a package with a CRITICAL vulnerability | No pipeline | The build fails and the merge is blocked |
-| Someone guesses passwords for 5 minutes | Nobody notices | Slack alert: "35 failed logins in 5 minutes" |
+| 200 made-up URLs sent to the API | 201 new series in Prometheus: the monitoring can be flooded | 0 new series |
+| 481 password guesses in 4 minutes (k6) | Nobody notices | 436 refused at the Gateway; Slack alert: "35 failed logins in 5 minutes" |
 
 The test outputs are in [docs/evidence](docs/evidence): for example [10-edge-before.txt](docs/evidence/10-edge-before.txt) and [10-edge-after.txt](docs/evidence/10-edge-after.txt) for the Gateway, [11-network-before.txt](docs/evidence/11-network-before.txt) and [11-network-after.txt](docs/evidence/11-network-after.txt) for the network rules.
+
+---
+
+## What it does not protect against yet
+
+The system is safer, not safe. The biggest open points, all on the plan:
+
+- **The cluster login is an admin certificate,** on my laptop and in the pipeline's deploy job. Whoever copies it controls the cluster, around every network rule.
+- **Images are not signed,** so the cluster cannot check that an image was built by the pipeline.
+- **Some attacks show only on the dashboard,** with no alert, and nobody is on call at night.
+- **Every new account is an admin** (a demo shortcut), so anyone who signs up can manage the restaurant through the normal app.
+
+The full list, with what is accepted on purpose and why, is in [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -65,6 +79,8 @@ Each one stands on its own. Start with the approach if you want the idea, with t
 **How code gets there.** A merge to `main` starts **GitHub Actions**. It logs in to Azure with a short-lived token (OIDC), so no Azure password is stored in GitHub. It builds the four images, runs the security checks, pushes the images to Azure Container Registry, and deploys after I approve.
 
 **How problems are seen.** **Prometheus** collects the services' metrics, **Loki** collects the logs, **Grafana** shows both, and **Alertmanager** sends alerts to Slack. **Trivy Operator** scans the images that are really running.
+
+Grafana's login through Entra ID ("SSO" in the picture) is planned (#17), not built yet: today Grafana has one local admin account.
 
 The red dashed lines are **trust boundaries**: places where data crosses from a side I trust less to a side I trust more. The [threat model](docs/threat-model.md#part-2-the-system-and-its-trust-boundaries) explains each one.
 
@@ -191,7 +207,7 @@ Open **http://localhost/**.
 
 This is how my deployment is set up; the names are mine and would change for another account. Each step is explained in the [build log](docs/build-log.md), Parts 2 to 5.
 
-**You need:** an AKS cluster with Workload Identity and Cilium network rules switched on, `kubectl` pointing at it, and the tools `az`, `kubectl`, `helm`, `terraform`, `openssl` and `jq`.
+**You need:** an AKS cluster with the OIDC issuer, Workload Identity and Cilium network rules switched on, `kubectl` pointing at it, and the tools `az`, `kubectl`, `helm`, `terraform`, `openssl` and `jq`.
 
 ```bash
 # Once: Key Vault, container registry, static IP, DNS records, the pipeline's identities
