@@ -49,7 +49,7 @@ The system is safer, not safe. The biggest open points, all on the plan:
 - **The cluster login is an admin certificate,** on my laptop and in the pipeline's deploy job. Whoever copies it controls the cluster, around every network rule.
 - **Images are not signed,** so the cluster cannot check that an image was built by the pipeline.
 - **Some attacks show only on the dashboard,** with no alert, and nobody is on call at night.
-- **Every new account is an admin** (a demo shortcut), so anyone who signs up can manage the restaurant through the normal app.
+- **No real roles for the app's users yet.** Every new account is an admin, a demo shortcut. The user management routes are closed at the Gateway for everyone, but anyone who signs up can change the menu, coupons and orders. The better answer is an identity provider (Entra External ID or Keycloak) for logins and roles, instead of the app's own passwords.
 
 The full list, with what is accepted on purpose and why, is in [SECURITY.md](SECURITY.md).
 
