@@ -157,6 +157,55 @@ spec:
             project: restauranty
             severity: warning
           annotations:
-            summary: "{{ $labels.image_repository }}: CRITICAL vulnerabilities in a running image: {{ $value | printf \"%.0f\" }}"
-            description: "Rebuild the image with fixed packages and deploy it. Details: kubectl get vulnerabilityreports -n restauranty -o wide"
+            summary: "{{ $labels.image_repository }}: the running image has {{ $value | printf \"%.0f\" }} CRITICAL"
+            # "resolved" can also mean that the scanner stopped: its metrics go
+            # with it, and this rule has nothing left to count (entry 66).
+            description: "Fix: a newer image with the fixed versions, or accept it in writing in SECURITY.md. Details: kubectl get vulnerabilityreports -n restauranty -o wide. If this says resolved, check Scan coverage: a stopped scanner also ends this alert."
+
+        # Watching the watcher (build log, entry 66). The rule above counts
+        # findings IN the reports, so an image that was never scanned looks
+        # clean. This one compares two lists: what runs (kube-state-metrics)
+        # and what has a report (Trivy Operator). A clean report still gives
+        # a series with the value 0, so "clean" and "never scanned" differ.
+        # Matched by the workload's own name (ReplicaSet auth-f57685f75 =
+        # resource_name auth-f57685f75); MongoDB is a StatefulSet.
+        # 30 minutes: one scan takes about 30 seconds, but the operator works
+        # in rounds of 2 with about 5 minutes between them (entry 64), so
+        # after a cluster start the last of 5 images can wait about 15.
+        - alert: RestaurantyImageNotScanned
+          expr: |
+            (
+              (kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0)
+              unless on (namespace, replicaset)
+                label_replace(trivy_image_vulnerabilities{namespace="restauranty", resource_kind="ReplicaSet", severity="Critical"},
+                              "replicaset", "$1", "resource_name", "(.*)")
+            )
+            or
+            (
+              (kube_statefulset_status_replicas_ready{namespace="restauranty"} > 0)
+              unless on (namespace, statefulset)
+                label_replace(trivy_image_vulnerabilities{namespace="restauranty", resource_kind="StatefulSet", severity="Critical"},
+                              "statefulset", "$1", "resource_name", "(.*)")
+            )
+          for: 30m
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "{{ $labels.replicaset }}{{ $labels.statefulset }}: running for 30 minutes without a vulnerability scan"
+            description: "Nothing is known about this image. Check that the scanner runs, and its jobs: kubectl get pods,jobs,events -n trivy-system"
+
+        # A scan job failed, for example because its node had no CPU left
+        # (entry 66). Faster than the rule above, and it names the cause.
+        # No "for": failed jobs are deleted after 10 minutes (scanJobTTL), so
+        # the alert also ends then. "Resolved" here means "cleaned up", not
+        # "fixed": the rule above still fires if the image stays unscanned.
+        - alert: RestaurantyScanJobFailed
+          expr: kube_job_status_failed{namespace="trivy-system"} > 0
+          labels:
+            project: restauranty
+            severity: warning
+          annotations:
+            summary: "A vulnerability scan failed: {{ $labels.job_name }}"
+            description: "The job is deleted after 10 minutes. The reason stays in the events: kubectl get events -n trivy-system --sort-by=.lastTimestamp"
 

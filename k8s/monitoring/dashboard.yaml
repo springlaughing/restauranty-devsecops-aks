@@ -893,8 +893,8 @@ data:
         },
         {
           "type": "stat",
-          "title": "CRITICAL in running images",
-          "description": "Known vulnerabilities rated CRITICAL, in all images running in restauranty. The pipeline blocks CRITICAL before a deploy; this catches CVEs published after it, and images the pipeline never builds (MongoDB). Alert: RestaurantyCriticalVulnerability.",
+          "title": "Scan coverage",
+          "description": "How many of the running images have a scan result. Below 100%, some images run without a scan. 0% means the scanner sends nothing at all. After a deploy, a new image needs a few minutes. Alerts: RestaurantyImageNotScanned, RestaurantyScanJobFailed.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -905,15 +905,17 @@ data:
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
+                    "color": "red",
                     "value": null
                   },
                   {
-                    "color": "red",
-                    "value": 1
+                    "color": "green",
+                    "value": 100
                   }
                 ]
-              }
+              },
+              "unit": "percent",
+              "decimals": 0
             },
             "overrides": []
           },
@@ -932,26 +934,28 @@ data:
           "targets": [
             {
               "refId": "A",
-              "expr": "sum(max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"Critical\"})) or vector(0)",
+              "expr": "100 * (((count(kube_replicaset_status_ready_replicas{namespace=\"restauranty\"} > 0) or vector(0)) + (count(kube_statefulset_status_replicas_ready{namespace=\"restauranty\"} > 0) or vector(0))) - (count(((kube_replicaset_status_ready_replicas{namespace=\"restauranty\"} > 0) unless on (namespace, replicaset) label_replace(trivy_image_vulnerabilities{namespace=\"restauranty\", resource_kind=\"ReplicaSet\", severity=\"Critical\"}, \"replicaset\", \"$1\", \"resource_name\", \"(.*)\")) or ((kube_statefulset_status_replicas_ready{namespace=\"restauranty\"} > 0) unless on (namespace, statefulset) label_replace(trivy_image_vulnerabilities{namespace=\"restauranty\", resource_kind=\"StatefulSet\", severity=\"Critical\"}, \"statefulset\", \"$1\", \"resource_name\", \"(.*)\"))) or vector(0))) / ((count(kube_replicaset_status_ready_replicas{namespace=\"restauranty\"} > 0) or vector(0)) + (count(kube_statefulset_status_replicas_ready{namespace=\"restauranty\"} > 0) or vector(0)))",
               "legendFormat": "",
               "datasource": {
                 "type": "prometheus",
                 "uid": "prometheus"
-              }
+              },
+              "instant": true,
+              "range": false
             }
           ],
           "id": 21,
           "gridPos": {
             "x": 0,
             "y": 50,
-            "w": 6,
+            "w": 4,
             "h": 8
           }
         },
         {
           "type": "stat",
-          "title": "Images with HIGH",
-          "description": "How many running images have at least one HIGH vulnerability.",
+          "title": "CRITICAL in running images",
+          "description": "CRITICAL vulnerabilities in the images that run now. The pipeline already blocks CRITICAL before a deploy. This panel catches the rest: new CVEs found after a deploy, and MongoDB, which the pipeline does not build. Alert: RestaurantyCriticalVulnerability.\n\n\"no scan data\": the scanner sends nothing right now. That does not mean clean. It means unknown. Check Scan coverage.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -962,15 +966,20 @@ data:
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green",
+                    "color": "text",
                     "value": null
                   },
                   {
-                    "color": "orange",
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
                     "value": 1
                   }
                 ]
-              }
+              },
+              "noValue": "no scan data"
             },
             "overrides": []
           },
@@ -989,26 +998,92 @@ data:
           "targets": [
             {
               "refId": "A",
-              "expr": "count(max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"High\"}) > 0) or vector(0)",
+              "expr": "sum(max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"Critical\"}))",
               "legendFormat": "",
               "datasource": {
                 "type": "prometheus",
                 "uid": "prometheus"
-              }
+              },
+              "instant": true,
+              "range": false
             }
           ],
           "id": 22,
           "gridPos": {
-            "x": 6,
+            "x": 4,
             "y": 50,
-            "w": 6,
+            "w": 4,
+            "h": 8
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Images with HIGH",
+          "description": "How many running images have at least one HIGH vulnerability.\n\n\"no scan data\": the scanner sends nothing right now. That does not mean clean. It means unknown. Check Scan coverage.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "orange",
+                    "value": 1
+                  }
+                ]
+              },
+              "noValue": "no scan data"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "count(max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"High\"}) > 0) or (0 * count(max by (image_repository) (trivy_image_vulnerabilities{namespace=\"restauranty\", severity=\"High\"})))",
+              "legendFormat": "",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "instant": true,
+              "range": false
+            }
+          ],
+          "id": 23,
+          "gridPos": {
+            "x": 8,
+            "y": 50,
+            "w": 4,
             "h": 8
           }
         },
         {
           "type": "table",
           "title": "Per image",
-          "description": "Known vulnerabilities per running image, by severity. Details per CVE: kubectl describe vulnerabilityreport -n restauranty <name>",
+          "description": "Known vulnerabilities per running image, by severity. Details per CVE: kubectl describe vulnerabilityreport -n restauranty <name>\n\nEmpty: the scanner sends nothing right now, see Scan coverage.",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1086,11 +1161,228 @@ data:
           "options": {
             "showHeader": true
           },
-          "id": 23,
+          "id": 24,
           "gridPos": {
             "x": 12,
             "y": 50,
             "w": 12,
+            "h": 8
+          }
+        },
+        {
+          "type": "row",
+          "title": "Scanner health (scans at each deploy and every 24 h)",
+          "collapsed": false,
+          "id": 25,
+          "gridPos": {
+            "x": 0,
+            "y": 58,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Scanner",
+          "description": "On: the scanner is switched on and ready to start scans. It does not mean a scan is running right now: each scan is a short job of about 30 seconds. This comes from Kubernetes, so it still answers when the scanner is gone.\n\nHow often scans run: each new image within a few minutes of starting (2 scans at a time, about 5 minutes between rounds), and every image again every 24 hours, with that day's list of known vulnerabilities.\n\nWhen each image was last scanned (the AGE column): kubectl get vulnerabilityreports -n restauranty\n\nThe settings (SCANNER_REPORT_TTL = rescan interval, CONCURRENT_SCAN_JOBS_LIMIT = scans at a time): kubectl get configmap trivy-operator-config -n trivy-system -o yaml | grep -iE \"ttl|concurrent\"",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "noValue": "unknown",
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "off",
+                      "color": "red",
+                      "index": 0
+                    }
+                  }
+                },
+                {
+                  "type": "range",
+                  "options": {
+                    "from": 1,
+                    "to": 100,
+                    "result": {
+                      "text": "on",
+                      "color": "green",
+                      "index": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "kube_deployment_status_replicas_available{namespace=\"trivy-system\", deployment=\"trivy-operator\"}",
+              "legendFormat": "",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "instant": true,
+              "range": false
+            }
+          ],
+          "id": 26,
+          "gridPos": {
+            "x": 0,
+            "y": 59,
+            "w": 4,
+            "h": 8
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Failed scan jobs",
+          "description": "Scan jobs that failed, for example because their node had no CPU left. Failed jobs are deleted after 10 minutes, so this counts recent failures only. The reason: kubectl get events -n trivy-system --sort-by=.lastTimestamp",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum(kube_job_status_failed{namespace=\"trivy-system\"}) or vector(0)",
+              "legendFormat": "",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "instant": true,
+              "range": false
+            }
+          ],
+          "id": 27,
+          "gridPos": {
+            "x": 4,
+            "y": 59,
+            "w": 4,
+            "h": 8
+          }
+        },
+        {
+          "type": "table",
+          "title": "Running without a scan",
+          "description": "Workloads that run now and have no scan result: the same list as the alert RestaurantyImageNotScanned, which fires when one stays here for 30 minutes. Empty is good.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "instant": true,
+              "format": "table",
+              "expr": "label_replace(label_replace(((kube_replicaset_status_ready_replicas{namespace=\"restauranty\"} > 0) unless on (namespace, replicaset) label_replace(trivy_image_vulnerabilities{namespace=\"restauranty\", resource_kind=\"ReplicaSet\", severity=\"Critical\"}, \"replicaset\", \"$1\", \"resource_name\", \"(.*)\")) or ((kube_statefulset_status_replicas_ready{namespace=\"restauranty\"} > 0) unless on (namespace, statefulset) label_replace(trivy_image_vulnerabilities{namespace=\"restauranty\", resource_kind=\"StatefulSet\", severity=\"Critical\"}, \"statefulset\", \"$1\", \"resource_name\", \"(.*)\")), \"workload\", \"$1\", \"replicaset\", \"(.+)\"), \"workload\", \"$1\", \"statefulset\", \"(.+)\")"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "indexByName": {
+                  "workload": 0
+                },
+                "excludeByName": {
+                  "Time": true,
+                  "Value": true,
+                  "__name__": true,
+                  "container": true,
+                  "endpoint": true,
+                  "instance": true,
+                  "job": true,
+                  "namespace": true,
+                  "pod": true,
+                  "service": true,
+                  "replicaset": true,
+                  "statefulset": true,
+                  "uid": true
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "none: every running image has a scan result"
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true
+          },
+          "id": 28,
+          "gridPos": {
+            "x": 8,
+            "y": 59,
+            "w": 16,
             "h": 8
           }
         }
