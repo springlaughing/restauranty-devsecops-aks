@@ -1,0 +1,192 @@
+# Issue #61, build log entry 66: watching the watcher.
+# Two alerts and a dashboard panel that notice when a scan does NOT happen.
+# 14 November 2026. Prometheus reached with
+#   kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090:9090
+
+## 1. The two assumptions behind the rule
+
+# a) A clean report still gives a series (value 0): "clean" and "never
+#    scanned" can be told apart.
+$ curl -s http://localhost:9090/api/v1/query --data-urlencode \
+    'query=trivy_image_vulnerabilities{namespace="restauranty",severity="Critical"}' \
+    | jq -r '.data.result[] | [.metric.resource_kind, .metric.resource_name, .value[1]] | @tsv'
+ReplicaSet      auth-f57685f75  0
+ReplicaSet      discounts-76fb7d475d    0
+StatefulSet     mongodb 1
+ReplicaSet      client-5f9948d66d       0
+ReplicaSet      items-d8ddcd9d8 0
+
+# b) The names match what kube-state-metrics knows as running.
+$ curl -s http://localhost:9090/api/v1/query --data-urlencode \
+    'query=kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0' \
+    | jq -r '.data.result[] | [.metric.replicaset, .value[1]] | @tsv'
+discounts-76fb7d475d    2
+auth-f57685f75  2
+items-d8ddcd9d8 2
+client-5f9948d66d       2
+
+## 2. Logic test: auth's report hidden inside the query, on purpose
+
+$ curl -s http://localhost:9090/api/v1/query --data-urlencode 'query=(kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0)
+    unless on (namespace, replicaset) label_replace(trivy_image_vulnerabilities{namespace="restauranty",
+    resource_kind="ReplicaSet", severity="Critical", resource_name!="auth-f57685f75"},
+    "replicaset", "$1", "resource_name", "(.*)")' | jq -r '.data.result[].metric.replicaset'
+auth-f57685f75
+
+## 3. The dashboard panel's query (Scan coverage), with all five scanned
+
+$ curl -s http://localhost:9090/api/v1/query --data-urlencode "query@/tmp/coverage.promql" | jq -r '.data.result[].value[1]'
+100
+
+## 4. Applied
+
+$ kubectl apply --dry-run=server -f k8s/monitoring/alert-rules.yaml -f k8s/monitoring/dashboard.yaml
+prometheusrule.monitoring.coreos.com/restauranty configured (server dry run)
+configmap/restauranty-dashboard configured (server dry run)
+$ kubectl apply -f k8s/monitoring/alert-rules.yaml -f k8s/monitoring/dashboard.yaml
+prometheusrule.monitoring.coreos.com/restauranty configured
+configmap/restauranty-dashboard configured
+
+# Loaded after a bit more than a minute (operator -> ConfigMap -> volume sync -> reload):
+$ curl -s http://localhost:9090/api/v1/rules | jq -r '.data.groups[] | select(.name=="restauranty-images") | .rules[] | "\(.name): \(.state)"'
+RestaurantyCriticalVulnerability: firing
+RestaurantyImageNotScanned: inactive
+RestaurantyScanJobFailed: inactive
+
+## 5. Experiment B: a scan job fails (k8s/proof/scan-job-fails.yaml)
+
+$ kubectl apply -f k8s/proof/scan-job-fails.yaml
+job.batch/proof-scan-job-fails created
+$ sleep 20; kubectl get job proof-scan-job-fails -n trivy-system; date
+NAME                   STATUS   COMPLETIONS   DURATION   AGE
+proof-scan-job-fails   Failed   0/1           20s        20s
+Sat Nov 14 18:45:01 CET 2026
+
+# Slack, 18:45 (screenshot 61-scan-job-failed-slack.png):
+#   RestaurantyScanJobFailed (warning)
+#   A vulnerability scan failed: proof-scan-job-fails
+
+# Before the delete (port-forward restarted: they time out after a while):
+$ curl -s http://localhost:9090/api/v1/rules | jq -r '.data.groups[] | select(.name=="restauranty-images") | .rules[] | "\(.name): \(.state)"'
+RestaurantyCriticalVulnerability: firing
+RestaurantyImageNotScanned: inactive
+RestaurantyScanJobFailed: firing
+
+# RestaurantyImageNotScanned stays inactive: the test job only looks like a
+# failed scan; every running image still has its report. The two rules are
+# independent.
+
+$ kubectl delete -f k8s/proof/scan-job-fails.yaml; date
+job.batch "proof-scan-job-fails" deleted from trivy-system namespace
+Sat Nov 14 18:52:23 CET 2026
+
+# Slack, 18:55 (screenshot 61-scan-job-failed-resolved-slack.png):
+#   RestaurantyScanJobFailed (warning), resolved
+# About 3 minutes after the delete: Alertmanager sends news about a group at
+# most every 5 minutes (group_interval), the first message after 30 seconds
+# (group_wait).
+
+## 6. Experiment A: the scanner is stopped
+
+$ kubectl scale deployment trivy-operator -n trivy-system --replicas=0; date
+deployment.apps/trivy-operator scaled
+Sat Nov 14 19:11:58 CET 2026
+
+# Slack, 19:17 (screenshot 61-false-all-clear-slack.png):
+#   RestaurantyCriticalVulnerability (warning), resolved
+#   library/mongo: CRITICAL vulnerabilities in a running image: 1
+# A false all-clear: the CRITICAL is still in the image; only the scanner
+# stopped, and its metrics went with it.
+
+# Grafana, 19:20 (screenshot 61-scan-coverage-0.png):
+#   Scan coverage                 0%   red
+#   CRITICAL in running images    0    GREEN   <- a second false all-clear
+#   Images with HIGH              0    GREEN   <- the same
+#   Per image                     No rows
+# The two number panels end with "or vector(0)", which turns "no data at
+# all" into a green 0. Only the new panel, and the table (no fallback),
+# show that nothing is known.
+
+$ curl -s http://localhost:9090/api/v1/rules | jq -r '.data.groups[] | select(.name=="restauranty-images") | .rules[] | "\(.name): \(.state)"'
+RestaurantyCriticalVulnerability: inactive
+RestaurantyImageNotScanned: pending
+RestaurantyScanJobFailed: inactive
+
+# Dashboard fix while the scanner was still stopped (screenshot
+# 61-no-scan-data.png): the two number panels now ask for the value at this
+# moment (instant), have no "or vector(0)", and show a neutral "no scan data":
+#   Scan coverage 0% (red) | CRITICAL "no scan data" | HIGH "no scan data" | Per image: No rows
+
+# Slack, 19:44 (screenshot 61-image-not-scanned-slack.png):
+#   RestaurantyImageNotScanned (warning), one alert per workload:
+#   mongodb, auth-f57685f75, client-5f9948d66d, discounts-76fb7d475d, items-d8ddcd9d8
+#   32 minutes after the stop: the series ended within about a minute, then
+#   "for: 30m", then Alertmanager's group_wait.
+#   The message printed the shared description 5 times, all on one line:
+#   the Slack template's fault, fixed in kube-prometheus-stack-values.yaml.
+
+# The scanner started again (kubectl scale ... --replicas=1).
+# Grafana, 19:48 (screenshot 61-scan-coverage-back.png):
+#   Scan coverage 100% | CRITICAL 1 (red) | HIGH 1 (orange) | Per image: 5 rows
+# Slack, 19:49 (screenshot 61-image-not-scanned-resolved-slack.png):
+#   RestaurantyImageNotScanned (warning), resolved
+
+## 7. New alert texts and the Slack template, applied
+
+$ kubectl apply -f k8s/monitoring/alert-rules.yaml -f k8s/monitoring/dashboard.yaml
+$ helm upgrade kps prometheus-community/kube-prometheus-stack --version 93.2.0 --namespace monitoring \
+    -f k8s/monitoring/kube-prometheus-stack-values.yaml --wait --timeout=10m
+
+# Template test: two alerts in one group, sent straight to Alertmanager,
+# ending by themselves after 2 minutes.
+$ kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-alertmanager 9093:9093 >/dev/null &
+$ now=$(date -u +%FT%TZ); end=$(date -u -d '+2 min' +%FT%TZ)
+$ curl -s -XPOST localhost:9093/api/v2/alerts -H 'Content-Type: application/json' -d '[
+   {"labels":{"alertname":"RestaurantyTemplateTest","project":"restauranty","severity":"warning","workload":"one"},
+    "annotations":{"summary":"one: test line","description":"Shared description, printed once."},"startsAt":"'$now'","endsAt":"'$end'"},
+   {"labels":{"alertname":"RestaurantyTemplateTest","project":"restauranty","severity":"warning","workload":"two"},
+    "annotations":{"summary":"two: test line","description":"Shared description, printed once."},"startsAt":"'$now'","endsAt":"'$end'"}]'
+
+# Slack, 19:54 (screenshot 61-template-fixed-slack.png):
+#   RestaurantyTemplateTest (warning)
+#   • one: test line
+#   • two: test line
+#   Shared description, printed once.
+#   Open the dashboard
+
+# Slack, 19:59 (screenshot 61-critical-back-slack.png):
+#   RestaurantyTemplateTest (warning), resolved, same format
+#   RestaurantyCriticalVulnerability (warning), firing again, with the new texts:
+#   • library/mongo: the running image has 1 CRITICAL
+#   Fix: a newer image with the fixed versions, or accept it in writing in
+#   SECURITY.md. Details: kubectl get vulnerabilityreports -n restauranty -o wide.
+#   If this says resolved, check Scan coverage: a stopped scanner also ends this alert.
+# Back about 15 minutes (for: 15m) after the scanner returned: the CRITICAL
+# alert was "resolved" within 5 minutes of the stop, but needs 15 to return.
+
+## 8. The final dashboard, and a short stop (about 6 minutes)
+
+# Healthy (screenshot 61-dashboard-healthy.png):
+#   Vulnerabilities: Scan coverage 100% | CRITICAL 1 | Images with HIGH 1 | Per image: 5 rows
+#   Scanner health (scans at each deploy and every 24 h):
+#     Scanner on | Failed scan jobs 0 | Running without a scan: none
+
+$ kubectl scale deployment trivy-operator -n trivy-system --replicas=0
+
+# Less than 5 minutes later (screenshot 61-dashboard-just-stopped.png):
+#   Scanner OFF, but row 1 still 100% | 1 | 1 | 5 rows, and "none" unscanned.
+#   Prometheus keeps using the last value for up to 5 minutes (lookback),
+#   so everything built on the scanner's own data still looks healthy.
+#   Only "Scanner", which comes from Kubernetes, already knows.
+
+# After about 6 minutes (screenshots 61-dashboard-scanner-off.png and
+# 61-dashboard-scanner-off-scrolled.png):
+#   Scan coverage 0% | CRITICAL "no scan data" | HIGH "no scan data" | Per image: No rows
+#   Scanner off | Failed scan jobs 0 | Running without a scan:
+#     discounts-76fb7d475d, auth-f57685f75, items-d8ddcd9d8, client-5f9948d66d, mongodb
+
+$ kubectl scale deployment trivy-operator -n trivy-system --replicas=1
+
+# Back, 20:39 (screenshot 61-dashboard-back.png):
+#   Scan coverage 100% | CRITICAL 1 | HIGH 1 | Per image: 5 rows
+#   Scanner on | Failed scan jobs 0 | Running without a scan: none
