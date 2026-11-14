@@ -1,0 +1,38 @@
+# Proof for the alert RestaurantyScanJobFailed (build log, entry 66): a job
+# in trivy-system that fails on purpose, standing in for a real scan job that
+# could not run (on 14 November: no CPU left on its node).
+#
+# It does nothing but exit with an error. Same image and same "restricted"
+# security settings as the attacker pods, so it starts on any node.
+#
+#   kubectl apply -f k8s/proof/scan-job-fails.yaml
+#   kubectl get job proof-scan-job-fails -n trivy-system      # STATUS Failed
+#   (the alert reaches Slack within about a minute)
+#   kubectl delete -f k8s/proof/scan-job-fails.yaml           # the alert resolves
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: proof-scan-job-fails
+  namespace: trivy-system
+spec:
+  backoffLimit: 0               # one try, like a real scan job
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fail
+          image: curlimages/curl:8.11.1
+          command: ["sh", "-c", "echo 'a scan that could not run'; exit 1"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

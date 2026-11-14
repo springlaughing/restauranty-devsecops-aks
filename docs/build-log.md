@@ -130,6 +130,7 @@ So "entry 11" (the Dockerfiles) and "issue #11" (the network rules) are differen
   - [64. The scanner checked: three corrections in one evening](#64-the-scanner-checked-three-corrections-in-one-evening)
   - [Can a security tool be trusted?](#can-a-security-tool-be-trusted)
   - [65. Pinning the scanner: both Trivy images by digest](#65-pinning-the-scanner-both-trivy-images-by-digest)
+  - [66. After the talk: three images without a scan, and watching the scanner](#66-after-the-talk-three-images-without-a-scan-and-watching-the-scanner)
 - [What is next](#what-is-next)
 
 ---
@@ -5397,6 +5398,624 @@ IfNotPresent
 Asked by label, got a hash. `IfNotPresent` means a node pulls only when it does not have the image yet. Every scan job is a new pod, on any of the 3 nodes, and the operator moves to another node after a restart or `az aks stop` and `start`. Each time a node without the image needs it, Kubernetes asks the registry "what does `0.76.1` point to **now**?" and runs whatever it gets. If the label had been changed, today's hash would not stop that, because nothing asks for it.
 
 So the pin changes nothing about **what** runs today; it guarantees that it stays that way, for every future pull. `image` in a pod's spec is what was asked for, perhaps only a label; `imageID` in its status is what was really pulled, always as a digest. Comparing the two is the quickest way to check what a cluster really runs.
+
+### 66. After the talk: three images without a scan, and watching the scanner
+
+**In one line:** on 14 November, three of the five running images had no vulnerability report. Their scans had failed without a sound, because one node was full. Found through the events, fixed by moving pods. Then the gap behind it was closed (#61): two alerts and a dashboard section now notice when a scan does **not** happen, and two experiments proved them. The experiments also found two more false all-clears, one in Slack and one on the dashboard, and both were fixed. The last part reads one finding line by line: what it means, who can fix it, and how teams handle findings in general.
+
+**State:** the cause found and fixed by hand. Two alerts, a "Scan coverage" panel and a "Scanner health" row applied; both experiments run and passed; the dashboard and the Slack messages fixed after what the experiments showed. Not built: a heartbeat for the alerting itself, and removing the cause (spread rule, separate node pool).
+
+**Evidence:** `docs/evidence/61-silent-scan-failure.txt` (what happened), `docs/evidence/61-watch-the-scanner.txt` (the checks and experiments), and the `61-*.png` screenshots.
+
+#### What was seen
+
+The cluster was started again after the talk, for screenshots. The report list had only two rows:
+
+```
+$ kubectl get vulnerabilityreports -n restauranty -o wide
+NAME                                REPOSITORY      TAG        ...   CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+replicaset-items-5fc46c76cb-items   items           d991343…   ...   0          0      0        0     1
+statefulset-mongodb-mongodb         library/mongo   8.0.34     ...   1          11     60       6     83
+```
+
+`auth`, `client` and `discounts` were missing. Entry 64 (correction 2) once saw missing reports that were only slow: the operator scans in rounds, 2 at a time. This time, waiting did not help. The scan jobs showed one success and one failure:
+
+```
+$ kubectl get jobs -n trivy-system
+NAME                                  STATUS     COMPLETIONS   DURATION   AGE
+scan-vulnerabilityreport-6bc8b847d9   Complete   1/1           33s        9m26s
+scan-vulnerabilityreport-6dbf59fc95   Failed     0/1           9m27s      9m27s
+```
+
+A minute later, the failed job was gone: finished scan jobs are deleted after 10 minutes (`scanJobTTL: 10m` in `k8s/monitoring/trivy-operator-values.yaml`), and its logs with it. Two new scans, started by restarting the operator, failed again, one of them after **1 second**.
+
+#### Finding the cause: the events
+
+A job and its pod disappear, but Kubernetes keeps its **events** for about an hour. They gave the answer:
+
+```
+$ kubectl get events -n trivy-system --sort-by=.lastTimestamp
+Warning   OutOfcpu               pod/scan-vulnerabilityreport-77b799b5df-tc2p9   Node didn't have enough resource: cpu, requested: 100, used: 1874, capacity: 1900
+Warning   BackoffLimitExceeded   job/scan-vulnerabilityreport-77b799b5df         Job has reached the specified backoff limit
+```
+
+One node was full. Each node can hand out 1900m of CPU (a D2s_v3 has 2 cores, minus what AKS keeps for itself). The pods on it had already reserved 1874m; the scan asked for 100m more. The three nodes side by side:
+
+```
+$ kubectl describe nodes | grep -E "^Name:|^  cpu "
+Name:               aks-system-11635412-vmss00000c
+  cpu                1874m (98%)   9994m (526%)
+Name:               aks-system-11635412-vmss00000d
+  cpu                460m (24%)    540m (28%)
+Name:               aks-system-11635412-vmss00000e
+  cpu                310m (16%)    540m (28%)
+```
+
+The first column is **requests**: CPU that pods have reserved, not CPU that is busy. A node can be idle and still refuse new pods. The second column is **limits**: how much pods may use when the CPU happens to be free. Limits far above 100% are normal; requests near 100% are what block new pods.
+
+**Why the scan could not go to another node.** In `rootfs` mode (entry 64), the operator **pins** each scan pod to the node where the scanned app pod runs, because that node already has the image. A pinned pod skips the scheduler. Normally the scheduler would pick a node with room; a pinned pod can only go to its one node. The node checks, finds no room, and refuses at once. The job allows no retry, so it fails after one second.
+
+**What filled the node.** A list of every pod on `0c` with its CPU request, added up:
+
+- AKS's own system pods, about 1000m. Both copies of `coredns`, both copies of `metrics-server`, and both copies of the Workload Identity webhook were all on this one node.
+- The monitoring stack, about 480m (Prometheus 200m, Loki 100m, the rest smaller).
+- The app: one `items` pod, 50m.
+
+So the app was not the problem. After `az aks start`, the nodes come back one by one, and the first one takes most pods. The scheduler only decides when a pod is created; it never moves running pods later. Entry 47 saw the same packing for the app pods; here it hit AKS's own pods too. It also means two copies of `coredns` protected nothing: a problem on that one node would have stopped DNS for the whole cluster.
+
+#### The fix, by hand
+
+1. **Restart the app,** so new pods are placed again: `kubectl rollout restart deployment -n restauranty`. With `0c` full, the scheduler had to put almost every new pod on `0d` or `0e`. `0c` stayed at 99%, since its load was not the app.
+2. **Move the one pod still on `0c`:** `kubectl delete pod items-d8ddcd9d8-zdzf9 -n restauranty`. Kubernetes made a new one, on `0d`.
+3. **Restart the operator:** `kubectl rollout restart deployment trivy-operator -n trivy-system`. The operator acts on changes; after a failed scan it waits before trying again. A restart makes it look at every workload from the start.
+
+Every scan then passed on the first try, in 24 to 29 seconds each, the same time as the one that had worked before:
+
+```
+$ kubectl get vulnerabilityreports -n restauranty -o wide
+NAME                                        REPOSITORY      ...   CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+replicaset-auth-f57685f75-auth              auth            ...   0          0      0        0     1
+replicaset-client-5f9948d66d-client         client          ...   0          0      0        0     0
+replicaset-discounts-76fb7d475d-discounts   discounts       ...   0          0      0        0     1
+replicaset-items-d8ddcd9d8-items            items           ...   0          0      0        0     1
+statefulset-mongodb-mongodb                 library/mongo   ...   1          11     60       6     83
+```
+
+#### The real gap: an image that was never scanned looks clean
+
+The alert `RestaurantyCriticalVulnerability` (entry 63) counts CRITICAL findings **in the reports**. No report means nothing to count, so the alert stays quiet. The dashboard shows the same silence. If a new image with a CRITICAL had landed on the full node, nobody would have heard about it. The scanner did not fail loudly; it simply did not happen.
+
+**How teams close a gap like this: watching the watcher.**
+
+- **Every check gets a second check that it ran.** A scanner, a backup or an alert rule that stops working is silent by nature, so teams measure that it **did** run, not only what it found.
+- **Scan coverage is a number with a target.** "Share of running images scanned in the last 24 hours" is tracked like uptime. Anything under 100% is treated as an incident of its own. Microsoft Defender for Containers, for example, lists running images that have no scan result.
+- **A heartbeat for the alerting itself.** kube-prometheus-stack already ships an alert called `Watchdog` that fires all the time, on purpose. In production it is sent to an outside "dead man's switch" service, which raises the alarm when the heartbeat **stops**, meaning Prometheus or Alertmanager is down. In this project it goes nowhere: only alerts with `project=restauranty` reach Slack (entry 57). Not built here: it needs an account at an outside service, and it would raise the alarm every time the cluster is stopped at night.
+
+#### What was built: three checks that notice a missing scan (#61)
+
+Built in two rounds. The first round is described here: two rules, one panel, one proof job. The experiments then showed what was still wrong, and the second round fixed it ([What the experiments found](#what-the-experiments-found-and-the-fixes), below). The files, at the end:
+
+- `k8s/monitoring/alert-rules.yaml`: two new rules, `RestaurantyImageNotScanned` and `RestaurantyScanJobFailed`, and new texts for `RestaurantyCriticalVulnerability`.
+- `scripts/build-dashboard.py`: a "Scan coverage" panel, two honest number panels next to it, and a new "Scanner health" row. The script writes `k8s/monitoring/dashboard.yaml`, which is generated and never edited by hand.
+- `k8s/monitoring/kube-prometheus-stack-values.yaml`: the Slack message template.
+- `k8s/proof/scan-job-fails.yaml`: a job that fails on purpose, to prove the second rule.
+- This entry and the two evidence files.
+
+The two rules answer two different questions. The first asks about the **outcome**: does any image run without a scan result, whatever the reason? It is slow on purpose, and it catches everything: a failed job, a stopped operator, a wrong setting. The second asks about **one known cause**: did a scan job fail? It is fast, and it names the cause. Teams usually run both kinds side by side.
+
+##### Two assumptions, checked before writing a rule
+
+A rule built on a wrong assumption fails the same way the scanner did: silently. Two questions had to be answered first.
+
+**1. Does a clean image still have a series?** The rule compares "what runs" with "what has a scan result". If an image with zero findings had no series at all, "clean" and "never scanned" would look the same, and the rule would fire for every clean image. The answer is yes: a clean report gives a series with the value `0`.
+
+```
+$ curl -s http://localhost:9090/api/v1/query --data-urlencode \
+    'query=trivy_image_vulnerabilities{namespace="restauranty",severity="Critical"}' \
+    | jq -r '.data.result[] | [.metric.resource_kind, .metric.resource_name, .value[1]] | @tsv'
+ReplicaSet      auth-f57685f75  0
+ReplicaSet      discounts-76fb7d475d    0
+StatefulSet     mongodb 1
+ReplicaSet      client-5f9948d66d       0
+ReplicaSet      items-d8ddcd9d8 0
+```
+
+**2. Do the names match?** kube-state-metrics, which turns the state of Kubernetes objects into metrics, must name the running ReplicaSets exactly as the Trivy Operator names the scanned ones. They match (`auth-f57685f75` on both sides):
+
+```
+$ curl -s http://localhost:9090/api/v1/query --data-urlencode \
+    'query=kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0' \
+    | jq -r '.data.result[] | [.metric.replicaset, .value[1]] | @tsv'
+discounts-76fb7d475d    2
+auth-f57685f75  2
+items-d8ddcd9d8 2
+client-5f9948d66d       2
+```
+
+The first answer also showed that MongoDB is a StatefulSet, not a ReplicaSet, so the rule needs a second half for it.
+
+##### Rule 1: `RestaurantyImageNotScanned`
+
+```yaml
+- alert: RestaurantyImageNotScanned
+  expr: |
+    (
+      (kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0)
+      unless on (namespace, replicaset)
+        label_replace(trivy_image_vulnerabilities{namespace="restauranty", resource_kind="ReplicaSet", severity="Critical"},
+                      "replicaset", "$1", "resource_name", "(.*)")
+    )
+    or
+    (
+      (kube_statefulset_status_replicas_ready{namespace="restauranty"} > 0)
+      unless on (namespace, statefulset)
+        label_replace(trivy_image_vulnerabilities{namespace="restauranty", resource_kind="StatefulSet", severity="Critical"},
+                      "statefulset", "$1", "resource_name", "(.*)")
+    )
+  for: 30m
+  labels:
+    project: restauranty
+    severity: warning
+  annotations:
+    summary: "{{ $labels.replicaset }}{{ $labels.statefulset }}: running for 30 minutes without a vulnerability scan"
+    description: "Nothing is known about this image. Check that the scanner runs, and its jobs: kubectl get pods,jobs,events -n trivy-system"
+```
+
+Line by line:
+
+- **`kube_replicaset_status_ready_replicas{namespace="restauranty"}`** comes from kube-state-metrics: one series per ReplicaSet, its value the number of ready pods. This is the list of **what runs**.
+- **`> 0`** keeps only ReplicaSets with pods. After every rollout, Kubernetes keeps the old ReplicaSets with 0 pods, so it can roll back. Those run nothing and need no scan.
+- **`unless on (namespace, replicaset)`** is a set difference: "everything on the left that has **no** partner on the right". A partner is a series with the same `namespace` and `replicaset` labels; every other label is ignored for the match.
+- **`trivy_image_vulnerabilities{...}`** is the list of **what has a scan result**. The Trivy Operator gives one series per scanned workload and severity.
+- **`resource_kind="ReplicaSet"`** keeps the ReplicaSets' results on this side; MongoDB's StatefulSet is handled in the second half.
+- **`severity="Critical"`** keeps exactly one series per scanned workload, instead of five (one per severity). The value does not matter here, only that the series exists. A clean report has the value `0` and still counts as scanned (assumption 1).
+- **`label_replace(..., "replicaset", "$1", "resource_name", "(.*)")`** makes the two sides comparable. Trivy calls the workload's name `resource_name`; kube-state-metrics calls it `replicaset`. `label_replace` copies the value into a new label: the new label's name (`replicaset`), what to write (`$1`, the first group of the pattern), which label to read (`resource_name`), and the pattern (`(.*)`, the whole value). After that, both sides have a `replicaset` label to match on.
+- **`or`** adds the second half: the same comparison for StatefulSets (`kube_statefulset_status_replicas_ready`, label `statefulset`), so MongoDB is covered too.
+- **The brackets** make the reading order clear. PromQL would read it the same way without them (`unless` binds more strongly than `or`), but a reader should not need to know that.
+- **`for: 30m`.** One scan takes about 30 seconds, but the operator works in rounds of 2, with about 5 minutes between rounds (entry 64, correction 2). After a cluster start, the last of 5 images can wait about 15 minutes. 30 minutes leaves room for that, so a normal deploy never fires the alert.
+- **`project: restauranty`** sends the alert to Slack; Alertmanager routes only this label there (entry 57).
+- **`severity: warning`**, not `critical`: nothing is broken yet, but someone should look the same day.
+- **`summary`** names the workload. Each alert has either a `replicaset` or a `statefulset` label, never both, so printing both one after the other shows exactly the one that exists.
+- **`description`** says what the alert means, and the next step: is the scanner running (`pods`), did its jobs fail (`jobs`), and why (`events`, which outlive the jobs, as this morning showed). The first version only checked jobs, but in experiment A the cause was a stopped scanner, which `jobs` alone would not show.
+
+##### Rule 2: `RestaurantyScanJobFailed`
+
+```yaml
+- alert: RestaurantyScanJobFailed
+  expr: kube_job_status_failed{namespace="trivy-system"} > 0
+  labels:
+    project: restauranty
+    severity: warning
+  annotations:
+    summary: "A vulnerability scan failed: {{ $labels.job_name }}"
+    description: "The job is deleted after 10 minutes. The reason stays in the events: kubectl get events -n trivy-system --sort-by=.lastTimestamp"
+```
+
+Line by line:
+
+- **`kube_job_status_failed`** comes from kube-state-metrics: one series per Job, its value the number of failed pods of that Job.
+- **`{namespace="trivy-system"}`**: only the scan jobs live in this namespace.
+- **`> 0`**: a successful job also has this series, with the value 0. Only failed jobs pass.
+- **No `for:`.** The alert fires at the next check, within about a minute. A waiting time would be risky here: failed jobs are deleted after 10 minutes (`scanJobTTL`), and the series disappears with the job.
+- **"Resolved" means "cleaned up", not "fixed".** When the job is deleted, the alert ends, and Slack says "resolved", even if the next scan fails the same way. That is acceptable only because rule 1 still watches the outcome: if the image stays unscanned, rule 1 fires.
+- **`{{ $labels.job_name }}`**: kube-state-metrics puts the Job's name in `job_name`, because Prometheus already uses the label `job` for the target it scraped.
+- **`description`** warns that the job will be gone in 10 minutes, and points to the events, the one place where the reason survives the job.
+
+##### The panel: "Scan coverage"
+
+In `scripts/build-dashboard.py`, three pieces of code. First, the two lists, written once and used by the panel:
+
+```python
+RUNNING = ('(count(kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0) or vector(0))'
+           ' + (count(kube_statefulset_status_replicas_ready{namespace="restauranty"} > 0) or vector(0))')
+NOT_SCANNED = (
+    '((kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0)'
+    ' unless on (namespace, replicaset) label_replace('
+    + TRIVY % ', resource_kind="ReplicaSet", severity="Critical"'
+    + ', "replicaset", "$1", "resource_name", "(.*)"))'
+    ' or ((kube_statefulset_status_replicas_ready{namespace="restauranty"} > 0)'
+    ' unless on (namespace, statefulset) label_replace('
+    + TRIVY % ', resource_kind="StatefulSet", severity="Critical"'
+    + ', "statefulset", "$1", "resource_name", "(.*)"))'
+)
+```
+
+- **`RUNNING`** counts the workloads that run: ReplicaSets with pods, plus StatefulSets with pods. Today that is 5.
+- **`or vector(0)`** is needed after each `count()`. A `count()` over nothing gives **no result**, not 0, and "no result" plus a number is again no result. `vector(0)` is the fallback that turns "nothing" into 0.
+- **`NOT_SCANNED`** is the exact expression of rule 1. It is built from the same `TRIVY` template as the panels next to it. A comment in the script points to the rule: if the two used different logic, the dashboard could say 100% while the alert fires. A change to one must change the other.
+
+Then the panel itself, as the first panel of the Trivy row:
+
+```python
+board.add(number(
+    "Scan coverage",
+    "How many of the running images have a scan result. Below 100%, some images run without a scan. "
+    "0% means the scanner sends nothing at all. After a deploy, a new image needs a few minutes. "
+    "Alerts: RestaurantyImageNotScanned, RestaurantyScanJobFailed.",
+    [(f'100 * (({RUNNING}) - (count({NOT_SCANNED}) or vector(0))) / ({RUNNING})', "")],
+    colors(("red", None), ("green", 100)), unit="percent", instant=True), 4, 8)
+```
+
+- **`100 * (running - not scanned) / running`** turns the comparison into one number: the share of running workloads that have a scan result. Five scanned out of five is 100%.
+- **Why a percentage, and not "5 of 5".** A stat panel colors one number well. Two numbers side by side are hard to color by their **difference**. With one number, one rule is enough.
+- **`colors(("red", None), ("green", 100))`**: red from the lowest value up, green from 100. Anything under 100% is red, matching "coverage is a number with a target" above.
+- **`unit="percent"`** shows `100%` instead of `100`.
+- **`instant=True`** asks for the value at this moment. Why that matters came out in experiment A ([below](#what-the-experiments-found-and-the-fixes)).
+- **The description** (the text behind the ⓘ) says what the number means, what 0% means, and names both alerts, so whoever sees red knows where to look next.
+- **`4, 8`**: 4 of the 24 grid columns, 8 rows high. The row was full (6 + 6 + 12 columns), so the two number panels next to it shrank from 6 to 4 columns each; the table keeps its 12.
+
+Last, the helper `number()` got four optional settings over both rounds:
+
+```python
+def number(title, description, queries, steps=None, unit=None, no_value=None, instant=False, mappings=None):
+    ...
+    defaults = {"thresholds": {"mode": "absolute", "steps": steps}}
+    if unit:
+        defaults.update({"unit": unit, "decimals": 0})
+    if no_value is not None:
+        defaults["noValue"] = no_value
+    if mappings:
+        defaults["mappings"] = mappings
+    return {
+        ...
+        "targets": [{"refId": chr(65 + i), "expr": q, "legendFormat": legend, "datasource": PROMETHEUS,
+                     **({"instant": True, "range": False} if instant else {})}
+                    for i, (q, legend) in enumerate(queries)],
+    }
+```
+
+- **All four default to "off"** (`None` or `False`), so every other panel on the dashboard stays exactly as it was.
+- **`unit`, with `decimals: 0`**, shows `100%`, not `100` or `100.0%`.
+- **`no_value`** is the text Grafana shows when the query finds nothing, instead of its default "No data".
+- **`instant`** adds `"instant": True, "range": False` to each query: one value, now, instead of a line over the whole time range. The `**` unpacks the small dictionary into the query's settings, or adds nothing when `instant` is off.
+- **`mappings`** turns a number into a word, for example 0 into "off".
+
+After each change, `python3 scripts/build-dashboard.py` wrote `k8s/monitoring/dashboard.yaml` again (28 panels at the end).
+
+##### The proof job: `k8s/proof/scan-job-fails.yaml`
+
+A real scan job cannot be made to fail on demand without filling a node again. This job stands in for one:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: proof-scan-job-fails
+  namespace: trivy-system
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fail
+          image: curlimages/curl:8.11.1
+          command: ["sh", "-c", "echo 'a scan that could not run'; exit 1"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+```
+
+- **`kind: Job` in `namespace: trivy-system`**: the rule watches failed Jobs in exactly this namespace, where the real scan jobs run.
+- **`backoffLimit: 0`**: one try, no retries, like a real scan job. The job is marked failed after the first error.
+- **`restartPolicy: Never`**: the container is not restarted in place; a failure ends the pod.
+- **`automountServiceAccountToken: false`**: the pod gets no Kubernetes token. It needs none, so it gets none.
+- **The `securityContext` lines** (not root, user 100, the default seccomp filter, no privilege escalation, all capabilities dropped) are the "restricted" settings every app pod in this project follows. The test pod is no exception.
+- **`image: curlimages/curl:8.11.1`**: the same image and version as the attacker pods (`k8s/proof/attacker-pods.yaml`). It is small, has a shell, and is probably already on the nodes.
+- **`command: [..., "exit 1"]`**: print one line, then end with an error code. Exit code 1 is what makes Kubernetes count the pod as failed.
+- **`requests: { cpu: 10m ... }`**: very small, so the test does not depend on free room on a node.
+
+##### The checks so far
+
+**A logic test before going live.** The rule's left half, with auth's scan result hidden **inside the query** on purpose (`resource_name!="auth-f57685f75"`). Nothing in the cluster changes; the query only pretends that auth was never scanned. It names exactly auth:
+
+```
+$ curl -s http://localhost:9090/api/v1/query --data-urlencode 'query=(kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0)
+    unless on (namespace, replicaset) label_replace(trivy_image_vulnerabilities{namespace="restauranty",
+    resource_kind="ReplicaSet", severity="Critical", resource_name!="auth-f57685f75"},
+    "replicaset", "$1", "resource_name", "(.*)")' | jq -r '.data.result[].metric.replicaset'
+auth-f57685f75
+```
+
+**The panel's query, taken from the generated dashboard,** gave `100` with all five scanned.
+
+**Applied,** first as a dry run. `--dry-run=server` sends the objects to the cluster, which checks them against the real schema and its webhooks and then throws them away:
+
+```
+$ kubectl apply --dry-run=server -f k8s/monitoring/alert-rules.yaml -f k8s/monitoring/dashboard.yaml
+prometheusrule.monitoring.coreos.com/restauranty configured (server dry run)
+configmap/restauranty-dashboard configured (server dry run)
+$ kubectl apply -f k8s/monitoring/alert-rules.yaml -f k8s/monitoring/dashboard.yaml
+prometheusrule.monitoring.coreos.com/restauranty configured
+configmap/restauranty-dashboard configured
+```
+
+**Loaded after a bit more than a minute.** A check 60 seconds after the apply did not list the new rules yet; a second one did. The change travels in steps: the Prometheus Operator writes the rule into a ConfigMap, the node copies the ConfigMap into the Prometheus pod (about once a minute), and a small helper container tells Prometheus to reload. "Not there yet" is not "broken".
+
+```
+$ curl -s http://localhost:9090/api/v1/rules | jq -r '.data.groups[] | select(.name=="restauranty-images") | .rules[] | "\(.name): \(.state)"'
+RestaurantyCriticalVulnerability: firing
+RestaurantyImageNotScanned: inactive
+RestaurantyScanJobFailed: inactive
+```
+
+The right starting point: nothing is unscanned, no job has failed. The first line also answers a question from the talk day: no Slack message about MongoDB's CRITICAL had been seen that day. The rule **is** firing; Alertmanager repeats a firing alert only every 4 hours (`repeat_interval: 4h`, entry 57), so Slack was most likely read between two messages.
+
+##### Experiment B: a scan job fails
+
+**Hypothesis:** a failed job in `trivy-system` reaches Slack within about a minute, and "resolved" follows when the job is deleted.
+
+**The run:**
+
+```
+$ kubectl apply -f k8s/proof/scan-job-fails.yaml
+job.batch/proof-scan-job-fails created
+$ sleep 20; kubectl get job proof-scan-job-fails -n trivy-system; date
+NAME                   STATUS   COMPLETIONS   DURATION   AGE
+proof-scan-job-fails   Failed   0/1           20s        20s
+Sat Nov 14 18:45:01 CET 2026
+```
+
+![Slack, 18:45: RestaurantyScanJobFailed (warning), "A vulnerability scan failed: proof-scan-job-fails", with the command for the events](evidence/61-scan-job-failed-slack.png)
+
+The job was created at about 18:44:40 and failed at once; Slack had the alert at 18:45. Before the job was deleted, the rule states were:
+
+```
+RestaurantyCriticalVulnerability: firing
+RestaurantyImageNotScanned: inactive
+RestaurantyScanJobFailed: firing
+```
+
+`RestaurantyImageNotScanned` stayed quiet, as it should: the test job only looks like a failed scan, and every running image still had its report. The two rules do not depend on each other.
+
+The job was deleted at 18:52:23; "resolved" came at 18:55:
+
+![Slack, 18:55: RestaurantyScanJobFailed (warning), resolved](evidence/61-scan-job-failed-resolved-slack.png)
+
+**Result: as predicted.** About a minute to the alert: Prometheus checks every 30 seconds, and Alertmanager waits 30 seconds (`group_wait`) for related alerts before it sends. About 3 minutes to "resolved": news about an alert that was already sent goes out at most every 5 minutes (`group_interval`), so a quick on and off does not flood the channel.
+
+##### Experiment A: the scanner is stopped
+
+**Hypothesis**, written down before the run: `kubectl scale deployment trivy-operator -n trivy-system --replicas=0` stops the operator. The scan results are the operator's own metrics, so they all disappear with it:
+
+- after about 5 minutes, "Scan coverage" falls to 0% (red);
+- at the same time, `RestaurantyCriticalVulnerability` for MongoDB says **"resolved"** in Slack. That is a false all-clear: the CRITICAL is still there, only nobody is looking any more. Without the new rule, a stopped scanner would send a **reassuring** message;
+- after about 35 minutes (5 for the series to go stale, 30 for `for:`), `RestaurantyImageNotScanned` fires and names all five workloads;
+- after `--replicas=1`, everything returns within a few minutes: coverage 100%, the CRITICAL alert fires again, and "not scanned" is resolved.
+
+**The run.** Before the stop, the Trivy row read 100%, 1, 1:
+
+![Grafana before the stop: Scan coverage 100% (green), CRITICAL in running images 1, Images with HIGH 1, and the per-image table](evidence/61-scan-coverage-100.png)
+
+The scanner was stopped at 19:11:58. What followed:
+
+| Time | Where | What | Predicted? |
+|---|---|---|---|
+| 19:17 | Slack | `RestaurantyCriticalVulnerability` **resolved**, for MongoDB | yes: the false all-clear |
+| 19:20 | Grafana | Scan coverage **0%** (red), but CRITICAL **0** and HIGH **0** in **green** | the 0% yes; the green zeros **no** |
+| 19:44 | Slack | `RestaurantyImageNotScanned` fires, for all five workloads | yes, 32 minutes after the stop |
+| about 19:46 | terminal | the scanner started again (`--replicas=1`) | |
+| 19:48 | Grafana | 100%, CRITICAL 1, HIGH 1, the table full again | yes |
+| 19:49 | Slack | `RestaurantyImageNotScanned` **resolved** | yes |
+| 19:59 | Slack | `RestaurantyCriticalVulnerability` **fires again** | yes, 15 minutes (`for: 15m`) after the return |
+
+![Slack, 19:17: RestaurantyCriticalVulnerability resolved for library/mongo, while the CRITICAL is still in the image](evidence/61-false-all-clear-slack.png)
+
+![Slack, 19:44: RestaurantyImageNotScanned for mongodb, auth, client, discounts and items, in the first message format](evidence/61-image-not-scanned-slack.png)
+
+**Result: the new rule works, and the timing matches.** The scanner's numbers stayed usable for 5 minutes after the stop: Prometheus keeps using a value for up to 5 minutes after it last received it, in case the next reading is only late (its "lookback" window). Then they were gone, and both the false all-clear and the 0% appeared. 30 minutes of `for:` later, plus Alertmanager's 30 seconds, came the alert: 32 minutes in all.
+
+**An asymmetry worth knowing.** The CRITICAL alert said "resolved" 5 minutes after the stop, but needed 15 minutes (`for: 15m`) to fire again after the return. A scanner outage of half an hour therefore costs about 50 minutes without that alert.
+
+**Not predicted:** three more problems, on the dashboard and in Slack. They are the next section.
+
+##### What the experiments found, and the fixes
+
+Each problem below hides the same truth, that **nothing is known right now**, in a different place.
+
+**1. A false all-clear in Slack.** `RestaurantyCriticalVulnerability` said "resolved" while MongoDB's CRITICAL was still in the image. The rule cannot tell "the CRITICAL is gone" from "the scanner is gone": both leave nothing to count. The rule stays as it is, since `RestaurantyImageNotScanned` now covers the second case. Its texts were changed instead, so a reader of "resolved" is warned:
+
+```yaml
+summary: "{{ $labels.image_repository }}: the running image has {{ $value | printf \"%.0f\" }} CRITICAL"
+description: "Fix: a newer image with the fixed versions, or accept it in writing in SECURITY.md. Details: kubectl get vulnerabilityreports -n restauranty -o wide. If this says resolved, check Scan coverage: a stopped scanner also ends this alert."
+```
+
+- **`summary`**: the old text, "CRITICAL vulnerabilities in a running image: 1", put the number last. The new one reads as a sentence and works for any number.
+- **"Fix: …"**: the old text said "rebuild the image with fixed packages". That is impossible for MongoDB, an image this project does not build. The two real options are a newer image or a written acceptance.
+- **"If this says resolved, check Scan coverage"**: the lesson of 19:17, in the message itself.
+
+**2. A false green 0 on the dashboard.** At 19:20 the dashboard looked like this:
+
+![Grafana, 19:20, scanner stopped: Scan coverage 0% in red, but CRITICAL 0 and Images with HIGH 0 in green, and the per-image table empty](evidence/61-scan-coverage-0.png)
+
+Only the new panel was honest. The two number panels next to it showed a green 0, "no vulnerabilities", while nothing at all was known. The cause was the end of their queries: `or vector(0)`. That fallback turns "no data" into 0. It was meant for "scans exist, and none found anything", but a clean image already has a series with the value 0 (assumption 1 above), so that case never needed a fallback. The only case the fallback ever handled was "no data at all", and there it lied. The table next to them had no fallback and showed "No rows", which is honest. The new code:
+
+```python
+board.add(number(
+    "CRITICAL in running images",
+    ...,
+    [('sum(max by (image_repository) (' + TRIVY % ', severity="Critical"' + '))', "")],
+    colors(("text", None), ("green", 0), ("red", 1)), no_value="no scan data", instant=True), 4, 8)
+board.add(number(
+    "Images with HIGH",
+    ...,
+    [('count(max by (image_repository) (' + TRIVY % ', severity="High"' + ') > 0)'
+      ' or (0 * count(max by (image_repository) (' + TRIVY % ', severity="High"' + ')))', "")],
+    colors(("text", None), ("green", 0), ("orange", 1)), no_value="no scan data", instant=True), 4, 8)
+```
+
+- **CRITICAL: no fallback.** With scans, the sum is a real number, 0 or more. Without scans, it is empty, and the panel shows its `no_value`.
+- **HIGH: a smarter fallback.** `count(x > 0)` is empty in **two** cases: no image has a HIGH (should show 0), or there are no scans (should show "no scan data"). `or (0 * count(x))` separates them: with scans, `count(x)` is a number and 0 times it is 0; without scans it is empty too, and the panel shows its `no_value`.
+- **`no_value="no scan data"`**: words for the empty case, instead of Grafana's "No data".
+- **`colors(("text", None), ("green", 0), …)`**: Grafana paints the `no_value` text with the **lowest** color of the scale. With green at the bottom, "no scan data" came out green, which still looks like "all good". A neutral color below 0, then green from 0, keeps a real 0 green and makes "unknown" neutral. The red 0% next to it already says "look here".
+- **The descriptions** got one plain line for this case: *"no scan data": the scanner sends nothing right now. That does not mean clean. It means unknown. Check Scan coverage.*
+
+**3. A stale 1.** After the first fix, the two panels showed 1 and 1 instead of "no scan data". A stat panel normally asks for the whole time range (here the last hour) and shows the last value that is not empty (`lastNotNull`). The scanner had stopped, but at 19:05 the value had still been 1, so the panel reached back and showed that. Before the first fix, `or vector(0)` had filled the gap with fresh zeros, so this was hidden. `instant=True` (see `number()` above) asks for one value, **now**, like the table always did. Now an empty answer really is empty:
+
+![Grafana with the scanner stopped, after the fixes: Scan coverage 0% in red, "no scan data" twice in a neutral color, the table empty](evidence/61-no-scan-data.png)
+
+**4. 0% does not say why.** Red 0% says **that** something is wrong, but whoever sees it asks at once: was nothing scanned at all? Is the scanner broken? Did a scan fail? When does it normally scan? A second row answers those questions, and none of its panels needs the scanner to be alive:
+
+```python
+board.row("Scanner health (scans at each deploy and every 24 h)")
+board.add(number(
+    "Scanner",
+    "On: the scanner is switched on and ready to start scans. It does not mean a scan is running "
+    "right now: each scan is a short job of about 30 seconds. This comes from Kubernetes, so it "
+    "still answers when the scanner is gone.\n\n"
+    "How often scans run: each new image within a few minutes of starting (2 scans at a time, about "
+    "5 minutes between rounds), and every image again every 24 hours, with that day's list of known "
+    "vulnerabilities.\n\n"
+    "When each image was last scanned (the AGE column): kubectl get vulnerabilityreports -n restauranty\n\n"
+    "The settings (SCANNER_REPORT_TTL = rescan interval, CONCURRENT_SCAN_JOBS_LIMIT = scans at a "
+    "time): kubectl get configmap trivy-operator-config -n trivy-system -o yaml | grep -iE \"ttl|concurrent\"",
+    [('kube_deployment_status_replicas_available{namespace="trivy-system", deployment="trivy-operator"}', "")],
+    colors(("red", None), ("green", 1)), no_value="unknown", instant=True,
+    mappings=[{"type": "value", "options": {"0": {"text": "off", "color": "red", "index": 0}}},
+              {"type": "range", "options": {"from": 1, "to": 100,
+                                            "result": {"text": "on", "color": "green", "index": 1}}}]), 4, 8)
+board.add(number(
+    "Failed scan jobs",
+    "Scan jobs that failed, for example because their node had no CPU left. Failed jobs are deleted "
+    "after 10 minutes, so this counts recent failures only. The reason: "
+    "kubectl get events -n trivy-system --sort-by=.lastTimestamp",
+    [('sum(kube_job_status_failed{namespace="trivy-system"}) or vector(0)', "")],
+    colors(("green", None), ("red", 1)), instant=True), 4, 8)
+NOT_SCANNED_NAMES = ('label_replace(label_replace(' + NOT_SCANNED + ', "workload", "$1", "replicaset", "(.+)"),'
+                     ' "workload", "$1", "statefulset", "(.+)")')
+board.add({
+    "type": "table", "title": "Running without a scan",
+    ...
+    "targets": [{"refId": "A", "datasource": PROMETHEUS, "instant": True, "format": "table",
+                 "expr": NOT_SCANNED_NAMES}],
+    "transformations": [{"id": "organize", "options": {"indexByName": {"workload": 0}, "excludeByName": {...}}}],
+    "fieldConfig": {"defaults": {"noValue": "none: every running image has a scan result"}, "overrides": []},
+}, 16, 8)
+```
+
+- **The row title carries the scan frequency**, "at each deploy and every 24 h", because a row has no hover text and the title is the one place everyone reads. The 24 hours is the operator's `OPERATOR_SCANNER_REPORT_TTL: 24h`: a report expires after a day, and the image is scanned again with that day's list of known vulnerabilities.
+- **"Scanner"** reads `kube_deployment_status_replicas_available` from kube-state-metrics: the number of ready pods of the `trivy-operator` deployment. It comes from Kubernetes, **not** from the scanner, so it still answers when the scanner is gone.
+- **`mappings`** show the number as a word: 0 becomes "off" (red), 1 or more becomes "on" (green). "On" was chosen over "running" or "healthy": "running" could be read as "a scan is running now", and "healthy" claims more than one number can know. The whole row together says "healthy".
+- **The hover text of "Scanner"** answers the rest: what "on" means, how often scans run, and two commands, both tried on this cluster, for when each image was last scanned and for the settings.
+- **"Failed scan jobs"** is the dashboard twin of rule 2. `or vector(0)` is right here: with no failed job, there **is** nothing to count, and 0 is the true answer, not a guess.
+- **"Running without a scan"** lists the names: the same comparison as rule 1, so panel and alert never disagree. `label_replace` twice copies the `replicaset` or the `statefulset` label into one column, `workload`; the `organize` step hides every other column. Empty shows "none: every running image has a scan result".
+- **Sizes:** the row is 8 high, like the row above, so the list fits all five names without scrolling.
+
+**Two panels that were tried and dropped.** "Scans running now" (active scan jobs) almost always showed 0, and a 30-second scan can fall between two readings of kube-state-metrics, so 0 proved nothing. "Scanner last reported" (how long since Prometheus last received the scanner's numbers) said "alive" a second time, and was easy to misread as "scanned 2 minutes ago", while scans run only at each deploy and once a day. Every panel costs attention, and one that repeats another makes people wonder why they differ.
+
+**The row, tested with a short stop** of about 6 minutes. Healthy:
+
+![Grafana, healthy: Scan coverage 100%, CRITICAL 1, HIGH 1, the per-image table; below, Scanner health: on, 0 failed scan jobs, "none: every running image has a scan result"](evidence/61-dashboard-healthy.png)
+
+Less than 5 minutes after the stop, Prometheus still used the last values: row 1 still looked healthy, and only "Scanner", which comes from Kubernetes, already said "off". That is the reason it must not depend on the scanner:
+
+![Grafana, just after the stop: Scanner off in red, while the row above still shows 100%, 1, 1 and the full table](evidence/61-dashboard-just-stopped.png)
+
+After about 6 minutes, every panel told the same story: nothing known, the scanner off, no job failed (so not a scan error), and these five workloads affected (the fifth, `mongodb`, is in `61-dashboard-scanner-off-scrolled.png`):
+
+![Grafana, scanner stopped: Scan coverage 0%, "no scan data" twice, the table empty; Scanner off, 0 failed scan jobs, the list of workloads without a scan](evidence/61-dashboard-scanner-off.png)
+
+After `--replicas=1`, the dashboard was healthy again within a few minutes (`61-dashboard-back.png`).
+
+**5. A Slack message that repeated itself.** The 19:44 alert (above) printed the same description five times, once per workload, and all on one line. Both came from the message template in `kube-prometheus-stack-values.yaml`. It had always been wrong, but every earlier alert came alone, so it never showed. The new template:
+
+```yaml
+text: |-
+  {{ range .Alerts }}• *{{ .Annotations.summary }}*
+  {{ end }}{{ if .CommonAnnotations.description }}{{ .CommonAnnotations.description }}{{ else }}{{ range .Alerts }}{{ .Annotations.description }}
+  {{ end }}{{ end }}
+  <https://grafana.aks.springlaughing.dev/d/restauranty|Open the dashboard>
+```
+
+- **`|-` instead of `>-`.** In YAML, `>-` folds a block into one line, so every line break was lost. `|-` keeps the lines as written; the `-` only drops the last line break.
+- **`{{ range .Alerts }}• *{{ .Annotations.summary }}*`**: one bullet line per alert in the group, in bold (Slack's `*…*`).
+- **`.CommonAnnotations.description`**: Alertmanager collects the annotations that **every** alert in the group shares. The five "not scanned" alerts share one description, so it is printed once.
+- **`{{ else }}{{ range .Alerts }}…`**: if a group ever mixes different descriptions, `CommonAnnotations.description` is empty, and each alert's own description is printed instead. Nothing is lost; it is only not repeated.
+
+The template is part of Alertmanager's configuration, which the Helm chart manages, so it was applied with a Helm upgrade of the same chart version: `helm upgrade kps prometheus-community/kube-prometheus-stack --version 93.2.0 --namespace monitoring -f k8s/monitoring/kube-prometheus-stack-values.yaml`. To test a group without breaking anything, two fake alerts with one shared description were sent straight to Alertmanager's API (as in entry 59), set to end by themselves after 2 minutes:
+
+![Slack, 19:54: RestaurantyTemplateTest with two bullet lines, "one: test line" and "two: test line", and "Shared description, printed once." once](evidence/61-template-fixed-slack.png)
+
+At 19:59 the test said "resolved" in the same format, and the real CRITICAL alert came back, with the new texts from fix 1:
+
+![Slack, 19:59: RestaurantyTemplateTest resolved; RestaurantyCriticalVulnerability firing: "library/mongo: the running image has 1 CRITICAL", with the Fix and the "If this says resolved" lines](evidence/61-critical-back-slack.png)
+
+**The lesson of the five.** None of these problems showed in daily use; every panel and message **looked** right. They only appeared because the scanner was stopped on purpose, and because five things failed at once. Breaking a system on purpose finds what reviewing it does not.
+
+##### Not built
+
+- **The heartbeat for the alerting itself** (`Watchdog` to an outside service), see above.
+- **Removing the cause.** The new checks report a missing scan; they do not prevent one. Ways to prevent it:
+  - a strict spread rule for the app pods (`DoNotSchedule`, entry 47);
+  - a separate small node pool for AKS's own system pods, so the app's nodes keep their room;
+  - or the cluster autoscaler, which adds a node when pods do not fit.
+
+  A scan mode that pulls the image from the registry is not pinned to a node, but it needs its own registry login, which is why `rootfs` was chosen (entry 64).
+- **A longer `scanJobTTL`** (for example an hour), so a failed job's logs can still be read when the alert arrives. It needs a Helm upgrade of the operator.
+- **The "why" on the dashboard.** The scanner's logs and the Kubernetes events of `trivy-system` are not collected: Alloy reads only the namespaces it was given (entry 51). So the dashboard says what, and where; the alert texts give the command for why.
+- **The same stale-value risk elsewhere.** "MongoDB connected" also shows the last value over the time range. If the backends stopped sending metrics, it would keep showing "connected" for up to an hour. Outside this issue, but the same fix (`instant=True`) would apply.
+
+#### Reading a finding: what it is, and who fixes it
+
+The table above only counts. Each row is a full report object in the cluster, with every finding in it. Saved and filtered to CRITICAL and HIGH:
+
+```
+$ kubectl get vulnerabilityreport statefulset-mongodb-mongodb -n restauranty -o json > mongodb-report.json
+$ jq -r '.report.vulnerabilities[]
+    | select(.severity=="CRITICAL" or .severity=="HIGH")
+    | [.severity, .vulnerabilityID, .resource, .installedVersion, .fixedVersion, .title] | @tsv' \
+    mongodb-report.json | column -t -s $'\t'
+HIGH      CVE-2026-109518      apt               2.8.3    2.8.4ubuntu0.1                apt: Remote code execution via hard link reuse during package download retries
+HIGH      CVE-2026-109518      libapt-pkg6.0t64  2.8.3    2.8.4ubuntu0.1                apt: Remote code execution via hard link reuse during package download retries
+HIGH      CVE-2026-59869       js-yaml           3.13.1   3.15.0, 4.3.0                 js-yaml: Denial of Service via crafted YAML documents
+HIGH      CVE-2026-84375       js-yaml           3.13.1   4.3.2, 3.15.2                 js-yaml: Denial of Service vulnerability in YAML parsing
+HIGH      GHSA-5p4m-2wfm-xmqj  js-yaml           3.13.1   4.3.1, 3.15.1                 JS-YAML: Quadratic CPU consumption in !!omap resolution
+CRITICAL  CVE-2025-68121       stdlib            v1.24.6  1.24.13, 1.25.7, 1.26.0-rc.3  crypto/tls: Incorrect certificate validation during TLS session resumption
+HIGH      CVE-2026-32281       stdlib            v1.24.6  1.25.9, 1.26.2                crypto/x509: Denial of Service via inefficient certificate chain validation
+HIGH      CVE-2026-32283       stdlib            v1.24.6  1.25.9, 1.26.2                crypto/tls: Denial of Service via multiple TLS 1.3 key update messages
+HIGH      CVE-2026-33811       stdlib            v1.24.6  1.25.10, 1.26.3               net: Denial of Service via long CNAME response in LookupCNAME
+HIGH      CVE-2026-33814       stdlib            v1.24.6  1.25.10, 1.26.3               net/http/internal/http2: Denial of Service via malformed SETTINGS_MAX_FRAME_SIZE frame
+HIGH      CVE-2026-39820       stdlib            v1.24.6  1.25.10, 1.26.3               net/mail: Denial of Service via crafted email inputs
+HIGH      CVE-2026-39836       stdlib            v1.24.6  1.25.10, 1.26.3               net: Denial of Service via NUL byte in Dial and LookupPort on Windows
+```
+
+**How to read one line:**
+
+- **`vulnerabilityID`** is the public name of the hole (a CVE, or a GitHub advisory, GHSA). Searching for it explains what the hole is.
+- **`resource`** says **which part** of the image has it: an operating system package (`apt`), an npm package (`js-yaml`), or the standard library built into a Go program (`stdlib`).
+- **`installedVersion`** is what the image has now.
+- **`fixedVersion`** is the first version without the hole. Empty would mean there is no fix yet.
+
+**Who fixes it depends on who owns the broken part:**
+
+- **An operating system package** (Alpine `apk`, Debian or Ubuntu `apt`): rebuild on a newer base image.
+- **An npm package in the project's own code:** update it in `package-lock.json`, then rebuild.
+- **Something inside someone else's image,** like MongoDB's: it cannot be patched here. The fix is a newer official image that is built with the fixed version: check it first (`trivy image mongo:<newer tag>`), then deploy it. If no fixed image exists yet, the finding is accepted in writing, which is what `SECURITY.md` does.
+
+**The MongoDB findings, one by one.** All three groups are inside the official image, so all three have the same fix: a newer MongoDB image. The question for each one is whether it can be reached in the way this project runs MongoDB:
+
+- **`apt`, remote code execution (HIGH, two package names for one CVE).** `apt` is Ubuntu's package installer. It runs while an image is built, never in a running database. Not reachable here.
+- **`js-yaml`, denial of service (HIGH ×3).** An npm library, most likely inside `mongosh`, MongoDB's shell. It only matters when it reads YAML from an attacker; nothing here feeds YAML to it. Not reachable here.
+- **Go `stdlib` 1.24.6 (1 CRITICAL, 6 HIGH).** Go's standard library, built into the Go programs in the image (most likely MongoDB's backup tools, such as `mongodump`). The report does not say which file (entry 64). The CRITICAL is a TLS bug, but those tools are not used, and the app's connection to MongoDB has no TLS inside the cluster (an accepted gap in `SECURITY.md`). Not reachable here.
+
+"Not reachable" is a judgement, not a fix. A severity score says how bad a hole **can** be; whether it matters depends on whether an attacker can reach the broken code in this setup. Writing that reasoning down per finding is what teams do with a **VEX** document (below).
+
+**How teams usually handle findings.** Teams do not keep reports as files. The results flow into a system with **owners and deadlines**:
+
+- **A central view.** GitHub's Security tab (the nightly scan already uploads there, entry 43), Microsoft Defender for Containers in Azure, or a tool like DefectDojo or Dependency-Track. Dependency-Track reads SBOMs, which the pipeline already makes.
+- **Deadlines by severity.** For example: CRITICAL fixed within 7 days, HIGH within 30. Each finding becomes a ticket with an owner.
+- **Exceptions written down, with an end date.** For example "not fixable yet, check again on 1 December", in a `.trivyignore` file with a comment, or in a VEX document. VEX ("Vulnerability Exploitability eXchange") is a standard format for saying "this CVE is in the image, but it cannot be reached here, and this is why". Scanners can read it and stop reporting that one finding.
+- **Snapshots only for audits.** A monthly export, like the report saved above, shows an auditor what was known on which day.
 
 ---
 

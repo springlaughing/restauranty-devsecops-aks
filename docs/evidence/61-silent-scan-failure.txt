@@ -1,0 +1,123 @@
+# Issue #61, build log entry 66: three images without a scan.
+# 14 November 2026, after `az aks start`. Shortened only where marked (...).
+
+## 1. Only two of five images had a vulnerability report
+
+$ kubectl get vulnerabilityreports -n restauranty -o wide
+NAME                                REPOSITORY      TAG                                        SCANNER   AGE     CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+replicaset-items-5fc46c76cb-items   items           d991343e988b92409fe781ae89e1a4807682d09c   Trivy     5m38s   0          0      0        0     1
+statefulset-mongodb-mongodb         library/mongo   8.0.34                                     Trivy     23h     1          11     60       6     83
+
+$ kubectl get jobs -n trivy-system
+NAME                                  STATUS     COMPLETIONS   DURATION   AGE
+scan-vulnerabilityreport-6bc8b847d9   Complete   1/1           33s        9m26s
+scan-vulnerabilityreport-6dbf59fc95   Failed     0/1           9m27s      9m27s
+
+## 2. The failed job was already gone (scanJobTTL: 10m), with its logs
+
+$ kubectl describe job scan-vulnerabilityreport-6dbf59fc95 -n trivy-system
+Error from server (NotFound): jobs.batch "scan-vulnerabilityreport-6dbf59fc95" not found
+
+## 3. After restarting the operator: two more scans failed, one after 1 second
+
+$ kubectl rollout restart deployment trivy-operator -n trivy-system
+$ kubectl get jobs -n trivy-system -w
+NAME                                  STATUS          COMPLETIONS   DURATION   AGE
+scan-vulnerabilityreport-77b799b5df   Failed          0/1           55s        55s
+scan-vulnerabilityreport-7895855c66   Running         0/1                      0s
+scan-vulnerabilityreport-7895855c66   FailureTarget   0/1           1s         1s
+scan-vulnerabilityreport-7895855c66   Failed          0/1           1s         1s
+
+## 4. The events outlive the jobs, and name the cause
+
+$ kubectl get events -n trivy-system --sort-by=.lastTimestamp
+...
+Warning   OutOfcpu               pod/scan-vulnerabilityreport-77b799b5df-tc2p9   Node didn't have enough resource: cpu, requested: 100, used: 1874, capacity: 1900
+Normal    SuccessfulCreate       job/scan-vulnerabilityreport-77b799b5df         Created pod: scan-vulnerabilityreport-77b799b5df-tc2p9
+Warning   BackoffLimitExceeded   job/scan-vulnerabilityreport-77b799b5df         Job has reached the specified backoff limit
+...
+Warning   OutOfcpu               pod/scan-vulnerabilityreport-7895855c66-pqwz4   Node didn't have enough resource: cpu, requested: 100, used: 1874, capacity: 1900
+Normal    SuccessfulCreate       job/scan-vulnerabilityreport-7895855c66         Created pod: scan-vulnerabilityreport-7895855c66-pqwz4
+Warning   BackoffLimitExceeded   job/scan-vulnerabilityreport-7895855c66         Job has reached the specified backoff limit
+
+## 5. One node full, two almost empty (CPU requests, then limits)
+
+$ kubectl describe nodes | grep -E "^Name:|^  cpu "
+Name:               aks-system-11635412-vmss00000c
+  cpu                1874m (98%)   9994m (526%)
+Name:               aks-system-11635412-vmss00000d
+  cpu                460m (24%)    540m (28%)
+Name:               aks-system-11635412-vmss00000e
+  cpu                310m (16%)    540m (28%)
+
+## 6. What filled node 0c: CPU requests per pod (after the app restart)
+
+$ kubectl get pods -A --field-selector spec.nodeName=aks-system-11635412-vmss00000c \
+    -o custom-columns=NS:.metadata.namespace,POD:.metadata.name,CPU:.spec.containers[*].resources.requests.cpu
+NS                 POD                                                     CPU
+cert-manager       cert-manager-6784c9f6fb-57rfk                           <none>
+cert-manager       cert-manager-cainjector-7c84589448-2llfr                <none>
+cert-manager       cert-manager-webhook-7949787cd9-7fkgn                   <none>
+external-secrets   external-secrets-5b577d47f5-qwf95                       <none>
+external-secrets   external-secrets-cert-controller-56c6d7984f-bkzz8       <none>
+external-secrets   external-secrets-webhook-85b48984b9-g6mk8               <none>
+gateway            restauranty-nginx-696775c845-wbtj6                      <none>
+kube-system        azure-cns-fwzbs                                         40m
+kube-system        azure-ip-masq-agent-khndj                               50m
+kube-system        azure-wi-webhook-controller-manager-57ccd5fdf-5mtjc     100m
+kube-system        azure-wi-webhook-controller-manager-57ccd5fdf-kdfs2     100m
+kube-system        cilium-bhggs                                            <none>
+kube-system        cloud-node-manager-rkwcn                                50m
+kube-system        coredns-5bf45f87d-nxsjw                                 100m
+kube-system        coredns-5bf45f87d-wcrvs                                 100m
+kube-system        coredns-autoscaler-7467554f77-slv2n                     20m
+kube-system        csi-azuredisk-node-vtmz7                                10m,10m,10m
+kube-system        csi-azurefile-node-w4n8p                                10m,10m,10m,10m
+kube-system        konnectivity-agent-56449f6bbc-dbwsl                     20m
+kube-system        konnectivity-agent-56449f6bbc-t5gsc                     20m
+kube-system        konnectivity-agent-autoscaler-5b658f6697-l9tw9          20m
+kube-system        metrics-server-866c8cb87d-4lcx9                         5m,152m
+kube-system        metrics-server-866c8cb87d-ws8g4                         5m,152m
+monitoring         alertmanager-kps-kube-prometheus-stack-alertmanager-0   10m
+monitoring         alloy-58f679d77f-qnh9r                                  50m,10m
+monitoring         grafana-84b59ddddd-2ng8d                                50m
+monitoring         kps-kube-prometheus-stack-operator-587f6dbb8f-xxstg     50m
+monitoring         kps-kube-state-metrics-6bf4956584-k5729                 10m
+monitoring         loki-0                                                  100m
+monitoring         prometheus-kps-kube-prometheus-stack-prometheus-0       200m
+nginx-gateway      nginx-gateway-nginx-gateway-fabric-6ccd569b75-mlzt5     <none>
+reloader           reloader-reloader-df6cd89c-sxwlg                        <none>
+restauranty        items-d8ddcd9d8-zdzf9                                   50m
+trivy-system       scan-vulnerabilityreport-7895855c66-pqwz4               100m
+
+## 7. The fix: app pods restarted (new pods avoid the full node), the last
+##    pod on 0c moved, the operator restarted
+
+$ kubectl rollout restart deployment -n restauranty
+$ kubectl describe nodes | grep -E "^Name:|^  cpu "
+Name:               aks-system-11635412-vmss00000c
+  cpu                1884m (99%)   9994m (526%)
+Name:               aks-system-11635412-vmss00000d
+  cpu                580m (30%)    540m (28%)
+Name:               aks-system-11635412-vmss00000e
+  cpu                480m (25%)   540m (28%)
+
+$ kubectl delete pod items-d8ddcd9d8-zdzf9 -n restauranty
+$ kubectl get pods -n restauranty -o wide | grep items
+items-d8ddcd9d8-m7pzs        1/1     Running   0          31s     192.168.1.87    aks-system-11635412-vmss00000d   <none>           <none>
+items-d8ddcd9d8-s7s6j        1/1     Running   0          6m34s   192.168.0.35    aks-system-11635412-vmss00000e   <none>           <none>
+
+$ kubectl rollout restart deployment trivy-operator -n trivy-system
+$ kubectl get jobs -n trivy-system -w
+scan-vulnerabilityreport-5f9db87bc8   Complete   1/1   25s   25s
+scan-vulnerabilityreport-7576974c6b   Complete   1/1   24s   24s
+
+## 8. All five images scanned
+
+$ kubectl get vulnerabilityreports -n restauranty -o wide
+NAME                                        REPOSITORY      TAG                                        SCANNER   AGE   CRITICAL   HIGH   MEDIUM   LOW   UNKNOWN
+replicaset-auth-f57685f75-auth              auth            d991343e988b92409fe781ae89e1a4807682d09c   Trivy     26m   0          0      0        0     1
+replicaset-client-5f9948d66d-client         client          d991343e988b92409fe781ae89e1a4807682d09c   Trivy     17m   0          0      0        0     0
+replicaset-discounts-76fb7d475d-discounts   discounts       d991343e988b92409fe781ae89e1a4807682d09c   Trivy     27m   0          0      0        0     1
+replicaset-items-d8ddcd9d8-items            items           d991343e988b92409fe781ae89e1a4807682d09c   Trivy     16m   0          0      0        0     1
+statefulset-mongodb-mongodb                 library/mongo   8.0.34                                     Trivy     23h   1          11     60       6     83

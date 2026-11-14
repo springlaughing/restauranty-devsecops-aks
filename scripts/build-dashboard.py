@@ -74,15 +74,28 @@ def graph(title, description, source, queries, unit="short", no_value=None):
     }
 
 
-def number(title, description, queries, steps=None):
-    """A stat panel: the latest value, big. queries: list of (query, legend)."""
+def number(title, description, queries, steps=None, unit=None, no_value=None, instant=False, mappings=None):
+    """A stat panel: the latest value, big. queries: list of (query, legend).
+    no_value: text to show when the query finds nothing (instead of "No data").
+    instant: ask for the value at this moment only. Without it, the panel
+    queries the whole time range and shows the last value that is not empty,
+    which can be an hour old when the data has stopped (build log, entry 66).
+    mappings: Grafana value mappings, to show a word instead of a number."""
     steps = steps or [{"color": "text", "value": None}]
+    defaults = {"thresholds": {"mode": "absolute", "steps": steps}}
+    if unit:
+        defaults.update({"unit": unit, "decimals": 0})
+    if no_value is not None:
+        defaults["noValue"] = no_value
+    if mappings:
+        defaults["mappings"] = mappings
     return {
         "type": "stat", "title": title, "description": description, "datasource": PROMETHEUS,
-        "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": steps}}, "overrides": []},
+        "fieldConfig": {"defaults": defaults, "overrides": []},
         "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
                     "colorMode": "value", "graphMode": "none", "textMode": "auto"},
-        "targets": [{"refId": chr(65 + i), "expr": q, "legendFormat": legend, "datasource": PROMETHEUS}
+        "targets": [{"refId": chr(65 + i), "expr": q, "legendFormat": legend, "datasource": PROMETHEUS,
+                     **({"instant": True, "range": False} if instant else {})}
                     for i, (q, legend) in enumerate(queries)],
     }
 
@@ -225,23 +238,58 @@ board.add(number(
 # number per running image and severity. "max by" because both copies of a
 # backend run the same image and share one report.
 TRIVY = 'trivy_image_vulnerabilities{namespace="restauranty"%s}'
+
+# Scan coverage (#61, build log entry 66): what runs, against what has a
+# report. The same comparison as the alert RestaurantyImageNotScanned in
+# k8s/monitoring/alert-rules.yaml: a workload with ready pods and no Trivy
+# series of its own. A clean report still gives a series (value 0), so
+# "clean" and "never scanned" differ.
+RUNNING = ('(count(kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0) or vector(0))'
+           ' + (count(kube_statefulset_status_replicas_ready{namespace="restauranty"} > 0) or vector(0))')
+NOT_SCANNED = (
+    '((kube_replicaset_status_ready_replicas{namespace="restauranty"} > 0)'
+    ' unless on (namespace, replicaset) label_replace('
+    + TRIVY % ', resource_kind="ReplicaSet", severity="Critical"'
+    + ', "replicaset", "$1", "resource_name", "(.*)"))'
+    ' or ((kube_statefulset_status_replicas_ready{namespace="restauranty"} > 0)'
+    ' unless on (namespace, statefulset) label_replace('
+    + TRIVY % ', resource_kind="StatefulSet", severity="Critical"'
+    + ', "statefulset", "$1", "resource_name", "(.*)"))'
+)
 board.row("Vulnerabilities in running images (Trivy Operator)")
 board.add(number(
+    "Scan coverage",
+    "How many of the running images have a scan result. Below 100%, some images run without a scan. "
+    "0% means the scanner sends nothing at all. After a deploy, a new image needs a few minutes. "
+    "Alerts: RestaurantyImageNotScanned, RestaurantyScanJobFailed.",
+    [(f'100 * (({RUNNING}) - (count({NOT_SCANNED}) or vector(0))) / ({RUNNING})', "")],
+    colors(("red", None), ("green", 100)), unit="percent", instant=True), 4, 8)
+# No "or vector(0)" in the two panels below (build log, entry 66): with the
+# scanner stopped, that fallback turned "nothing is known" into a green 0, a
+# false all-clear. A clean image still has a series with the value 0, so the
+# sum is a real 0 when scans exist, and "no scan data" when none do.
+# Colors: neutral below 0, so "no scan data" is not painted green (Grafana
+# colors the no-value text with the lowest step); green from 0.
+board.add(number(
     "CRITICAL in running images",
-    "Known vulnerabilities rated CRITICAL, in all images running in restauranty. The pipeline blocks "
-    "CRITICAL before a deploy; this catches CVEs published after it, and images the pipeline never "
-    "builds (MongoDB). Alert: RestaurantyCriticalVulnerability.",
-    [('sum(max by (image_repository) (' + TRIVY % ', severity="Critical"' + ')) or vector(0)', "")],
-    colors(("green", None), ("red", 1))), 6, 8)
+    "CRITICAL vulnerabilities in the images that run now. The pipeline already blocks CRITICAL before "
+    "a deploy. This panel catches the rest: new CVEs found after a deploy, and MongoDB, which the "
+    "pipeline does not build. Alert: RestaurantyCriticalVulnerability."
+    "\n\n\"no scan data\": the scanner sends nothing right now. That does not mean clean. It means unknown. Check Scan coverage.",
+    [('sum(max by (image_repository) (' + TRIVY % ', severity="Critical"' + '))', "")],
+    colors(("text", None), ("green", 0), ("red", 1)), no_value="no scan data", instant=True), 4, 8)
 board.add(number(
     "Images with HIGH",
-    "How many running images have at least one HIGH vulnerability.",
-    [('count(max by (image_repository) (' + TRIVY % ', severity="High"' + ') > 0) or vector(0)', "")],
-    colors(("green", None), ("orange", 1))), 6, 8)
+    "How many running images have at least one HIGH vulnerability."
+    "\n\n\"no scan data\": the scanner sends nothing right now. That does not mean clean. It means unknown. Check Scan coverage.",
+    [('count(max by (image_repository) (' + TRIVY % ', severity="High"' + ') > 0)'
+      ' or (0 * count(max by (image_repository) (' + TRIVY % ', severity="High"' + ')))', "")],
+    colors(("text", None), ("green", 0), ("orange", 1)), no_value="no scan data", instant=True), 4, 8)
 board.add({
     "type": "table", "title": "Per image",
     "description": "Known vulnerabilities per running image, by severity. Details per CVE: "
-                   "kubectl describe vulnerabilityreport -n restauranty <name>",
+                   "kubectl describe vulnerabilityreport -n restauranty <name>\n\n"
+                   "Empty: the scanner sends nothing right now, see Scan coverage.",
     "datasource": PROMETHEUS,
     "targets": [
         {"refId": s_, "datasource": PROMETHEUS, "instant": True, "format": "table", "legendFormat": "{{image_repository}}",
@@ -257,6 +305,55 @@ board.add({
     ],
     "fieldConfig": {"defaults": {}, "overrides": []}, "options": {"showHeader": True},
 }, 12, 8)
+
+# ---------------------------------------------------------- scanner health
+# Scan coverage says THAT something is wrong; these three say WHAT (#61, build
+# log entry 66). None of them needs the scanner to be alive: they come from
+# kube-state-metrics, and from the comparison behind the alert.
+board.row("Scanner health (scans at each deploy and every 24 h)")
+board.add(number(
+    "Scanner",
+    "On: the scanner is switched on and ready to start scans. It does not mean a scan is running "
+    "right now: each scan is a short job of about 30 seconds. This comes from Kubernetes, so it "
+    "still answers when the scanner is gone.\n\n"
+    "How often scans run: each new image within a few minutes of starting (2 scans at a time, about "
+    "5 minutes between rounds), and every image again every 24 hours, with that day's list of known "
+    "vulnerabilities.\n\n"
+    "When each image was last scanned (the AGE column): kubectl get vulnerabilityreports -n restauranty\n\n"
+    "The settings (SCANNER_REPORT_TTL = rescan interval, CONCURRENT_SCAN_JOBS_LIMIT = scans at a "
+    "time): kubectl get configmap trivy-operator-config -n trivy-system -o yaml | grep -iE \"ttl|concurrent\"",
+    [('kube_deployment_status_replicas_available{namespace="trivy-system", deployment="trivy-operator"}', "")],
+    colors(("red", None), ("green", 1)), no_value="unknown", instant=True,
+    mappings=[{"type": "value", "options": {"0": {"text": "off", "color": "red", "index": 0}}},
+              {"type": "range", "options": {"from": 1, "to": 100,
+                                            "result": {"text": "on", "color": "green", "index": 1}}}]), 4, 8)
+board.add(number(
+    "Failed scan jobs",
+    "Scan jobs that failed, for example because their node had no CPU left. Failed jobs are deleted "
+    "after 10 minutes, so this counts recent failures only. The reason: "
+    "kubectl get events -n trivy-system --sort-by=.lastTimestamp",
+    [('sum(kube_job_status_failed{namespace="trivy-system"}) or vector(0)', "")],
+    colors(("green", None), ("red", 1)), instant=True), 4, 8)
+# One name column for both kinds of workload: label_replace copies the
+# replicaset or the statefulset label into "workload".
+NOT_SCANNED_NAMES = ('label_replace(label_replace(' + NOT_SCANNED + ', "workload", "$1", "replicaset", "(.+)"),'
+                     ' "workload", "$1", "statefulset", "(.+)")')
+board.add({
+    "type": "table", "title": "Running without a scan",
+    "description": "Workloads that run now and have no scan result: the same list as the alert "
+                   "RestaurantyImageNotScanned, which fires when one stays here for 30 minutes. "
+                   "Empty is good.",
+    "datasource": PROMETHEUS,
+    "targets": [{"refId": "A", "datasource": PROMETHEUS, "instant": True, "format": "table",
+                 "expr": NOT_SCANNED_NAMES}],
+    "transformations": [{"id": "organize", "options": {
+        "indexByName": {"workload": 0},
+        "excludeByName": {"Time": True, "Value": True, "__name__": True, "container": True, "endpoint": True,
+                          "instance": True, "job": True, "namespace": True, "pod": True, "service": True,
+                          "replicaset": True, "statefulset": True, "uid": True}}}],
+    "fieldConfig": {"defaults": {"noValue": "none: every running image has a scan result"}, "overrides": []},
+    "options": {"showHeader": True},
+}, 16, 8)
 
 # ---------------------------------------------------------------- write
 dashboard = {

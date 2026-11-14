@@ -92,10 +92,14 @@ alertmanager:
             send_resolved: true          # also say when it is over
             title: '{{ if eq .Status "firing" }}:rotating_light:{{ else }}:white_check_mark:{{ end }} {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
             # Counts and services only: no IP addresses in Slack (build log, entry 56).
-            text: >-
-              {{ range .Alerts }}*{{ .Annotations.summary }}*
-              {{ .Annotations.description }}
-              {{ end }}
+            # One line per alert in the group, then the description ONCE when
+            # all alerts share it (CommonAnnotations), else each one's own.
+            # "|-" keeps the line breaks; ">-" joined everything into one line,
+            # and a group of 5 printed the same description 5 times (entry 66).
+            text: |-
+              {{ range .Alerts }}• *{{ .Annotations.summary }}*
+              {{ end }}{{ if .CommonAnnotations.description }}{{ .CommonAnnotations.description }}{{ else }}{{ range .Alerts }}{{ .Annotations.description }}
+              {{ end }}{{ end }}
               <https://grafana.aks.springlaughing.dev/d/restauranty|Open the dashboard>
 
 # kube-state-metrics turns the state of Kubernetes objects into metrics
