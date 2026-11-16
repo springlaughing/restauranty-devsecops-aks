@@ -2,7 +2,7 @@
 
 **What this is.** My final project for the Ironhack DevOps bootcamp. I received Restauranty, a restaurant back office (a React website and three Node.js services with MongoDB). I tested its security first, then ran it on Azure Kubernetes Service (AKS) with a security layer around it: fixes in the code, rules at the edge and inside the cluster, secrets in a vault, security checks in the pipeline, and alerts.
 
-**Presentation:** [Restauranty: Assume Breach (PDF)](docs/Restauranty%20Assume%20Breach.pdf). Slides licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+**Presentation:** [Restauranty: Assume Breach (PDF, 10 MB, download)](https://github.com/springlaughing/restauranty-devsecops-aks/raw/main/docs/Restauranty%20Assume%20Breach.pdf). Slides licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 **Live:** `restauranty.aks.springlaughing.dev` (offline since the bootcamp ended).
 
